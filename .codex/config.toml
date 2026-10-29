@@ -1,0 +1,15 @@
+# Optional hints for compatible host runtimes. The server never runs inference.
+model = "gpt-6-astra"
+model_reasoning_effort = "max"
+service_tier = "default"
+forced_login_method = "chatgpt"
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 32
+default_subagent_model = "gpt-6-astra"
+default_subagent_reasoning_effort = "max"
+
+[agents.fast_worker]
+description = "Independent worker: request full reasoning effort and fast processing if supported."
+config_file = "agents/fast-worker.toml"

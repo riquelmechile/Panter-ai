@@ -1,0 +1,19 @@
+FROM node:22-alpine AS build
+WORKDIR /app
+COPY package.json ./
+RUN npm install --no-audit --no-fund
+COPY tsconfig*.json ./
+COPY src ./src
+RUN npm run build
+
+FROM node:22-alpine
+WORKDIR /app
+COPY package.json ./
+RUN npm install --omit=dev --no-audit --no-fund \
+    && mkdir -p /data && chown -R node:node /data
+COPY --from=build /app/dist ./dist
+ENV PANTER_PORT=8080 PANTER_BIND_HOST=0.0.0.0 PANTER_DATA_DIR=/data
+EXPOSE 8080
+VOLUME ["/data"]
+USER node
+CMD ["node", "dist/server.js"]

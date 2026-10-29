@@ -1,0 +1,79 @@
+# Panter-ai
+
+**An independent, open-source development control plane for AI hosts.**
+
+Panter-ai is an MIT-licensed remote Model Context Protocol (MCP) server. It stores engineering missions, requests host-native reasoning/parallelism, and coordinates durable tasks. **It does not call model inference APIs or require a developer's personal PC.** The connected AI application owns its model, inference, credentials and any native agent threads.
+
+## What works in v0.2.0
+
+- Remote `/mcp` endpoint built with the official MCP TypeScript SDK v2 (modern and legacy-era stateless requests).
+- Bearer-token protection, origin/hostname checks and `/health` endpoint.
+- Durable missions, optimistic revisions and a bounded lifecycle.
+- Durable single-tenant work queue, idempotent enqueue, claim leases and stale-claim fencing.
+- Explicit **REQUESTED** model/effort/parallelism policy and unverified host-reported evidence assessment.
+- Zero hidden model workers, zero model provider API calls.
+- Unit tests, CI and Docker starter (dependency lockfile pending due to unavailable npm registry during initial packaging).
+
+**New in v0.2.0:** A durable, original role-based agent workflow: deterministic inline/read-only/coordinated routing, scout/designer/builder/verifier/reviewer roles, exact specification handoffs, dependency-aware claims, lease renewal, blocking questions, scoped writer admission, frozen candidate SHA, independent verification/review and invalidation when the candidate changes. The AI host still launches and executes its own native agents; **Panter-ai does not start agent model runs or wake sleeping hosts**.
+
+**Not implemented yet:** OAuth 2.1 / multi-tenant actor authorization, native push wake adapters, signed doorbells, automatic external tool discovery, GitHub orchestration, remote shell isolation, cryptographic review receipts or production multi-replica persistence. Queuing a job does not wake a sleeping host. Do not deploy this alpha as an unrestricted public multi-user service.
+
+## Run locally
+
+Requires Node.js 22+.
+
+```sh
+npm install
+export PANTER_TOKEN="$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))")"
+npm start
+```
+
+The process listens on `127.0.0.1:8080/mcp` by default. Remote deployments require TLS at the reverse proxy, `PANTER_TOKEN`, `PANTER_BIND_HOST=0.0.0.0` and `PANTER_ALLOWED_HOSTS=your-public-hostname`. Browser clients additionally require explicitly allowed origins.
+
+The MCP endpoint expects `Authorization: Bearer <your-token>`. **Many cloud AI hosts only support OAuth for custom connectors; do not assume this initial bearer-only implementation can be added to every host UI.** OAuth is the next authentication milestone. The token is administrator-wide and therefore initial work target names are not identity credentials.
+
+## Tools
+
+| Tool | What it does |
+|---|---|
+| `panter_host_policy` | Return requested host posture and optionally assess host-reported claims |
+| `panter_mission_create` | Store goal and project |
+| `panter_mission_get` / `panter_mission_list` | Read mission state |
+| `panter_mission_transition` | Move through DRAFT → READY → RUNNING → VERIFYING → DONE with revision gates |
+| `panter_work_enqueue` | Queue a task with stable idempotency key |
+| `panter_work_claim` | Claim pending work with server-owned lease generation |
+| `panter_work_complete` / `panter_work_get` | Submit and read task result |
+
+## Coordinated agent workflow (v0.2.0)
+
+Start with `panter_flow_route` using explicit request signals. Small, understood, recoverable and low-risk changes remain inline. Unclear code paths get a read-only scout; independent implementation units can be delegated to bounded builders when writing is authorized. High-risk changes require independent verification. Multi-session work stores the exact specification for recovery.
+
+For coordinated work, the host calls `panter_mission_create`, `panter_flow_create`, then queues role-specific tasks using `panter_agent_enqueue`. A participating host calls `panter_agent_claim`, fetches `panter_agent_packet`, performs the work using **its own permitted tools/model**, and returns evidence through `panter_agent_complete`. A blocker can be relayed using `panter_agent_ask` and `panter_agent_answer`. The parent uses `panter_flow_dashboard` and `panter_agent_list` to recover state.
+
+A builder must declare its allowed edit surfaces. Two builders in the same logical workspace cannot reserve overlapping paths, including nested directories. This is a **planning-time conflict guard**, not an actual filesystem sandbox: the host must enforce tools and permissions. For verification, `panter_flow_candidate` freezes a commit SHA; a reviewer or verifier must report that exact SHA and cannot use the same reported worker ID as a completed builder. A later SHA change invalidates previous checks. `panter_flow_close` blocks incomplete high-risk verification or required review.
+
+This initial agent surface is **single tenant and statically token-protected**. Reported worker IDs, test results, diff hashes, Git commit SHAs and approvals are **not independently authenticated or remotely checked**. Do not use it for unattended, untrusted public contributors until identity, Git evidence and permissions are implemented.
+
+## Host capabilities
+
+The default ChatGPT profile **requests** `gpt-6-astra` with effort `max`, fallback `xhigh`, standard root processing and Fast worker processing when the host exposes it. It requests the maximum available native independent workers, with a **planning ceiling** of 32. The ceiling is **not** a claim that 32 workers actually exist. An alternate `host-native` profile leaves model identity with the connected host. Compatible repository-aware tools may also read the optional `.codex` configuration.
+
+Panter-ai never changes the host's model selection itself. Every invocation should distinguish `REQUESTED`, `HOST_REPORTED_UNVERIFIED` and future host-verified evidence.
+
+## Security and operating assumptions
+
+- One server process owns the JSON store; **do not scale replicas over the same directory**.
+- All MCP operations are protected by one strong token; this alpha is **single-tenant only**.
+- Keep secrets out of Git, logs and task instructions.
+- No arbitrary command execution is exposed.
+- HTTPS/TLS must terminate at a trusted proxy on public deployments.
+- Treat model output and worker instructions as untrusted data.
+- Human authorization for destructive changes will be implemented before write-enabled downstream tools are added.
+
+## Roadmap
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) and [docs/AGENT_WORKFLOW.md](docs/AGENT_WORKFLOW.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE). Original implementation maintained under the Panter-ai project.
