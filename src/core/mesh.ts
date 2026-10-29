@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import { agentDefinition, checkSkills, specialistPacket, type GentleSkillId } from './gentle-catalog.js';
+import { agentDefinition, checkSkills, specialistPacket, REVIEW_4R, JUDGMENT_DAY, type GentleSkillId } from './gentle-catalog.js';
 
 export const HOSTS = ['gpt-a', 'gpt-b', 'grok', 'gemini', 'claude'] as const;
 export type Host = typeof HOSTS[number];
@@ -13,7 +13,8 @@ export type ActorProfile = { host: Host; actorId: string; modelRequest: string; 
 export type MeshMessage = { id: string; missionId: string; from: Host; to: Host; workId: string | null; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' | 'RESULT'; text: string; createdAt: string; inboxRevision: number };
 export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null };
 export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
-type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
+export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
+type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
 const hosts = new Set<string>(HOSTS);
 const roles = new Set<MeshRole>(['orchestrator', 'explorer', 'architect', 'implementer', 'verifier', 'reviewer']);
 export function isHost(x: string): x is Host { return hosts.has(x); }
@@ -23,7 +24,7 @@ function iso() { return new Date().toISOString(); }
 
 export class MeshEngine {
   private file: string;
-  private state: MeshData = { version: 1, profiles: [], specialistBindings: [], works: [], messages: [], inboxRevision: { 'gpt-a': 0, 'gpt-b': 0, 'grok': 0, 'gemini': 0, 'claude': 0 } };
+  private state: MeshData = { version: 1, profiles: [], specialistBindings: [], reviews:[], works: [], messages: [], inboxRevision: { 'gpt-a': 0, 'gpt-b': 0, 'grok': 0, 'gemini': 0, 'claude': 0 } };
   private chain: Promise<unknown> = Promise.resolve();
   /** Emitted only AFTER the updated ledger is atomically persisted. */
   readonly events = new EventEmitter();
@@ -48,6 +49,7 @@ export class MeshEngine {
       for (const host of HOSTS) parsed.inboxRevision[host] = Math.max(parsed.inboxRevision[host], historical[host]);
       if (parsed.specialistBindings !== undefined) check(Array.isArray(parsed.specialistBindings), 'Invalid specialist binding ledger');
       parsed.specialistBindings ??= [];
+      parsed.reviews ??= [];
       x.state = parsed;
     } catch (e) {
       if (!(e instanceof Error) || !('code' in e) || e.code !== 'ENOENT') throw e;
@@ -157,6 +159,62 @@ export class MeshEngine {
       return w;
     });
   }
+
+  /** Atomic 4R / blind-Judgment-Day fanout: exactly one frozen candidate and
+   * one durable ledger commit for all review delegations. Native Pi's provider
+   * judgment authority is NOT emulated; a controller must evaluate results.
+   */
+  async startReview(caller:Host,input:{missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string}) {
+    check(caller==='gpt-a','Only GPT-A can initiate reviews');
+    check(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(input.candidateSha),'Invalid frozen candidate SHA');
+    check(input.missionId.trim().length>0 && input.missionId.length<=120,'Invalid mission');
+    check(input.objective.trim().length>0 && input.objective.length<=6000,'Invalid review objective');
+    check(input.idempotencyKey.trim().length>0 && input.idempotencyKey.length<=160,'Invalid idempotency key');
+    const ids=input.kind==='4r'?REVIEW_4R:JUDGMENT_DAY.slice(0,2);
+    const bindings=await this.specialistBindings();
+    const configured=ids.map(id=>bindings.find(b=>b.agentId===id));
+    check(configured.every(Boolean),'All review specialists must be configured first');
+    const hosts=configured.map(x=>x!.host);
+    if(input.kind==='judgment-day')check(new Set(hosts).size===2,'Judgment Day judges must be on independent hosts');
+    const packets=await Promise.all(ids.map((id,i)=>{
+      const binding=configured[i]!;
+      return specialistPacket({agentId:id,skillIds:binding.skillIds,objective:input.objective,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,candidateSha:input.candidateSha});
+    }));
+    return this.write(d=>{
+      const reviews=d.reviews??=[];
+      const previous=reviews.find(r=>r.missionId===input.missionId && r.idempotencyKey===input.idempotencyKey);
+      if(previous){check(previous.kind===input.kind && previous.candidateSha===input.candidateSha && previous.objective===input.objective,'Conflicting review idempotency');return previous;}
+      const now=iso();const workIds:string[]=[];
+      for(let i=0;i<ids.length;i++){
+        const binding=(d.specialistBindings??[]).find(b=>b.agentId===ids[i]);
+        const original=configured[i]!,packet=packets[i]!;
+        check(binding?.revision===original.revision && binding.host===original.host,'Review binding changed during dispatch');
+        const profile=d.profiles.find(p=>p.host===binding.host);
+        check(profile?.roles.includes('reviewer'),'Review host is not authorized for reviewer role');
+        const work:MeshWork={id:randomUUID(),missionId:input.missionId,from:'gpt-a',target:binding.host,role:'reviewer',instruction:packet.instruction,
+          idempotencyKey:`${input.idempotencyKey}:${ids[i]}`,specialist:{agentId:packet.agentId,skillIds:packet.skillIds,packetDigest:packet.digest,
+            assetDigests:packet.assetDigests,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,bindingRevision:binding.revision,
+            candidateSha:input.candidateSha,allowedEditSurfaces:[]},state:'QUEUED',attemptId:null,leaseGeneration:0,leaseUntil:null,result:null,receiptDigest:null,createdAt:now,completedAt:null};
+        d.works.push(work);workIds.push(work.id);this.notify(d,binding.host);
+      }
+      const review:ReviewSession={id:randomUUID(),missionId:input.missionId,kind:input.kind,objective:input.objective,candidateSha:input.candidateSha,idempotencyKey:input.idempotencyKey,workIds,createdAt:now};
+      reviews.push(review);this.notify(d,'gpt-a');return review;
+    });
+  }
+  reviewStatus(caller:Host,reviewId:string){
+    check(caller==='gpt-a','Only GPT-A may inspect review aggregate');
+    return this.read(d=>{
+      const review=(d.reviews??[]).find(r=>r.id===reviewId);
+      check(review,'Review not found');
+      const work=review.workIds.map(id=>d.works.find(w=>w.id===id));
+      check(work.every(Boolean),'Review ledger inconsistent');
+      const terminal=work.every(w=>w!.state==='COMPLETED'||w!.state==='FAILED');
+      return {review,stage:terminal?'READY_FOR_CONTROLLER':'AWAITING_REPORTS',
+        nativeReviewAuthority:false,
+        work:work.map(w=>({workId:w!.id,agentId:w!.specialist?.agentId,host:w!.target,state:w!.state,receiptDigest:w!.receiptDigest,result:w!.result}))};
+    });
+  }
+
   pending(caller: Host) { return this.read(d => d.works.filter(w => w.target === caller && w.state === 'QUEUED').map(w => ({ workId: w.id, missionId: w.missionId, role: w.role, createdAt: w.createdAt }))); }
   async claim(caller: Host, workId: string, leaseSeconds = 300) {
     check(leaseSeconds >= 30 && leaseSeconds <= 3600, 'Invalid lease');
