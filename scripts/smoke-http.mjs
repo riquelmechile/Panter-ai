@@ -62,8 +62,28 @@ try {
   await Promise.race([event, sleep(7000).then(() => { throw new Error('No subscriptions/listen update delivered'); })]);
   const inbox = await gpt.callTool({ name: 'panter_mesh_inbox', arguments: { since: 0 } });
   assert.ok(inbox.content?.some(c => c.type === 'text' && c.text.includes('revision')), 'No durable inbox response');
-  await subscription.close();
-  console.log('PASS modern MCP discover + tools + UI resource + actor guard + live subscriptions/listen event + inbox');
+  // Real cross-actor MCP round trip: GPT-A -> Grok -> GPT-A.
+  const delegated = await gpt.callTool({ name: 'panter_mesh_delegate', arguments: {
+    missionId: 'smoke-mission', target: 'grok', role: 'reviewer',
+    instruction: 'Review the candidate safely', idempotencyKey: 'smoke-review-1',
+  } });
+  assert.ok(!delegated.isError, JSON.stringify(delegated.content));
+  const work = JSON.parse(delegated.content.find(c => c.type === 'text').text);
+  const pending = await grok.callTool({ name: 'panter_mesh_pending', arguments: {} });
+  assert.ok(JSON.parse(pending.content.find(c => c.type === 'text').text).some(w => w.workId === work.id));
+  const claimed = await grok.callTool({ name: 'panter_mesh_claim', arguments: { workId: work.id, leaseSeconds: 60 } });
+  assert.ok(!claimed.isError, JSON.stringify(claimed.content));
+  const attempt = JSON.parse(claimed.content.find(c => c.type === 'text').text);
+  const completed = await grok.callTool({ name: 'panter_mesh_complete', arguments: {
+    workId: work.id, attemptId: attempt.attemptId, leaseGeneration: attempt.leaseGeneration,
+    result: 'Independent security review complete', success: true,
+  } });
+  assert.ok(!completed.isError, JSON.stringify(completed.content));
+  const returned = await gpt.callTool({ name: 'panter_mesh_inbox', arguments: { since: 0 } });
+  const inboxPayload = JSON.parse(returned.content.find(c => c.type === 'text').text);
+  assert.ok(inboxPayload.messages.some(m => m.workId === work.id && m.kind === 'RESULT' && m.text === 'Independent security review complete'));
+    await subscription.close();
+  console.log('PASS modern MCP discover + tools + UI resource + actor guard + live subscriptions/listen event + GPT-A/Grok result return + inbox');
 } finally {
   for (const client of clients) await client.close().catch(() => {});
   proc.kill('SIGTERM');
