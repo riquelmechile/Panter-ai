@@ -44,7 +44,7 @@ try {
   assert.ok(resources.resources.some(r => r.uri === 'panter://mesh/changed'));
   const view = await gpt.readResource({ uri: 'ui://panter/agent-studio.html' });
   assert.ok(view.contents[0]?.text?.includes('Panter Agent Studio'), 'UI not bundled');
-  assert.ok(!view.contents[0]?.text?.includes('/*__BUNDLED_APP_JS__*/'), 'UI source not built');
+  const html = view.contents[0]?.text ?? '';\n  const markerAt = html.indexOf('/*__BUNDLED_APP_JS__*/');\n  assert.ok(markerAt < 0, `UI marker remains at ${markerAt} of ${html.length} chars: ${JSON.stringify(html.slice(Math.max(0, markerAt-90), markerAt+100))}`);
   await assert.rejects(grok.readResource({ uri: 'ui://panter/agent-studio.html' }), /./);
   await assert.rejects(grok.readResource({ uri: 'panter://inbox/gpt-a' }), /./);
 
