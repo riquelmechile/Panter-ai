@@ -1,6 +1,6 @@
 {
   "name": "panter-ai",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "Independent open-source MCP control plane for host-powered development.",
@@ -8,21 +8,25 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "npm run build:ui && tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "check": "tsc --noEmit",
-    "build": "tsc -p tsconfig.build.json",
-    "test": "node --import tsx --test tests/*.test.ts"
+    "build": "tsc -p tsconfig.build.json && npm run build:ui",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "build:ui": "node scripts/build-ui.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.4.0",
     "@modelcontextprotocol/node": "^2.1.2",
-    "zod": "^4.0.0"
+    "zod": "^4.2.0",
+    "@modelcontextprotocol/ext-apps": "^2.0.0",
+    "@modelcontextprotocol/client": "^2.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
     "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "esbuild": "^0.25.0"
   },
   "license": "MIT"
 }

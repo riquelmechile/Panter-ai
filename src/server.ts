@@ -1,4 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { MeshEngine, HOSTS, isHost } from './core/mesh.js';
 import { createServer } from 'node:http';
@@ -53,7 +56,8 @@ const missionStatus = z.enum(['DRAFT', 'READY', 'RUNNING', 'VERIFYING', 'DONE', 
 const bounded = (max = 2048) => z.string().trim().min(1).max(max);
 
 const handler = createMcpHandler(() => {
-  const server = new McpServer({ name: 'panter-ai', version: '0.3.0' }, {
+  const server = new McpServer({ name: 'panter-ai', version: '0.4.0' }, {
+    capabilities: { resources: { subscribe: true } },
     instructions: 'Panter-ai is a remote MCP engineering workspace. Reasoning, model choice and native subagents belong to the connected AI host. The model and effort policy returned by panter_host_policy is only REQUESTED, never proof. For meaningful work use panter_flow_route to choose inline versus coordinated execution, then create a durable flow only when useful. The parent session coordinates, and focused native host agents perform scoped exploration, implementation, verification and review. Use panter_agent_packet to obtain bounded context; never imply an agent was launched merely because its task was enqueued. Worker completions are reported evidence, not trusted verification. The server runs no model inference or shell. Do not claim a test, review, wake or execution succeeded without external evidence.'
   });
 
@@ -216,7 +220,7 @@ const handler = createMcpHandler(() => {
   }, async ({ flowId }) => output(await agents.summary(flowId)));
 
   const hostEnum = z.enum(HOSTS);
-  const roleEnum = z.enum(['explorer','architect','implementer','verifier','reviewer']);
+  const roleEnum = z.enum(['orchestrator','explorer','architect','implementer','verifier','reviewer']);
   server.registerTool('panter_mesh_profile_set',{description:'GPT-A configures a host agent profile, model and effort are requests only.',inputSchema:z.object({host:hostEnum,actorId:bounded(160),modelRequest:z.string().max(120),effortRequest:z.string().max(32),roles:z.array(roleEnum).min(1),expectedRevision:z.number().int().nonnegative()})},async x=>execute(()=>mesh.setProfile(hostPrincipal(),x,x.expectedRevision)));
   server.registerTool('panter_mesh_profiles',{description:'List configured host profiles.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.profiles()));
   server.registerTool('panter_mesh_delegate',{description:'GPT-A creates actor-bound A2A work for one configured host.',inputSchema:z.object({missionId:bounded(120),target:hostEnum,role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160)})},async x=>execute(()=>mesh.delegate(hostPrincipal(),x)));
@@ -225,7 +229,29 @@ const handler = createMcpHandler(() => {
   server.registerTool('panter_mesh_heartbeat',{description:'Renew exact worker lease.',inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),leaseSeconds:z.number().int().min(30).max(3600).default(300)})},async x=>execute(()=>mesh.heartbeat(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.leaseSeconds)));
   server.registerTool('panter_mesh_complete',{description:'Submit fenced terminal receipt; result is automatically delivered to GPT-A inbox.',inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),result:z.string().max(50000),success:z.boolean().default(true)})},async x=>execute(()=>mesh.complete(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.result,x.success)));
   server.registerTool('panter_mesh_message',{description:'Send actor-bound A2A question, answer or progress update to collaborator or GPT-A.',inputSchema:z.object({missionId:bounded(120),to:hostEnum,workId:z.uuid(),kind:z.enum(['QUESTION','ANSWER','UPDATE']),text:bounded(10000)})},async x=>execute(()=>mesh.message(hostPrincipal(),x)));
-  server.registerTool('panter_mesh_inbox',{description:'Retrieve authenticated actor inbox and return receipts to GPT-A.',inputSchema:z.object({since:z.number().int().nonnegative().default(0)}),annotations:{readOnlyHint:true}},async x=>execute(()=>mesh.inbox(hostPrincipal(),x.since)));
+  server.registerTool('panter_mesh_inbox',{description:'Retrieve only the authenticated actor inbox; since is a durable per-actor revision cursor.',inputSchema:z.object({since:z.number().int().nonnegative().default(0)}),annotations:{readOnlyHint:true}},async x=>execute(()=>mesh.inbox(hostPrincipal(),x.since)));
+  // MCP 2026-07-28 uses subscriptions/listen: the SDK owns the stream and
+  // matches resourceSubscriptions against the resourceUpdated URI. The shared
+  // notification carries NO private work metadata. Reading inbox data still
+  // requires authentication and actor-scoped tools.
+  server.registerResource('panter-mesh-change', 'panter://mesh/changed', {
+    description: 'Generic notification pointer; never contains private work data',
+    mimeType: 'application/json',
+  }, async uri => ({ contents: [{ uri: uri.toString(), mimeType: 'application/json', text: JSON.stringify(mesh.changeResource()) }] }));
+
+  const studioUri = 'ui://panter/agent-studio.html';
+  registerAppTool(server, 'panter_agent_studio', {
+    title: 'Panter Agent Studio',
+    description: 'GPT-A opens a visual configuration panel for the five authenticated host agent profiles. Only GPT-A may save profiles.',
+    inputSchema: z.object({}),
+    _meta: { ui: { resourceUri: studioUri } },
+  }, async () => execute(async () => { requireLeader(); return { profiles: await mesh.profiles(), hosts: HOSTS, modelPoliciesAreRequests: true }; }));
+  registerAppResource(server, 'Panter Agent Studio', studioUri, { mimeType: RESOURCE_MIME_TYPE }, async () => {
+    requireLeader();
+    const html = await readFile(resolve('dist/ui/agent-studio.html'), 'utf8');
+    return { contents: [{ uri: studioUri, mimeType: RESOURCE_MIME_TYPE, text: html }] };
+  });
+
   for(const host of HOSTS){
     server.registerResource(`panter-inbox-${host}`,`panter://inbox/${host}`,{description:'Authorized actor inbox revision; no task content is exposed',mimeType:'application/json'},async uri=>{
       if(hostPrincipal()!==host)throw new Error('Resource unavailable');
@@ -236,11 +262,21 @@ const handler = createMcpHandler(() => {
   return server;
 });
 
+// Publish only after atomic ledger persistence. SDK handles modern listen
+// streams; the in-memory bus is intentionally single-process in v0.4.
+mesh.events.on('changed', () => {
+  // Notification failure must never roll back or misreport a persisted write.
+  try {
+    void Promise.resolve(handler.notify.resourceUpdated('panter://mesh/changed')).catch(() => {
+      console.error('MCP change notification delivery failed');
+    });
+  } catch { console.error('MCP notification publication failed'); }
+});
 const nodeHandler = toNodeHandler(handler);
 const http = createServer(async (req, res) => {
   if (req.url === '/health' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-    res.end(JSON.stringify({ status: 'ok', name: 'panter-ai', version: '0.3.0' }));
+    res.end(JSON.stringify({ status: 'ok', name: 'panter-ai', version: '0.4.0' }));
     return;
   }
   if (req.url !== '/mcp') { res.writeHead(404); res.end('Not found'); return; }

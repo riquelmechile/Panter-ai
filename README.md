@@ -77,3 +77,13 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) and [docs/AGENT_WORKFLOW.md](docs/AGENT_W
 ## License
 
 MIT. See [LICENSE](LICENSE). Original implementation maintained under the Panter-ai project.
+
+## v0.4: MCP inbox listening and Agent Studio
+
+- MCP 2026-07-28 `subscriptions/listen` delivery for the generic `panter://mesh/changed` resource (when the client actually subscribes); events are published through the official SDK notification API after a durable ledger commit.
+- `panter_mesh_inbox` uses per-actor **revision cursors** (`since`) to recover messages after reconnect without depending on a live event stream.
+- An MCP Apps UI for GPT-A: invoke `panter_agent_studio` to configure profiles for GPT-A, GPT-B, Grok, Gemini and Claude. The view is bundled into a single HTML file during `npm run build`. Model and effort are preference requests and cannot force the host's underlying model.
+- The listener is **not** an external wake mechanism. Do not claim that GPT automatically resumes reasoning or that five applications are already connected without host-native acceptance testing.
+- Beta deployment still requires real OAuth 2.1 and validation of single-tenant actor identity, per-host grants and session authorization; the alpha bearer-token boundary is NOT appropriate for public production.
+
+See [mesh implementation notes](docs/MESH_IMPLEMENTATION.md).

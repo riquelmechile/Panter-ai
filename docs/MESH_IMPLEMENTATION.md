@@ -26,3 +26,12 @@ A new committed message/result increments an inbox revision and emits a local ev
 - No real external event trigger, MCP Tasks listener, official A2A 1.0 server endpoint, model execution or Git/SSH runner is started by this code.
 - For `subscriptions/listen`, implement the official SDK transport with streaming POST response, resource subscription checks, ACK/update envelopes, legacy capability negotiation, interruption recovery and actor isolation tests. Keep the Work ledger authoritative, not SSE.
 - A tool success is a server receipt; **it does not independently verify the model identity or execution quality**.
+
+## v0.4 listening and UI contract
+
+- Modern MCP `2026-07-28` clients may subscribe to `panter://mesh/changed` with `subscriptions/listen` and `notifications.resourceSubscriptions`. The SDK owns the listen SSE stream and the server calls `handler.notify.resourceUpdated` only after durable state persistence.
+- The notification URI and resource content are identical for all hosts and deliberately reveal no actor, mission, result, receipt or pending count. A connected client must call its **authenticated** `panter_mesh_inbox` with `since=<last revision>` to recover work. Reconnect and reconcile; notifications are ephemeral.
+- This is **not a model wake guarantee**. A subscribed stream does not start or resume reasoning in a host whose client does not support it. No host-ready or autonomous-wake claim is made until a live acceptance test proves the complete sequence.
+- One Node process is supported: the event bus and JSON ledger are not distributed across replicas. Run only one container replica until a transactional DB and shared notification bus are introduced.
+- `panter_agent_studio` is an MCP Apps tool linked to a bundled `ui://panter/agent-studio.html` resource. GPT-A configures model/effort **requests** and role routing; other hosts may never modify these settings. HTML contains no auth secrets. Build via `npm run build:ui` before running the MCP server.
+- All five host connections still use ALPHA bearer tokens. OAuth 2.1, audience-bound access, real external wakes, A2A v1 Agent Cards, live MCP listen conformance and sandboxed Oracle runners are not certified by these core tests.
