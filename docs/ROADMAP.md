@@ -37,3 +37,11 @@
 - [ ] Hosted installation guide and security audit.
 - [ ] Performance benchmarks and integration tests on representative MCP hosts.
 - [ ] Explicit compatibility matrix for host-native agents and reasoning-effort settings.
+
+## v0.5 OAuth external resource-server milestone
+
+- [x] Add opt-in JWT validation with exact audience/issuer, fixed JWKS, actor/client-id bindings, scopes and discovery.
+- [x] Add local negative-token tests and HTTP fixture-client round trip.
+- [ ] Deploy external IdP with real consent/PKCE/OAuth client registrations and validate true app connections.
+- [ ] Validate host-native MCP listen and autonomous continuation (not inferred from SDK).
+- [ ] Implement transactional multi-process persistence, workspace permissions and safe Git/SSH execution.

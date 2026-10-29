@@ -67,3 +67,7 @@ The named Docker volume contains the JSON ledgers. Back up `/data` while stoppin
 ## Security release gate
 
 Do not label this production ready until all conditions are demonstrated: OAuth 2.1 multi-client authorization, source/target identity enforcement, lease fencing, repeatable backup/restore, server-side workspace scope isolation, tool approval for shell and Git, host-native listening/wake observations, and a clean security review. A cloud VM alone does not grant ChatGPT remote SSH access.
+
+## External OAuth validation (pre-production only)
+
+For a private proof on Oracle, use a trusted identity provider and keep its signing public JWKS and actor mapping mounted read-only outside the repository. Set `PANTER_AUTH_MODE=external-jwt`, HTTPS `PANTER_PUBLIC_MCP_URL`, issuer, and paths documented in [OAUTH_EXTERNAL.md](OAUTH_EXTERNAL.md). Do **not** mount an identity provider's private key. Verify `/.well-known/oauth-protected-resource` and that an unauthenticated `/mcp` request returns 401 with a resource metadata challenge; then confirm two distinct OAuth client identities cannot impersonate each other. Do not replace validated OAuth with an unprotected shared bearer on a public endpoint.

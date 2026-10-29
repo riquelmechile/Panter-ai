@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { ExternalOAuthVerifier, staticBearerMatch } from './core/oauth.js';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
@@ -14,21 +14,23 @@ import { AgentEngine, AGENT_ROLES, routeFlow } from './core/agents.js';
 
 const port = Number(process.env.PANTER_PORT ?? '8080');
 const bind = process.env.PANTER_BIND_HOST ?? '127.0.0.1';
+const authMode = process.env.PANTER_AUTH_MODE ?? 'dev-static';
+if (!['dev-static', 'external-jwt'].includes(authMode)) throw new Error('Unsupported PANTER_AUTH_MODE');
 const token = process.env.PANTER_TOKEN ?? '';
 const dataDir = process.env.PANTER_DATA_DIR ?? '.panter-data';
 const allowedHosts = (process.env.PANTER_ALLOWED_HOSTS ?? '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
 const allowedOrigins = (process.env.PANTER_ALLOWED_ORIGINS ?? '').split(',').map(x => x.trim()).filter(Boolean);
 const loopback = ['127.0.0.1', 'localhost', '::1'].includes(bind);
 if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new Error('Invalid PANTER_PORT');
-if (!token || token.length < 24) throw new Error('PANTER_TOKEN must be at least 24 characters');
+if (authMode === 'dev-static' && token.length < 24) throw new Error('PANTER_TOKEN must be at least 24 characters in dev-static mode');
 if (!loopback && allowedHosts.length === 0) throw new Error('PANTER_ALLOWED_HOSTS is required for public binds');
 
-const digest = (value: string) => createHash('sha256').update(value).digest();
-const expected = digest(token);
-function authorized(authorization: string | undefined) {
-  const candidate = authorization?.startsWith('Bearer ') ? authorization.slice(7) : '';
-  return timingSafeEqual(digest(candidate), expected);
-}
+const oauth = authMode === 'external-jwt' ? await ExternalOAuthVerifier.open({
+  issuer: process.env.PANTER_OAUTH_ISSUER ?? '',
+  resource: process.env.PANTER_PUBLIC_MCP_URL ?? '',
+  keysFile: process.env.PANTER_OAUTH_JWKS_FILE ?? '',
+  actorsFile: process.env.PANTER_OAUTH_ACTORS_FILE ?? '',
+}) : null;
 function hostname(host: string | undefined): string {
   try { return new URL(`http://${host ?? ''}`).hostname.toLowerCase().replace(/^\[|\]$/g, ''); }
   catch { return ''; }
@@ -45,7 +47,7 @@ const store = await PanterStore.open(dataDir);
 const agents = await AgentEngine.open(dataDir, store);
 const mesh = await MeshEngine.open(dataDir);
 const principalContext = new AsyncLocalStorage<string>();
-const peerTokens: Record<string,string> = JSON.parse(process.env.PANTER_PEER_TOKENS ?? '{}');
+const peerTokens: Record<string,string> = authMode === 'dev-static' ? JSON.parse(process.env.PANTER_PEER_TOKENS ?? '{}') : {};
 for(const [host,secret] of Object.entries(peerTokens)){if(!isHost(host)||typeof secret!=='string'||secret.length<24||secret===token)throw new Error('Invalid PANTER_PEER_TOKENS');}
 if(new Set(Object.values(peerTokens)).size!==Object.keys(peerTokens).length)throw new Error('Peer tokens must be unique');
 function principal(){return principalContext.getStore()??'unknown'}
@@ -56,7 +58,7 @@ const missionStatus = z.enum(['DRAFT', 'READY', 'RUNNING', 'VERIFYING', 'DONE', 
 const bounded = (max = 2048) => z.string().trim().min(1).max(max);
 
 const handler = createMcpHandler(() => {
-  const server = new McpServer({ name: 'panter-ai', version: '0.4.0' }, {
+  const server = new McpServer({ name: 'panter-ai', version: '0.5.0' }, {
     capabilities: { resources: { subscribe: true } },
     instructions: 'Panter-ai is a remote MCP engineering workspace. Reasoning, model choice and native subagents belong to the connected AI host. The model and effort policy returned by panter_host_policy is only REQUESTED, never proof. For meaningful work use panter_flow_route to choose inline versus coordinated execution, then create a durable flow only when useful. The parent session coordinates, and focused native host agents perform scoped exploration, implementation, verification and review. Use panter_agent_packet to obtain bounded context; never imply an agent was launched merely because its task was enqueued. Worker completions are reported evidence, not trusted verification. The server runs no model inference or shell. Do not claim a test, review, wake or execution succeeded without external evidence.'
   });
@@ -276,8 +278,12 @@ const nodeHandler = toNodeHandler(handler);
 const http = createServer(async (req, res) => {
   if (req.url === '/health' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-    res.end(JSON.stringify({ status: 'ok', name: 'panter-ai', version: '0.4.0' }));
+    res.end(JSON.stringify({ status: 'ok', name: 'panter-ai', version: '0.5.0' }));
     return;
+  }
+  if (oauth && req.method === 'GET' && (req.url === '/.well-known/oauth-protected-resource' || req.url === '/.well-known/oauth-protected-resource/mcp')) {
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    res.end(JSON.stringify(oauth.protectedResourceMetadata())); return;
   }
   if (req.url !== '/mcp') { res.writeHead(404); res.end('Not found'); return; }
   const h = hostname(req.headers.host);
@@ -287,11 +293,15 @@ const http = createServer(async (req, res) => {
   if (req.headers.origin && !allowedOrigins.includes(req.headers.origin)) {
     res.writeHead(403); res.end('Origin not allowed'); return;
   }
-  const candidateToken=req.headers.authorization?.startsWith('Bearer ')?req.headers.authorization.slice(7):'';
-  const peer=Object.entries(peerTokens).find(([,v])=>timingSafeEqual(digest(candidateToken),digest(v)))?.[0];
-  const actor=authorized(req.headers.authorization)?'admin':peer;
+  const peer=Object.entries(peerTokens).find(([,v])=>staticBearerMatch(req.headers.authorization,v))?.[0];
+  let actor: string | undefined;
+  if (oauth) {
+    try { actor=oauth.verifyBearer(req.headers.authorization); } catch { /* invalid credentials are indistinguishable */ }
+  } else {
+    actor=staticBearerMatch(req.headers.authorization,token)?'admin':peer;
+  }
   if (!actor) {
-    res.writeHead(401, { 'www-authenticate': 'Bearer realm="panter-ai"', 'cache-control': 'no-store' });
+    res.writeHead(401, { 'www-authenticate': oauth?.challenge() ?? 'Bearer realm="panter-ai"', 'cache-control': 'no-store' });
     res.end('Unauthorized'); return;
   }
   res.setHeader('Cache-Control', 'no-store');

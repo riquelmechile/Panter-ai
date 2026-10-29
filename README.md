@@ -88,8 +88,8 @@ MIT. See [LICENSE](LICENSE). Original implementation maintained under the Panter
 
 See [mesh implementation notes](docs/MESH_IMPLEMENTATION.md).
 
-`npm run smoke:http` is an end-to-end SDK acceptance test of the 2026-07-28 HTTP protocol: modern version negotiation, authenticated resources, bundled Agent Studio, negative actor isolation, live `subscriptions/listen` notification, and inbox retrieval. This proves server transport behavior on CI, **not** wake of a ChatGPT browser or third-party AI application.
+## v0.5: external OAuth authorization boundary (developer preview)
 
-### Oracle ARM64 staging
+An optional `PANTER_AUTH_MODE=external-jwt` mode validates externally issued RS256 JWT access tokens, their issuer/audience/expiry/scopes, and per-app `(subject, client_id)` to host mappings. This permits separate GPT-A and GPT-B client identities without using model-provider inference APIs. An external identity provider handles consent, PKCE and client registration; Panter-ai does **not** provide those OAuth authorization-server operations. [Setup and outstanding production gates](docs/OAUTH_EXTERNAL.md).
 
-Run privately first with [compose.dev.yml](compose.dev.yml) and the [Oracle ARM development guide](docs/ORACLE_ARM.md). The compose file binds the VM loopback interface only; this is a **developer** configuration, not an Internet-facing OAuth MCP release.
+Verification: `npm run smoke:oauth` tests signed fixture tokens and an actual two-client HTTP MCP interaction. It is **not** evidence that any live AI web app can be awakened or re-enters its reasoning session automatically.
