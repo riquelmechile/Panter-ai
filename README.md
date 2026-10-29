@@ -102,4 +102,14 @@ The previous external-JWT mode remains optional. **Neither mode is evidence of a
 
 ## v0.7: centrally hosted Gentle Shell agent and skill catalog
 
-The [Gentle Shell MCP compatibility guide](docs/GENTLE_SHELL_COMPAT.md) explains the exact upstream MIT-pinned catalog of **10 specialists** and **13 skills**, individual agent-to-host assignments in Agent Studio, host-specific requested models, immutable on-demand skill packets, and A2A completion into GPT-A's inbox. All five hosts may share specialist definitions; no provider inference API is used. The 4R controller now atomically dispatches four lens tasks, and Judgment Day starts exactly two blind judges on distinct hosts. Both require a frozen SHA and return receipts for GPT-A assessment; the native Pi review engine and final judgment authority have **not** been ported.
+The [Gentle Shell MCP compatibility guide](docs/GENTLE_SHELL_COMPAT.md) explains the exact upstream MIT-pinned catalog of **10 specialists** and **13 skills**, individual agent-to-host assignments in Agent Studio, host-specific requested models, immutable on-demand skill packets, and A2A completion into GPT-A's inbox. All five hosts may share specialist definitions; no provider inference API is used. The review 4R/Judgment Day blueprints are **planning and delegated contracts**, not a claim that the native Pi review engine has been ported.
+
+## v0.8: upstream Engram memory (opt-in)
+
+Panter-ai can run the official Engram memory server over local stdio MCP,
+with a dedicated persistent project and no inference API. GPT-A alone may
+search/recover curated project knowledge or store verified decisions; other
+hosts return candidate discoveries as A2A messages/receipts. The official
+Engram ARM64 binary must be installed separately; the bridge does not share
+Xanxittoo's database or make unsupported autonomous-memory claims.
+See [docs/ENGRAM_MEMORY.md](docs/ENGRAM_MEMORY.md).
