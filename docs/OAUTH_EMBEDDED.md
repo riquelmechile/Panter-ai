@@ -32,7 +32,7 @@ PANTER_OAUTH_REDIRECT_URIS=https://chatgpt.com/connector_platform_oauth_redirect
 ## Compatibility, testing and known limits
 
 - `npm test` covers consent, DCR, PKCE, restart persistence, disjoint GPT identities, forged callbacks, origin/CSRF failures, one-time codes, refresh replay and revocation.
-- `npm run smoke:embedded` connects two MCP SDK clients through genuine HTTP endpoints, completes a GPT-A → GPT-B → GPT-A delegation, and checks revocation 401.
+- `npm run smoke:embedded` connects two MCP SDK clients through genuine HTTP endpoints, verifies an authenticated `subscriptions/listen` notification, completes a GPT-A → GPT-B → GPT-A delegation, and checks revocation 401.
 - This is a **single-owner developer preview**; no production security audit, no multi-replica database or external audit trail, no multi-user operator accounts, no client credential secrets, and no live ChatGPT/Claude/Grok/Gemini OAuth E2E yet.
 - The OAuth implementation uses Node standard cryptographic and HTTP primitives. A standards conformance/security review against the official MCP authorization profile is mandatory before production. DCR should be behind rate limits at the edge, and the consent password should be rotated regularly.
 - `subscriptions/listen` requires negotiated and observed client support; it cannot make a closed ChatGPT session think autonomously.

@@ -65,8 +65,16 @@ try {
   const aCredentials = await authorize('gpt-a'), bCredentials = await authorize('gpt-b');
   assert.notEqual(aCredentials.client, bCredentials.client);
   const a = await connect(aCredentials), b = await connect(bCredentials);
+  let notify;
+  const signal = new Promise(resolve => { notify = resolve; });
+  a.setNotificationHandler('notifications/resources/updated', msg => {
+    if (msg.params?.uri === 'panter://mesh/changed') notify(msg);
+  });
+  const listening = await a.listen({ resourceSubscriptions: ['panter://mesh/changed'] });
+  assert.ok(listening.honoredFilter?.resourceSubscriptions?.includes('panter://mesh/changed'));
   const profile = await a.callTool({ name: 'panter_mesh_profile_set', arguments: { host: 'gpt-b', actorId: 'embedded-gpt-b', modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer'], expectedRevision: 0 } });
   assert.ok(!profile.isError, JSON.stringify(profile.content));
+  await Promise.race([signal, sleep(7000).then(() => { throw new Error('No authenticated MCP listen event'); })]);
   const denied = await b.callTool({ name: 'panter_mesh_profile_set', arguments: { host: 'gpt-b', actorId: 'hijack', modelRequest: 'bad', effortRequest: 'max', roles: ['reviewer'], expectedRevision: 1 } });
   assert.ok(denied.isError);
   const task = await a.callTool({ name: 'panter_mesh_delegate', arguments: { missionId: 'smoke', target: 'gpt-b', role: 'reviewer', instruction: 'Review RFC 9207', idempotencyKey: 'oauth-embedded-1' } });
@@ -81,7 +89,8 @@ try {
   assert.equal(revoke.status, 200);
   const unauthorized = await request('/mcp', { method: 'POST', headers: { authorization: `Bearer ${bCredentials.access_token}`, 'content-type': 'application/json' }, body: '{}' });
   assert.equal(unauthorized.status, 401);
-  console.log('PASS embedded DCR -> PKCE -> human consent -> actor-bound MCP A2A -> revoke 401');
+  await listening.close();
+  console.log('PASS embedded DCR -> PKCE -> human consent -> authenticated subscriptions/listen -> actor-bound MCP A2A -> revoke 401');
 } finally {
   for (const client of clients) await client.close().catch(() => {});
   if (proc) proc.kill('SIGTERM');

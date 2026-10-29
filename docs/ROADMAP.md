@@ -45,3 +45,13 @@
 - [ ] Deploy external IdP with real consent/PKCE/OAuth client registrations and validate true app connections.
 - [ ] Validate host-native MCP listen and autonomous continuation (not inferred from SDK).
 - [ ] Implement transactional multi-process persistence, workspace permissions and safe Git/SSH execution.
+
+## v0.6 embedded OAuth milestone (developer preview)
+
+- [x] Self-hosted authorization-server discovery, exact allowlisted DCR, PKCE S256 and human consent with origin/CSRF/owner password.
+- [x] Opaque access and refresh tokens persisted as SHA-256 digests, short-lived codes, refresh rotation/replay family revocation and token endpoint revocation.
+- [x] Per-registered-client host approval, including distinct GPT-A/GPT-B identities, plus nine negative and continuity unit tests.
+- [x] CI smoke for embedded OAuth and real MCP A2A round trip; `subscriptions/listen` delivery tested under authenticated transport.
+- [ ] Security review and OAuth profile conformance audit before production/public exposure.
+- [ ] Prove OAuth/consent and `subscriptions/listen` in the five real connected apps; **MCP listening is not automatically a host wake guarantee**.
+- [ ] Durable multi-process SQL implementation, operator dashboard for revoking connections, and per-mission grants.
