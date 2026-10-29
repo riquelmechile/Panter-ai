@@ -6,5 +6,5 @@ if (!js) throw new Error('Missing bundled MCP App script');
 const template = await readFile('src/ui/agent-studio.html', 'utf8');
 if (!template.includes('/*__BUNDLED_APP_JS__*/')) throw new Error('Missing UI placeholder');
 await mkdir('dist/ui', { recursive: true });
-await writeFile('dist/ui/agent-studio.html', template.replace('/*__BUNDLED_APP_JS__*/', js.replaceAll('</script', '<\\/script')), 'utf8');
+await writeFile('dist/ui/agent-studio.html', template.replace('/*__BUNDLED_APP_JS__*/', () => js.replaceAll('</script', '<\\/script')), 'utf8');
 console.log('Built dist/ui/agent-studio.html');
