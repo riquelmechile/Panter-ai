@@ -61,11 +61,15 @@ export class ExternalOAuthVerifier {
     }
     const bindings = new Map<string, Host>();
     const assigned = new Set<Host>();
+    const identities = new Set<string>();
     for (const raw of actors) {
       ensure(record(raw) && typeof raw.host === 'string' && isHost(raw.host) && typeof raw.subject === 'string' && raw.subject.length >= 1 && raw.subject.length <= 256 && typeof raw.clientId === 'string' && raw.clientId.length >= 1 && raw.clientId.length <= 256, 'Invalid actor binding');
       ensure(!assigned.has(raw.host), 'One OAuth actor binding per host');
       const key = principalId(raw.host, raw.subject, raw.clientId);
       ensure(!bindings.has(key), 'Duplicate actor identity');
+      const identityKey = JSON.stringify([raw.subject, raw.clientId]);
+      ensure(!identities.has(identityKey), 'OAuth client identity assigned to multiple hosts');
+      identities.add(identityKey);
       assigned.add(raw.host); bindings.set(key, raw.host);
     }
     return new ExternalOAuthVerifier(issuer.toString().replace(/\/$/, ''), resource.toString(), keys, bindings);
@@ -80,7 +84,7 @@ export class ExternalOAuthVerifier {
   }
   verifyBearer(authorization: string | undefined, nowSeconds = Math.floor(Date.now() / 1000)): Host {
     ensure(authorization?.startsWith('Bearer ') && authorization.length <= MAX_TOKEN_BYTES + 7, 'Missing bearer token');
-    const token = authorization.slice(7);
+    const token = authorization!.slice(7);
     ensure(jwtPattern.test(token), 'Malformed access token');
     const [partHeader, partBody, partSignature] = token.split('.') as [string, string, string];
     const header = jwtObject(partHeader), payload = jwtObject(partBody);

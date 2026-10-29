@@ -78,6 +78,8 @@ test('resource discovery and 401 challenge point to exact protected resource', (
 test('fail closed for duplicate host bindings, invalid issuer and non-2048-bit keys', () => setup(async ({ keysFile, actorsFile }) => {
   await writeFile(actorsFile, JSON.stringify([bindings[0], bindings[0]]));
   await assert.rejects(ExternalOAuthVerifier.open({ issuer, resource, keysFile, actorsFile }), /One OAuth actor/);
+  await writeFile(actorsFile, JSON.stringify([bindings[0], { ...bindings[0], host: 'gpt-b' }]));
+  await assert.rejects(ExternalOAuthVerifier.open({ issuer, resource, keysFile, actorsFile }), /multiple hosts/);
   await assert.rejects(ExternalOAuthVerifier.open({ issuer: 'http://insecure.test', resource, keysFile, actorsFile }), /Invalid OAuth issuer/);
   const weak = generateKeyPairSync('rsa', { modulusLength: 1024 });
   await writeFile(keysFile, JSON.stringify({ keys: [{ ...weak.publicKey.export({ format: 'jwk' }), kid: 'weak', alg: 'RS256' }] }));
