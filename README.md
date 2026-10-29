@@ -87,3 +87,5 @@ MIT. See [LICENSE](LICENSE). Original implementation maintained under the Panter
 - Beta deployment still requires real OAuth 2.1 and validation of single-tenant actor identity, per-host grants and session authorization; the alpha bearer-token boundary is NOT appropriate for public production.
 
 See [mesh implementation notes](docs/MESH_IMPLEMENTATION.md).
+
+`npm run smoke:http` is an end-to-end SDK acceptance test of the 2026-07-28 HTTP protocol: modern version negotiation, authenticated resources, bundled Agent Studio, negative actor isolation, live `subscriptions/listen` notification, and inbox retrieval. This proves server transport behavior on CI, **not** wake of a ChatGPT browser or third-party AI application.

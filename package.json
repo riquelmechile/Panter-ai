@@ -13,7 +13,8 @@
     "check": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json && npm run build:ui",
     "test": "node --import tsx --test tests/*.test.ts",
-    "build:ui": "node scripts/build-ui.mjs"
+    "build:ui": "node scripts/build-ui.mjs",
+    "smoke:http": "node scripts/smoke-http.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.4.0",
