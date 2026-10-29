@@ -1,4 +1,5 @@
 import { ExternalOAuthVerifier, staticBearerMatch } from './core/oauth.js';
+import { EmbeddedOAuth } from './core/embedded-oauth.js';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
@@ -15,7 +16,7 @@ import { AgentEngine, AGENT_ROLES, routeFlow } from './core/agents.js';
 const port = Number(process.env.PANTER_PORT ?? '8080');
 const bind = process.env.PANTER_BIND_HOST ?? '127.0.0.1';
 const authMode = process.env.PANTER_AUTH_MODE ?? 'dev-static';
-if (!['dev-static', 'external-jwt'].includes(authMode)) throw new Error('Unsupported PANTER_AUTH_MODE');
+if (!['dev-static', 'external-jwt', 'embedded'].includes(authMode)) throw new Error('Unsupported PANTER_AUTH_MODE');
 const token = process.env.PANTER_TOKEN ?? '';
 const dataDir = process.env.PANTER_DATA_DIR ?? '.panter-data';
 const allowedHosts = (process.env.PANTER_ALLOWED_HOSTS ?? '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
@@ -30,6 +31,11 @@ const oauth = authMode === 'external-jwt' ? await ExternalOAuthVerifier.open({
   resource: process.env.PANTER_PUBLIC_MCP_URL ?? '',
   keysFile: process.env.PANTER_OAUTH_JWKS_FILE ?? '',
   actorsFile: process.env.PANTER_OAUTH_ACTORS_FILE ?? '',
+}) : null;
+const embedded = authMode === 'embedded' ? await EmbeddedOAuth.open({
+  dir: dataDir, resource: process.env.PANTER_PUBLIC_MCP_URL ?? '',
+  redirectUris: (process.env.PANTER_OAUTH_REDIRECT_URIS ?? '').split(',').map(s => s.trim()).filter(Boolean),
+  password: process.env.PANTER_CONSENT_PASSWORD ?? '',
 }) : null;
 function hostname(host: string | undefined): string {
   try { return new URL(`http://${host ?? ''}`).hostname.toLowerCase().replace(/^\[|\]$/g, ''); }
@@ -58,7 +64,7 @@ const missionStatus = z.enum(['DRAFT', 'READY', 'RUNNING', 'VERIFYING', 'DONE', 
 const bounded = (max = 2048) => z.string().trim().min(1).max(max);
 
 const handler = createMcpHandler(() => {
-  const server = new McpServer({ name: 'panter-ai', version: '0.5.0' }, {
+  const server = new McpServer({ name: 'panter-ai', version: '0.6.0' }, {
     capabilities: { resources: { subscribe: true } },
     instructions: 'Panter-ai is a remote MCP engineering workspace. Reasoning, model choice and native subagents belong to the connected AI host. The model and effort policy returned by panter_host_policy is only REQUESTED, never proof. For meaningful work use panter_flow_route to choose inline versus coordinated execution, then create a durable flow only when useful. The parent session coordinates, and focused native host agents perform scoped exploration, implementation, verification and review. Use panter_agent_packet to obtain bounded context; never imply an agent was launched merely because its task was enqueued. Worker completions are reported evidence, not trusted verification. The server runs no model inference or shell. Do not claim a test, review, wake or execution succeeded without external evidence.'
   });
@@ -278,12 +284,17 @@ const nodeHandler = toNodeHandler(handler);
 const http = createServer(async (req, res) => {
   if (req.url === '/health' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-    res.end(JSON.stringify({ status: 'ok', name: 'panter-ai', version: '0.5.0' }));
+    res.end(JSON.stringify({ status: 'ok', name: 'panter-ai', version: '0.6.0' }));
     return;
   }
   if (oauth && req.method === 'GET' && (req.url === '/.well-known/oauth-protected-resource' || req.url === '/.well-known/oauth-protected-resource/mcp')) {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
     res.end(JSON.stringify(oauth.protectedResourceMetadata())); return;
+  }
+  if (embedded && req.url !== '/mcp') {
+    const host = hostname(req.headers.host);
+    if (!host || !(allowedHosts.length ? allowedHosts.includes(host) : ['localhost','127.0.0.1','::1'].includes(host))) { res.writeHead(403); res.end(); return; }
+    if (await embedded.handle(req, res)) return;
   }
   if (req.url !== '/mcp') { res.writeHead(404); res.end('Not found'); return; }
   const h = hostname(req.headers.host);
@@ -295,13 +306,15 @@ const http = createServer(async (req, res) => {
   }
   const peer=Object.entries(peerTokens).find(([,v])=>staticBearerMatch(req.headers.authorization,v))?.[0];
   let actor: string | undefined;
-  if (oauth) {
+  if (embedded) {
+    try { actor=await embedded.authenticate(req.headers.authorization); } catch { /* invalid credentials */ }
+  } else if (oauth) {
     try { actor=oauth.verifyBearer(req.headers.authorization); } catch { /* invalid credentials are indistinguishable */ }
   } else {
     actor=staticBearerMatch(req.headers.authorization,token)?'admin':peer;
   }
   if (!actor) {
-    res.writeHead(401, { 'www-authenticate': oauth?.challenge() ?? 'Bearer realm="panter-ai"', 'cache-control': 'no-store' });
+    res.writeHead(401, { 'www-authenticate': embedded?.challenge() ?? oauth?.challenge() ?? 'Bearer realm="panter-ai"', 'cache-control': 'no-store' });
     res.end('Unauthorized'); return;
   }
   res.setHeader('Cache-Control', 'no-store');

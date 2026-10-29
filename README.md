@@ -93,3 +93,9 @@ See [mesh implementation notes](docs/MESH_IMPLEMENTATION.md).
 An optional `PANTER_AUTH_MODE=external-jwt` mode validates externally issued RS256 JWT access tokens, their issuer/audience/expiry/scopes, and per-app `(subject, client_id)` to host mappings. This permits separate GPT-A and GPT-B client identities without using model-provider inference APIs. An external identity provider handles consent, PKCE and client registration; Panter-ai does **not** provide those OAuth authorization-server operations. [Setup and outstanding production gates](docs/OAUTH_EXTERNAL.md).
 
 Verification: `npm run smoke:oauth` tests signed fixture tokens and an actual two-client HTTP MCP interaction. It is **not** evidence that any live AI web app can be awakened or re-enters its reasoning session automatically.
+
+## v0.6: embedded OAuth authorization (developer preview)
+
+`PANTER_AUTH_MODE=embedded` enables self-hosted OAuth 2.1 authorization endpoints: `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource`, `/register`, `/authorize`, `/oauth/consent`, `/token` and `/revoke`. The operator approves each app client and chooses its host (GPT-A, GPT-B, Grok, Gemini or Claude). Clients use authorization code + PKCE S256 and exact allowlisted HTTPS callbacks. Access and refresh token digests are stored in a private file; refresh rotates and reuse revokes the family. See [embedded OAuth guide](docs/OAUTH_EMBEDDED.md).
+
+The previous external-JWT mode remains optional. **Neither mode is evidence of a real GPT-A autonomous wake or production safety**. Validate real host onboarding, SDK compatibility, revocation after restart, security review and proxy configurations before internet exposure.
