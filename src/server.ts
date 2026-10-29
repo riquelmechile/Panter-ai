@@ -57,11 +57,23 @@ const handler = createMcpHandler(() => {
     instructions: 'Panter-ai is a remote MCP engineering workspace. Reasoning, model choice and native subagents belong to the connected AI host. The model and effort policy returned by panter_host_policy is only REQUESTED, never proof. For meaningful work use panter_flow_route to choose inline versus coordinated execution, then create a durable flow only when useful. The parent session coordinates, and focused native host agents perform scoped exploration, implementation, verification and review. Use panter_agent_packet to obtain bounded context; never imply an agent was launched merely because its task was enqueued. Worker completions are reported evidence, not trusted verification. The server runs no model inference or shell. Do not claim a test, review, wake or execution succeeded without external evidence.'
   });
 
-  const registerLegacyTool = (...args: any[]) => {
-    const handler = args[2];
-    args[2] = (...input: any[]) => { requireAdmin(); return handler(...input); };
-    return (server.registerTool as any)(...args);
-  };
+  // Preserve Zod schema inference for legacy admin tools while enforcing
+  // actor authorization at the callback boundary.
+  function registerLegacyTool<Schema extends z.ZodType>(
+    name: string,
+    config: {
+      description: string;
+      inputSchema: Schema;
+      annotations?: { readOnlyHint?: boolean; idempotentHint?: boolean };
+    },
+    callback: (input: z.output<Schema>) => unknown,
+  ): void {
+    // The SDK overload is version-specific; keep that boundary isolated.
+    (server.registerTool as any)(name, config, (input: z.output<Schema>) => {
+      requireAdmin();
+      return callback(input);
+    });
+  }
 
   registerLegacyTool('panter_host_policy', {
     description: 'Describe requested model, reasoning, parallelism and evidence policy; never starts a model.',
