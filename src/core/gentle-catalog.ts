@@ -58,6 +58,22 @@ export function skillDefinition(id: string) { return GENTLE_SKILLS.find(x=>x.id=
 export function gentleCatalog() { return { source:GENTLE_UPSTREAM, agents:GENTLE_AGENTS, skills:GENTLE_SKILLS, review4r:REVIEW_4R, judgmentDay:JUDGMENT_DAY }; }
 const sha = (s:string) => createHash('sha256').update(s).digest('hex');
 const MAX_ASSET_BYTES = 90_000;
+
+export const GENTLE_SKILL_REFERENCES:Readonly<Record<string,readonly string[]>> = {
+  'chained-pr':['skills/chained-pr/references/chaining-details.md'],
+  'issue-creation':['skills/issue-creation/references/delegated-workflow-actions.md'],
+  'judgment-day':['skills/judgment-day/references/prompts-and-formats.md'],
+};
+export const GENTLE_ORCHESTRATOR_SECTIONS = [
+  'orchestrator','orchestrator-delegation-reference','orchestrator-delegation','orchestrator-memory',
+  'orchestrator-prompts','orchestrator-skills','orchestrator-tracking','orchestrator-verification','orchestrator-writer',
+] as const;
+export async function readOrchestratorSection(section:string){
+  if(!(GENTLE_ORCHESTRATOR_SECTIONS as readonly string[]).includes(section))throw new Error('Unknown orchestrator section');
+  const text=await asset(`assets/${section}.md`);
+  return {section,source:GENTLE_UPSTREAM,digest:sha(text),text,notice:'Pi-specific runtime instructions are reference only; host authorization and actual capabilities remain authoritative.'};
+}
+
 async function asset(path: string):Promise<string> {
   // Only paths assembled from a fixed allowlisted manifest reach this function.
   const content = await readFile(resolve('vendor/gentle-shell',path),'utf8');
@@ -122,6 +138,11 @@ export async function specialistPacket(input:{agentId:string; skillIds:readonly 
     const skill=await readSkill(id);
     parts.push(`## Skill (${id})\n${skill.text}`);
     assetDigests[`skill:${id}`]=skill.digest;
+    for(const path of GENTLE_SKILL_REFERENCES[id]??[]){
+      const reference=await asset(path);
+      parts.push(`## Skill reference (${path})\n${reference}`);
+      assetDigests[`reference:${path}`]=sha(reference);
+    }
   }
   const instruction=parts.filter(Boolean).join('\n\n');
   if (instruction.length>50_000) throw new Error('Specialist packet exceeds bound; choose fewer skills');
