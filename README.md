@@ -89,3 +89,7 @@ MIT. See [LICENSE](LICENSE). Original implementation maintained under the Panter
 See [mesh implementation notes](docs/MESH_IMPLEMENTATION.md).
 
 `npm run smoke:http` is an end-to-end SDK acceptance test of the 2026-07-28 HTTP protocol: modern version negotiation, authenticated resources, bundled Agent Studio, negative actor isolation, live `subscriptions/listen` notification, and inbox retrieval. This proves server transport behavior on CI, **not** wake of a ChatGPT browser or third-party AI application.
+
+### Oracle ARM64 staging
+
+Run privately first with [compose.dev.yml](compose.dev.yml) and the [Oracle ARM development guide](docs/ORACLE_ARM.md). The compose file binds the VM loopback interface only; this is a **developer** configuration, not an Internet-facing OAuth MCP release.

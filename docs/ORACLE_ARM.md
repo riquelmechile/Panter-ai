@@ -1,0 +1,69 @@
+# Oracle ARM64 developer deployment (not production)
+
+Panter-ai can run on an ARM64 Linux VM with 4 OCPU, 16 GiB RAM and 150 GB disk. The server is an MCP **control plane**, not a model inference server. It does not require provider API keys. The AI hosts must connect through their own authorized MCP clients.
+
+## Preflight
+
+Run these commands from your own SSH session on the Oracle VM. Do not paste SSH keys, cloud credentials or peer bearer tokens into an issue or chat.
+
+```sh
+uname -m                         # expect aarch64
+cat /etc/os-release
+free -h
+df -h /
+command -v docker && docker compose version
+command -v git && command -v gh
+```
+
+Install Git, Docker Engine with the Docker Compose plugin, and the GitHub CLI using their official ARM64 installation instructions if missing. Limit SSH to key-based logins through the OCI firewall and an access-controlled network path. Do not open port 8080 in the OCI security list.
+
+## Run a private developer instance
+
+Clone the repository only after the reviewed PR is merged or use the explicit feature branch for testing:
+
+```sh
+# Test branch; switch to the reviewed release branch for later deployments.
+git clone --branch feat/initial-a2a-mesh-v0.3.0 https://github.com/riquelmechile/Panter-ai.git
+cd Panter-ai
+cp .env.example .env
+chmod 600 .env
+```
+
+Generate distinct random tokens locally, for example `openssl rand -hex 32` for the admin token and one for each trusted host, then edit `.env` without displaying its contents in logs. Set a real `PANTER_TOKEN`, and optionally `PANTER_PEER_TOKENS` with five **different** strong random tokens. All tokens remain alpha-only; bearer identity does not yet provide interactive OAuth 2.1 consent, per-tool grants, issuer/audience binding, or full revocation.
+
+```sh
+docker compose -f compose.dev.yml up -d --build
+docker compose -f compose.dev.yml ps
+curl -fsS http://127.0.0.1:8080/health
+```
+
+The container listens internally on port 8080; Docker publishes it only to **127.0.0.1 of the Oracle host**. To inspect remotely, use SSH local forwarding from a separate trusted workstation:
+
+```sh
+ssh -N -L 8080:127.0.0.1:8080 user@oracle-host
+# On the trusted workstation: http://127.0.0.1:8080/health
+```
+
+A browser AI app on the public Internet **cannot** connect to a loopback-only MCP; this is intentional at the present security stage. Do not publish the MCP endpoint with a plain shared bearer. A production-facing endpoint requires HTTPS, OAuth 2.1 with PKCE, protected-resource discovery, per-host actor identification, scopes and consent, and a verified host-native acceptance test for each application.
+
+## Validate the software and event stream
+
+In a local checkout with an npm registry connection:
+
+```sh
+npm install --no-audit --no-fund
+npm run check
+npm test
+npm run build
+npm run smoke:http
+```
+
+The smoke test opens a real MCP 2026-07-28 connection, requests a modern `subscriptions/listen` resource stream and observes an event after a state change. This verifies the transport and local callback, **not** autonomous reasoning or wake inside GPT-A, GPT-B, Grok, Gemini or Claude. Real host tests require explicit connections and permissions in each provider app.
+
+## Persistence and recovery
+
+The named Docker volume contains the JSON ledgers. Back up `/data` while stopping the service; the alpha persistence is serialized in **one process**, not transactional across replicas. Keep exactly one replica. After interrupted writes, reconcile work results before retrying effectful operations. Upgrades should preserve backups and run the full test suite before any public exposure.
+
+## Security release gate
+
+Do not label this production ready until all conditions are demonstrated: OAuth 2.1 multi-client authorization, source/target identity enforcement, lease fencing, repeatable backup/restore, server-side workspace scope isolation, tool approval for shell and Git, host-native listening/wake observations, and a clean security review. A cloud VM alone does not grant ChatGPT remote SSH access.
