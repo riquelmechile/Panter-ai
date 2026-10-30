@@ -66,7 +66,7 @@ test('no host native subagents reports genuine limit instead of approving high-r
   await h.report(s.id,x.phaseId!,{summary:'Fixed',evidence:['git commit'],candidateSha:sha});
   x=await h.tick(s.id,{nativeSubagents:false,maxParallelSubagents:0,toolsAvailable:true});
   assert.equal(x.status,'GPT_A_INLINE'); // cannot claim independent evidence from GPT-A alone
-  await assert.rejects(h.report(s.id,x.phaseId!,{summary:'self reviewed',evidence:['read diff'],candidateSha:sha}),/Independent verifier/);
+  await assert.rejects(h.report(s.id,x.phaseId!,{summary:'self reviewed',evidence:['read diff'],candidateSha:sha}),/Solo verifier/);
 }));
 
 test('unknown edit surfaces halt writer, instead of granting unscoped permissions',()=>withHarness(async(h)=>{
@@ -341,7 +341,7 @@ test('GPT-A alone performs full four-lens 4R without peers or native children, n
  step=await h.tick(run.id,cap);
  await h.report(run.id,step.phaseId!,{summary:'Implemented',evidence:['Git diff and tests'],candidateSha:sha,runId:'builder-1'});
  step=await h.tick(run.id,cap);
- await h.report(run.id,step.phaseId!,{summary:'Verified',evidence:['Independent tool checks'],candidateSha:sha,runId:'verifier-run-1'});
+ await h.report(run.id,step.phaseId!,{summary:'Self-verified',evidence:['Read-only checks'],candidateSha:sha,runId:'gpt-a'});
  let reviewId='';
  for(let i=0;i<4;i++){
   step=await h.tick(run.id,cap);
@@ -362,10 +362,30 @@ test('GPT-A alone performs full four-lens 4R without peers or native children, n
  const persisted=await h.get(run.id);
  assert.equal(persisted?.steps.find(x=>x.phase==='REVIEW')?.status,'COMPLETE');
  assert.equal((await n.status(reviewId)).evidenceComplete,false);
- const upgraded=await h.tick(run.id,{...cap,nativeSubagents:true,maxParallelSubagents:4});
+ const retryCapacity={...cap,nativeSubagents:true,maxParallelSubagents:4};
+ const independentVerify=await h.tick(run.id,retryCapacity);
+ assert.equal(independentVerify.status,'GPT_A_NATIVE');
+ await h.report(run.id,independentVerify.phaseId!,{summary:'New native independent verification',
+   evidence:['Independent check rerun on same SHA'],candidateSha:sha,runId:'native-verify-001'});
+ const upgraded=await h.tick(run.id,retryCapacity);
  assert.equal(upgraded.status,'READY_FOR_HOST_NATIVE_DISPATCH');
  assert.equal(upgraded.next.length,4);
  assert.notEqual(upgraded.reviewId,reviewId);
  assert.equal(upgraded.approved,false);
  assert.equal((await n.status(reviewId)).soloEvidenceComplete,true);
+}));
+
+test('a self verifier must use gpt-a identity, never claim a fabricated independent child',()=>withHarness(async h=>{
+ const run=await h.start({project:'app',objective:'Fix authentication code',idempotencyKey:'solo-verify-auth',
+   writesAuthorized:true,changeSurfaces:['src/auth.ts'],coordinationMode:'GPT_A_ONLY'});
+ const capacity={nativeSubagents:false,maxParallelSubagents:0,toolsAvailable:true};
+ let phase=await h.tick(run.id,capacity);
+ await h.report(run.id,phase.phaseId!,{summary:'Designed',evidence:['Plan ready']});
+ phase=await h.tick(run.id,capacity);
+ await h.report(run.id,phase.phaseId!,{summary:'Implemented',evidence:['Patch tested'],candidateSha:sha,runId:'builder-001'});
+ phase=await h.tick(run.id,capacity);
+ assert.equal(phase.status,'GPT_A_INLINE');
+ await assert.rejects(h.report(run.id,phase.phaseId!,{summary:'Claimed independent check',evidence:['Assertions'],candidateSha:sha,runId:'fabricated-child-001'}),/Solo verifier/);
+ const observed=await h.report(run.id,phase.phaseId!,{summary:'Explicit GPT-A self-check',evidence:['Read-only tests'],candidateSha:sha,runId:'gpt-a'});
+ assert.equal(observed.steps.find(x=>x.phase==='VERIFY')?.result?.verificationMode,'SELF_UNVERIFIED');
 }));
