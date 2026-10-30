@@ -389,3 +389,28 @@ test('a self verifier must use gpt-a identity, never claim a fabricated independ
  const observed=await h.report(run.id,phase.phaseId!,{summary:'Explicit GPT-A self-check',evidence:['Read-only tests'],candidateSha:sha,runId:'gpt-a'});
  assert.equal(observed.steps.find(x=>x.phase==='VERIFY')?.result?.verificationMode,'SELF_UNVERIFIED');
 }));
+
+test('Judgment Day-only low-risk run accepts a bounded fresh-SHA correction',()=>withHarness(async(h,n)=>{
+ const run=await h.start({project:'app',objective:'Update copy text',idempotencyKey:'jd-only-correction',writesAuthorized:true,
+   changeSurfaces:['src/ui/copy.ts'],judgmentDayRequested:true});
+ assert.deepEqual(run.steps.map(x=>x.phase),['IMPLEMENT','JUDGMENT']);
+ let phase=await h.tick(run.id,solo);
+ await h.report(run.id,phase.phaseId!,{summary:'Implemented',evidence:['Modified copy'],candidateSha:sha,runId:'builder-001'});
+ phase=await h.tick(run.id,solo);
+ assert.equal(phase.status,'READY_FOR_HOST_NATIVE_DISPATCH');
+ const first=await n.status(phase.reviewId!);
+ const slot=first.slots[0]!;
+ await n.submit(first.reviewId,slot.slotId,{agentId:slot.agentId,candidateSha:sha,packetDigest:slot.packetDigest,
+   subagentRunId:'native-judge-first',evidence:['Found blocking condition'],
+   findings:[{id:'JD-1',location:'src/ui/copy.ts:2',severity:'CRITICAL',claim:'Incorrect content',proofRefs:['line:2']}]});
+ const correction=await h.tick(run.id,solo);
+ assert.equal(correction.status,'CORRECTION_PACKET_READY');
+ const before=await h.get(run.id);assert.ok(before);
+ const corrected=await h.recordCorrection(run.id,{candidateSha:'b'.repeat(40),runId:'corrector-run-1',
+   evidence:['Replaced content and tested']},before.revision);
+ assert.equal(corrected.candidateSha,'b'.repeat(40));
+ const fresh=await h.tick(run.id,solo);
+ assert.equal(fresh.status,'READY_FOR_HOST_NATIVE_DISPATCH');
+ assert.notEqual(fresh.reviewId,first.reviewId);
+ assert.equal(fresh.next[0]?.candidateSha,'b'.repeat(40));
+}));

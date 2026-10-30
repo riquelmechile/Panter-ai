@@ -169,3 +169,13 @@ test('a client cannot silently change its approved host on a subsequent OAuth gr
   const csrf = /name="csrf" value="([^"]+)"/.exec(await page.text())![1]!;
   assert.equal((await request(target, post({ csrf, password: secret, host: 'gpt-b', decision: 'allow' }, { cookie, origin: issuer }))).status, 403);
 }));
+
+test('embedded DCR reclaims abandoned clients without deleting consented registrations',()=>harness(async({request})=>{
+ const originalNow=Date.now;
+ try{
+   const first=await register(request);
+   Date.now=()=>originalNow()+25*3600*1000;
+   const next=await register(request);
+   assert.notEqual(next,first);
+ }finally{Date.now=originalNow;}
+}));
