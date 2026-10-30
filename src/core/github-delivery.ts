@@ -8,16 +8,27 @@ export type GitHubGateConfig = {
   token?: string;
   issueRequired?: boolean;
   maxReviewLines?: number;
+  /** Dedicated GitHub login whose APPROVE on the exact head SHA is the
+   * independent-review evidence (see docs/INDEPENDENT_REVIEW_IDENTITY.md). */
+  independentReviewer?: string;
+};
+export type IndependentReviewEvidence = {
+  login: string;
+  state: 'APPROVED_EXACT_SHA' | 'MISSING' | 'STALE_SHA' | 'CHANGES_REQUESTED' | 'DISMISSED' | 'REVIEWER_IS_AUTHOR' | 'UNAVAILABLE';
+  reviewId?: number; commitId?: string;
 };
 export type GitHubDecision = {
   state: 'BLOCKED' | 'PENDING' | 'REVIEWABLE';
   repository: string; prNumber: number; expectedSha: string;
   headSha?: string; baseBranch?: string; draft?: boolean;
   reviewLoad?: number; issueNumber?: number;
+  independentReview?: IndependentReviewEvidence;
   satisfied: string[]; blockers: string[]; warnings: string[];
   approvals: {review: false; commit: false; push: false; merge: false; deploy: false};
 };
 const sha = /^[0-9a-f]{40}$/i;
+const loginPattern = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
+const MAX_REVIEW_PAGES = 10;
 const repoPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const branchPattern = /^(feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert)\/[a-z0-9._-]+$/;
 const conventional = /^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9._-]+\))?!?: .+$/;
@@ -39,6 +50,7 @@ export class GitHubDeliveryGate {
   private readonly required:string[];
   private readonly budget:number;
   private readonly issueRequired:boolean;
+  private readonly reviewer:string|null;
   constructor(private readonly cfg:GitHubGateConfig,
     private readonly fetcher:typeof fetch = fetch){
     this.allowed=new Set(cfg.allowedRepositories);
@@ -48,6 +60,9 @@ export class GitHubDeliveryGate {
     this.budget=cfg.maxReviewLines??400;
     check(Number.isInteger(this.budget)&&this.budget>=100&&this.budget<=5000,'Invalid review budget');
     this.issueRequired=cfg.issueRequired!==false;
+    const reviewer=cfg.independentReviewer?.trim()??'';
+    check(!reviewer||loginPattern.test(reviewer),'Invalid independent reviewer GitHub login');
+    this.reviewer=reviewer?reviewer.toLowerCase():null;
   }
   allows(repository:string){return this.allowed.has(repository)&&repoPattern.test(repository);}
   private async api(repository:string,endpoint:string):Promise<unknown>{
@@ -74,6 +89,7 @@ export class GitHubDeliveryGate {
       expectedSha:input.expectedSha,satisfied:[],blockers:[],warnings:[],
       approvals:{review:false,commit:false,push:false,merge:false,deploy:false}};
     const blocked=result.blockers,ok=result.satisfied;
+    let prCommits:any[]|null=null;
     try{
       const [repoData,prData]=await Promise.all([
         this.api(input.repository,''),this.api(input.repository,`pulls/${input.prNumber}`),
@@ -104,13 +120,13 @@ export class GitHubDeliveryGate {
       if(!Number.isInteger(commitCount)||commitCount<1||commitCount>(initialBootstrap?300:100)){
         blocked.push('PR commit history exceeds allowed bounds; inspect all work-unit commits');
       }else{
-        const commits:any[]=[];
+        const commits:any[]=prCommits=[];
         for(let page=1;page<=Math.ceil(commitCount/100);page++){
           const pageData=await this.api(input.repository,`pulls/${input.prNumber}/commits?per_page=100${page===1?'':`&page=${page}`}`);
           if(!Array.isArray(pageData)){blocked.push('Incomplete GitHub paginated commit history');break;}
           commits.push(...pageData);
         }
-        if(commits.length!==commitCount)blocked.push('Incomplete GitHub commit history');
+        if(commits.length!==commitCount){blocked.push('Incomplete GitHub commit history');prCommits=null;}
         else {
           const invalid=commits.filter((x:any)=>!inspectCommitMessage(String(x.commit?.message??'')));
           const coauthored=commits.filter((x:any)=>/^co-authored-by:/im.test(String(x.commit?.message??'')));
@@ -159,6 +175,22 @@ export class GitHubDeliveryGate {
         }
         if(Number(checks?.total_count)>100)blocked.push('GitHub checks are paginated; full required-check proof unavailable');
       }
+      if(!this.reviewer){
+        result.warnings.push('Independent reviewer identity not configured (PANTER_GITHUB_INDEPENDENT_REVIEWER); no GitHub review evidence checked');
+      }else{
+        const evidence=await this.independentReview(input.repository,input.prNumber,head,prData,prCommits);
+        result.independentReview=evidence;
+        if(evidence.state==='APPROVED_EXACT_SHA'&&head===input.expectedSha)ok.push(`independent_review:${evidence.login}`);
+        else blocked.push({
+          MISSING:`Independent reviewer ${evidence.login} has not approved this PR`,
+          STALE_SHA:`Independent reviewer ${evidence.login} approved a different commit; re-review the exact head SHA`,
+          CHANGES_REQUESTED:`Independent reviewer ${evidence.login} requested changes`,
+          DISMISSED:`Independent reviewer ${evidence.login} approval was dismissed`,
+          REVIEWER_IS_AUTHOR:`Independent reviewer ${evidence.login} authored this PR or one of its commits; review is not independent`,
+          UNAVAILABLE:`Independent reviewer evidence unavailable; commit authorship could not be verified`,
+          APPROVED_EXACT_SHA:'Independent review does not match the frozen candidate SHA',
+        }[evidence.state]);
+      }
       // 'REVIEWABLE' is evidence readiness, never permission to merge.
       result.state=blocked.length?'BLOCKED':'REVIEWABLE';
     }catch(error){
@@ -166,5 +198,33 @@ export class GitHubDeliveryGate {
       result.state='PENDING';
     }
     return result;
+  }
+  /** Latest state-changing review by the configured identity, evaluated like
+   * GitHub does: COMMENTED reviews never change approval state. */
+  private async independentReview(repository:string,prNumber:number,head:string,prData:any,commits:any[]|null):Promise<IndependentReviewEvidence>{
+    const login=this.reviewer!;
+    const authors=new Set<string>();
+    const prAuthor=String(prData?.user?.login??'').toLowerCase();
+    if(prAuthor)authors.add(prAuthor);
+    if(!commits)return {login,state:'UNAVAILABLE'};
+    for(const c of commits)for(const who of [c?.author?.login,c?.committer?.login])
+      if(typeof who==='string'&&who&&who.toLowerCase()!=='web-flow')authors.add(who.toLowerCase());
+    if(authors.has(login))return {login,state:'REVIEWER_IS_AUTHOR'};
+    const reviews:any[]=[];
+    for(let page=1;page<=MAX_REVIEW_PAGES;page++){
+      const pageData=await this.api(repository,`pulls/${prNumber}/reviews?per_page=100${page===1?'':`&page=${page}`}`);
+      if(!Array.isArray(pageData))return {login,state:'UNAVAILABLE'};
+      reviews.push(...pageData);
+      if(pageData.length<100)break;
+      if(page===MAX_REVIEW_PAGES)return {login,state:'UNAVAILABLE'};
+    }
+    const decisive=reviews.filter(r=>String(r?.user?.login??'').toLowerCase()===login&&
+      ['APPROVED','CHANGES_REQUESTED','DISMISSED'].includes(String(r?.state)));
+    const last=decisive.at(-1);
+    if(!last)return {login,state:'MISSING'};
+    const base={login,reviewId:Number(last.id),commitId:String(last.commit_id??'')};
+    if(last.state==='CHANGES_REQUESTED')return {...base,state:'CHANGES_REQUESTED'};
+    if(last.state==='DISMISSED')return {...base,state:'DISMISSED'};
+    return {...base,state:last.commit_id===head?'APPROVED_EXACT_SHA':'STALE_SHA'};
   }
 }

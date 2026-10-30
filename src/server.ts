@@ -85,6 +85,7 @@ const githubGate = new GitHubDeliveryGate({
   allowedRepositories:(process.env.PANTER_GITHUB_ALLOWED_REPOS??'').split(',').map(x=>x.trim()).filter(Boolean),
   requiredChecks:(process.env.PANTER_GITHUB_REQUIRED_CHECKS??'').split(',').map(x=>x.trim()).filter(Boolean),
   token:process.env.PANTER_GITHUB_TOKEN||undefined,
+  independentReviewer:process.env.PANTER_GITHUB_INDEPENDENT_REVIEWER||undefined,
 });
 const nativeReview = await NativeReviewBridge.open({enabled:process.env.PANTER_NATIVE_REVIEW_ENABLED==='1',binary:process.env.PANTER_GENTLE_AI_BIN??'gentle-ai',repositoryRoot:process.env.PANTER_NATIVE_REVIEW_WORKTREE??''});
 const rddKeysFile=process.env.PANTER_RDD_RUNNER_KEYS_FILE;
