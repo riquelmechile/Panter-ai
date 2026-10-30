@@ -106,6 +106,7 @@ test('AUTO mode dispatches configured specialist without choosing an agent, then
   assert.equal(first.status,'REMOTE_A2A_DISPATCHED');
   assert.equal(first.next[0]?.agentId,'gentle-ai-explore');
   const workId=first.next[0]?.workId;
+  assert.ok(typeof workId==='string');
   const again=await h.tick(s.id,solo);assert.equal(again.status,'WAITING_REMOTE_PEER');
   const claimed=await m.claim('claude',workId);
   await m.complete('claude',workId,claimed.attemptId!,claimed.leaseGeneration,
