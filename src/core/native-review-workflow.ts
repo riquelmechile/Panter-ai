@@ -103,8 +103,8 @@ export class NativeSubagentReview {
     const packet=await specialistPacket({agentId:slot.agentId,objective:r.objective,candidateSha:r.candidateSha,
       skillIds:r.kind==='judgment-day'?['judgment-day']:[],modelRequest:policy.model,effortRequest:policy.reasoningEffort});
     requireValid(packet.digest===slot.packetDigest,'Catalog assets changed: frozen packet mismatch');
-    return {reviewId:r.id,slotId:slot.id,kind:r.kind,agentId:slot.agentId,candidateSha:r.candidateSha,
-      ...packet,execution:'HOST_NATIVE_SUBAGENT_REQUESTED' as const,
+    return {reviewId:r.id,slotId:slot.id,kind:r.kind,candidateSha:r.candidateSha,
+      ...packet,packetDigest:packet.digest,execution:'HOST_NATIVE_SUBAGENT_REQUESTED' as const,
       independenceRequirement:'Launch a new, separate native child context for this exact slot, never share other lens or blind judge reports. Do not let the implementing agent review its own work.',
       returnContract:'Child returns JSON with agentId, candidateSha, packetDigest, a unique subagentRunId, evidence[], and findings[]. Each finding includes id, location, severity, claim and proofRefs[]. Parent submits this JSON via panter_native_review_submit. Host-reported child identity is not cryptographically attested.',
       capacityRequest:{model:policy.worker.model,reasoning:policy.worker.reasoningEffort,processing:policy.worker.preferredProcessing},
