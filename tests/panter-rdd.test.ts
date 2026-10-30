@@ -190,3 +190,36 @@ test('RDD freezes complete author identity set across repeated begin calls',()=>
  await assert.rejects(rdd.begin({...v.begin,implementerRunIds:['builder-one']}),/Conflicting review registration/);
  await assert.rejects(rdd.begin({...v.begin,implementerRunIds:['builder-one','builder-one']}),/Invalid or duplicate/);
 }));
+
+test('automatic harness includes parallel unit authors when rejecting signed self-review',()=>setup(async({native,mesh,rdd,dir})=>{
+ const {AutomaticHarness}=await import('../src/core/auto-harness.js');
+ const harness=await AutomaticHarness.open(dir,mesh,native,gate(),undefined,rdd);
+ const run=await harness.start({project:'app',githubRepository:repo,githubPrNumber:12,objective:'Fix authentication security',
+   idempotencyKey:'multi-author',writesAuthorized:true,changeSurfaces:['src/auth/a.ts','src/auth/b.ts'],
+   coordinationMode:'GPT_A_ONLY',observations:{independentWorkUnits:2}});
+ const capacity={nativeSubagents:true,maxParallelSubagents:4,toolsAvailable:true};
+ let step=await harness.tick(run.id,capacity);
+ await harness.report(run.id,step.phaseId!,{summary:'Designed scoped change',evidence:['Design verified']});
+ const stored=await harness.get(run.id);assert.ok(stored);
+ const split=await harness.defineUnits(run.id,[{objective:'Implement A',paths:['src/auth/a.ts']},{objective:'Implement B',paths:['src/auth/b.ts']}],stored.revision);
+ step=await harness.tick(run.id,capacity);
+ assert.equal(step.status,'GPT_A_NATIVE_IMPLEMENTATION_BATCH');
+ await harness.reportUnit(run.id,split.units![0]!.id,{runId:'independent-child-0',summary:'Built A',evidence:['Unit A tested']});
+ await harness.reportUnit(run.id,split.units![1]!.id,{runId:'other-builder-child',summary:'Built B',evidence:['Unit B tested']});
+ step=await harness.tick(run.id,capacity);
+ assert.equal(step.status,'IMPLEMENTATION_INTEGRATION_REQUIRED');
+ const implement=split.steps.find(x=>x.phase==='IMPLEMENT');assert.ok(implement);
+ await harness.report(run.id,implement.id,{summary:'Integrated',evidence:['Integration tests'],candidateSha:sha,runId:'parent-integration'});
+ step=await harness.tick(run.id,capacity);
+ await harness.report(run.id,step.phaseId!,{summary:'Verified',evidence:['Independent tests'],candidateSha:sha,runId:'independent-verifier'});
+ step=await harness.tick(run.id,capacity);
+ assert.equal(step.status,'READY_FOR_HOST_NATIVE_DISPATCH');
+ const review=await native.status(step.reviewId!);
+ await reportAll(native,{reviewId:review.reviewId,candidateSha:review.candidateSha,slots:review.slots} as Awaited<ReturnType<NativeSubagentReview['create']>>);
+ step=await harness.tick(run.id,capacity);
+ assert.equal(step.status,'NEEDS_REVIEW_EVIDENCE');
+ const r=await rdd.getForReview(review.reviewId);assert.ok(r);
+ assert.ok(r.implementerRunIds?.includes('independent-child-0'));
+ assert.ok(r.implementerRunIds?.includes('other-builder-child'));
+ assert.ok(r.implementerRunIds?.includes('parent-integration'));
+}));
