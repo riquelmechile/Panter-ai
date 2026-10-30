@@ -98,6 +98,48 @@ test('Batch prepares all independent native reviewer packets at observed capacit
  assert.equal(batch.modelsStartedByMcp,0);assert.equal(batch.requestedReasoning,'max');
  assert.notEqual(batch.packets[0]!.digest,batch.packets[1]!.digest);
  const unavailable=await engine.batch(review.reviewId,0);
- assert.equal(unavailable.dispatch,'HOST_NATIVE_SUBAGENTS_UNAVAILABLE');assert.equal(unavailable.concurrentSlots,0);
+ assert.equal(unavailable.dispatch,'READY_FOR_GPT_A_SOLO_4R');assert.equal(unavailable.concurrentSlots,1);
+ assert.equal(unavailable.packets.length,1);assert.equal(unavailable.reviewMode,'GPT_A_SOLO_UNVERIFIED');
  await assert.rejects(engine.batch(review.reviewId,33),/Invalid observed native parallelism/);
+}));
+
+test('GPT-A can perform four solo 4R lenses sequentially with no fabricated independent receipts',()=>fixture(async(engine,dir)=>{
+ const review=await engine.create({...input,idempotencyKey:'solo-4r-test'});
+ for(let i=0;i<4;i++){
+  const batch=await engine.batch(review.reviewId,0);
+  assert.equal(batch.dispatch,'READY_FOR_GPT_A_SOLO_4R');
+  assert.equal(batch.concurrentSlots,1);assert.equal(batch.packets.length,1);
+  const packet=batch.packets[0]!;
+  assert.equal(packet.agentId,review.slots[i]!.agentId);
+  assert.equal(packet.execution,'GPT_A_SOLO_LENS_REQUESTED');
+  const report={agentId:packet.agentId,candidateSha:sha,packetDigest:packet.packetDigest,
+    evidence:['Inspected frozen candidate with this lens'],findings:[]};
+  if(i===0)await assert.rejects(engine.submitSolo(review.reviewId,review.slots[1]!.slotId,{
+    ...report,agentId:review.slots[1]!.agentId,packetDigest:review.slots[1]!.packetDigest
+  }),/sequential/);
+  assert.equal((await engine.submitSolo(review.reviewId,packet.slotId,report)).idempotent,false);
+  assert.equal((await engine.submitSolo(review.reviewId,packet.slotId,report)).idempotent,true);
+  await assert.rejects(engine.submit(review.reviewId,packet.slotId,{
+    ...report,subagentRunId:'fabricated-native-child'
+  }),/Cannot promote or mix/);
+ }
+ const result=await engine.status(review.reviewId);
+ assert.equal(result.stage,'SOLO_4R_COMPLETED_UNVERIFIED');
+ assert.equal(result.soloEvidenceComplete,true);
+ assert.equal(result.evidenceComplete,false);
+ assert.equal(result.independentNativeRunsAttested,false);
+ assert.equal(result.approved,false);
+ assert.equal(result.reportedSubagentRuns.length,0);
+ assert.deepEqual(result.missing,[]);
+ assert.equal((await (await NativeSubagentReview.open(dir)).status(review.reviewId)).soloEvidenceComplete,true);
+}));
+test('GPT-A self-review cannot impersonate blind Judgment Day judges',()=>fixture(async engine=>{
+ const review=await engine.create({...input,idempotencyKey:'solo-jd-denied',kind:'judgment-day'});
+ const batch=await engine.batch(review.reviewId,0);
+ assert.equal(batch.dispatch,'HOST_NATIVE_SUBAGENTS_UNAVAILABLE');
+ assert.equal(batch.packets.length,0);
+ await assert.rejects(engine.submitSolo(review.reviewId,review.slots[0]!.slotId,{
+   agentId:review.slots[0]!.agentId,candidateSha:sha,packetDigest:review.slots[0]!.packetDigest,
+   evidence:['Inspected SHA'],findings:[]
+ }),/Judgment Day requires separate blind judges/);
 }));
