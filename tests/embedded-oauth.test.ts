@@ -285,6 +285,19 @@ test('N1: 4200 fake consent sids from one IP cannot fill global rate-map or bloc
     'content-type':'application/json','x-panter-client-ip':'203.0.113.200'},
     body:JSON.stringify({redirect_uris:[callbackA],token_endpoint_auth_method:'none'})});
  assert.equal(valid.status,201,'A different source must still register after the fake-sid flood');
+ const clientId=(await valid.json() as {client_id:string}).client_id;
+ const query=new URLSearchParams({client_id:clientId,redirect_uri:callbackA,response_type:'code',
+   code_challenge:challenge,code_challenge_method:'S256',scope:'mcp',resource,state:'still-works'});
+ const started=await request('/authorize?'+query,{headers:{'x-panter-client-ip':'203.0.113.200'}});
+ assert.equal(started.status,302,'A clean OAuth authorization still starts');
+ const cookie=started.headers.get('set-cookie')!.split(';')[0]!;
+ const location=started.headers.get('location')!;
+ const page=await request(location,{headers:{cookie}});
+ assert.equal(page.status,200);
+ const csrf=/name="csrf" value="([^"]+)"/.exec(await page.text())?.[1]!;
+ const approved=await request(location,post({csrf,password:secret,host:'gpt-a',decision:'allow'},
+   {cookie,origin:issuer,'x-panter-client-ip':'203.0.113.200'}));
+ assert.equal(approved.status,302,'Valid consent POST remains usable after fake SID flood');
 },req=>new ClientAddressPolicy('127.0.0.1/32').identify(req)));
 
 test('M1 residual: 20 sources cannot evict a legitimate pending consent after reaching capacity',()=>harness(async({request,dir})=>{
@@ -316,6 +329,12 @@ test('M1 residual: 20 sources cannot evict a legitimate pending consent after re
  assert.equal(ledger.pending.length,100);
  const over=await authorizeAt('192.0.2.21',await registerAt('192.0.2.22'));
  assert.equal(over.status,400,'At capacity, new requests fail instead of evicting unrelated pending sessions');
- assert.equal((await request(location,{headers:{cookie}})).status,200,
+ const page=await request(location,{headers:{cookie}});
+ assert.equal(page.status,200,
    'The legitimate operator consent must remain available despite distributed pending saturation');
+ const csrf=/name="csrf" value="([^"]+)"/.exec(await page.text())?.[1]!;
+ const approval=await request(location,post({csrf,password:secret,host:'gpt-a',decision:'allow'},
+   {cookie,origin:issuer,'x-panter-client-ip':originalIp}));
+ assert.equal(approval.status,302,'The original operator can finish consent at full pending capacity');
+ assert.ok(new URL(approval.headers.get('location')!).searchParams.get('code'));
 },req=>new ClientAddressPolicy('127.0.0.1/32').identify(req)));
