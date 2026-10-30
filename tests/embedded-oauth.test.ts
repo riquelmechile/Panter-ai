@@ -218,7 +218,10 @@ test('trusted proxy preserves separate OAuth registration quotas and fails close
 },req=>new ClientAddressPolicy('127.0.0.1/32').identify(req)));
 
 test('one IP cannot consume the 100 global consent slots or lock out a second IP',()=>harness(async({request,dir})=>{
- const client=await register(request);
+ const reg=await request('/register',{method:'POST',headers:{'content-type':'application/json','x-panter-client-ip':'198.51.100.20'},
+   body:JSON.stringify({redirect_uris:[callbackA],token_endpoint_auth_method:'none'})});
+ assert.equal(reg.status,201);
+ const client=(await reg.json() as {client_id:string}).client_id;
  const query=new URLSearchParams({client_id:client,redirect_uri:callbackA,response_type:'code',
    code_challenge:challenge,code_challenge_method:'S256',scope:'mcp',resource,state:'pending-flood'});
  const call=(source:string)=>request('/authorize?'+query,{headers:{'x-panter-client-ip':source}});
@@ -236,3 +239,19 @@ test('rate-map saturation never clears live quota entries',()=>harness(async({oa
  assert.throws(()=>internals.throttled('extra-source',1),/saturated/);
  assert.throws(()=>internals.throttled('revoke:global',2),/Rate limited/);
 }));
+
+test('IPv6 /64 rotation cannot exceed the per-source registration quota',()=>harness(async({request})=>{
+ const body=JSON.stringify({redirect_uris:[callbackA],token_endpoint_auth_method:'none'});
+ for(let i=1;i<=20;i++){
+  const response=await request('/register',{method:'POST',headers:{
+    'content-type':'application/json','x-panter-client-ip':'2001:db8:abcd:0042::'+i.toString(16)},body});
+  assert.equal(response.status,201,'Initial IPv6 /64 bucket must accept twenty registrations');
+ }
+ for(let i=21;i<=60;i++){
+  const response=await request('/register',{method:'POST',headers:{
+    'content-type':'application/json','x-panter-client-ip':'2001:db8:abcd:42::'+i.toString(16)},body});
+  assert.equal(response.status,400,'Rotating IPv6 within /64 must not reset registration quota');
+ }
+ assert.equal((await request('/register',{method:'POST',headers:{
+   'content-type':'application/json','x-panter-client-ip':'2001:db8:abcd:43::1'},body})).status,201);
+},req=>new ClientAddressPolicy('127.0.0.1/32').identify(req)));
