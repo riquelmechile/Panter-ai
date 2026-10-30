@@ -47,8 +47,7 @@ export function assessMeshReview(input:{candidateSha:string;kind:'4r'|'judgment-
   const reasons:string[]=[];
   if(input.work.length!==expected.length||new Set(input.work.map(x=>x.agentId)).size!==expected.length)
     reasons.push('Reviewer slots missing or duplicated');
-  if(input.kind==='judgment-day'&&new Set(input.work.map(x=>x.host)).size!==2)
-    reasons.push('Judgment Day judges must be independently hosted');
+  // Reviewer independence is enforced by Panter-RDD trusted-runner signatures, not host count.
   const summaries=input.work.map(w=>{
     if(!expected.includes(w.agentId??''))reasons.push('Unexpected reviewer identity');
     if(w.state!=='COMPLETED'||!w.receiptDigest||!w.result){reasons.push(`Missing finished receipt: ${w.agentId}`);return {agentId:w.agentId,accepted:false,findings:null};}

@@ -194,8 +194,8 @@ export class MeshEngine {
     const bindings=await this.specialistBindings();
     const configured=ids.map(id=>bindings.find(b=>b.agentId===id));
     check(configured.every(Boolean),'All review specialists must be configured first');
-    const hosts=configured.map(x=>x!.host);
-    if(input.kind==='judgment-day')check(new Set(hosts).size===2,'Judgment Day judges must be on independent hosts');
+    // One host may run both blind judges as separate, signed child executions.
+    // Panter-RDD verifies runner evidence; the host label never proves independence.
     const packets=await Promise.all(ids.map((id,i)=>{
       const binding=configured[i]!;
       return specialistPacket({agentId:id,skillIds:binding.skillIds,objective:input.objective,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,candidateSha:input.candidateSha});
