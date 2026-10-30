@@ -29,5 +29,24 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - name: Build Oracle ARM64 image without publishing
         run: docker buildx build --platform linux/arm64 --load -t panter-ai:arm64-ci .
-      - name: Verify ARM64 container starts
-        run: docker run --rm --platform linux/arm64 panter-ai:arm64-ci node --version
+      - name: Verify actual ARM64 Panter OAuth HTTP startup and unauthorized MCP
+        run: |
+          set -eu
+          docker run --rm -d --name panter-arm64-ci --platform linux/arm64 \
+            -p 127.0.0.1:18089:8080 \
+            -e PANTER_AUTH_MODE=embedded \
+            -e PANTER_PUBLIC_MCP_URL=https://panter.example.org/mcp \
+            -e PANTER_OAUTH_REDIRECT_URIS=https://chatgpt.com/connector_platform_oauth_redirect \
+            -e PANTER_CONSENT_PASSWORD=ci-only-random-private-password-32-characters \
+            -e PANTER_ALLOWED_HOSTS=127.0.0.1,localhost \
+            panter-ai:arm64-ci
+          trap 'docker logs panter-arm64-ci || true; docker stop panter-arm64-ci || true' EXIT
+          good=0
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:18089/health | grep -q 'panter-ai'; then good=1; break; fi
+            sleep 1
+          done
+          test "$good" -eq 1
+          status=$(curl --silent -o /dev/null -w '%{http_code}' http://127.0.0.1:18089/mcp)
+          test "$status" = "401"
+

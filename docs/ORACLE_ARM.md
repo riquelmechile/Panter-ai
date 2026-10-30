@@ -87,3 +87,9 @@ Operator access was isolated in code onto a Unix-domain socket with `0600` files
 The OAuth upstream's rate identity now uses `PANTER_TRUSTED_PROXY_CIDRS`, with an overwritten single-IP `X-Panter-Client-IP` header required from pinned proxy peers. Nginx/Cloudflare must enforce real-client IP provenance and independent rate limits. See `docs/nginx-panter.conf.example`; it is a template, **not** a deployed Cloudflare configuration. Verify the exact OCI proxy layout, health, 401/403 boundaries, DNS, TLS, client quotas, owner-only socket and end-to-end login before public exposure.
 
 `PANTER_AUTH_MODE=dev-static` remains for strictly private developer testing; never publish its admin bearer.
+
+## 31 October review amendments — private Compose and trusted ingress
+
+`compose.dev.yml` now explicitly runs **embedded OAuth**, not the TCP-admin `dev-static` mode. Populate `PANTER_PUBLIC_MCP_URL`, `PANTER_CONSENT_PASSWORD` and `PANTER_OAUTH_REDIRECT_URIS` in the private `.env` before starting it. The Compose Host allowlist uses `${PANTER_ALLOWED_HOSTS:-127.0.0.1,localhost}` rather than overriding the user's intended proxy host. To test nginx with `Host: panter.example.org`, set `PANTER_ALLOWED_HOSTS=panter.example.org` explicitly in the Compose interpolation environment (not only the service `env_file`): Docker Compose substitutes `${...}` from its own project environment.
+
+Inside Docker, the TCP peer IP seen by Panter is often the bridge gateway, not 127.0.0.1. After measuring the actual value, set `PANTER_TRUSTED_PROXY_CIDRS` narrowly to that peer's fixed /32 or /128; the proxy must forcibly overwrite `X-Panter-Client-IP` from a verified upstream IP. Never trust arbitrary caller headers. Nginx template provides throttles for register, authorize, consent, token and revoke, and a long `/mcp` streaming timeout. The snippets are templates and DO NOT configure your actual Cloudflare tunnel or Oracle. A public rollout still needs real network validation.

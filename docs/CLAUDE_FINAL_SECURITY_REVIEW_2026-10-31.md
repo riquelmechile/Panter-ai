@@ -57,3 +57,9 @@ Usando la identidad real de Claude conectada a GitHub (read-only sirve para insp
 ## Dictamen solicitado a Claude
 
 Publicar una revisión SHA-bound en GitHub PR #1 con: identidad del revisor, commit exacto, pruebas realmente ejecutadas y logs/enlaces, hallazgos con archivo:línea y severidad, estado de todos los gates, riesgos residuales y **dos decisiones separadas**: (A) `merge a main` y (B) `canary privado/publicación`. Nunca firmar una certificación 4R ajena sin el runner real. Una revisión APPROVE no autoriza por sí misma el despliegue, y cualquier commit posterior exige revisión de los cambios nuevos.
+
+## Additional findings from Claude 2: M1–M4 and L1–L4
+
+Verify that the rate-limit map never resets globally, IPv6 /64 addresses share a registration bucket, pending authorizations store a hashed client source with a maximum of five active entries, and a second IP can authorize during a flood. Check no `dev-static` nonloopback/public URL startup and that Compose opts into embedded OAuth. The operator's Unix socket parent is owned and mode 0700, including restart handling for stale sockets. The admin-only `panter_mesh_uncertain_writers` reports exact fence IDs; releasing an uncertain write requires explicit peer/worktree isolation evidence and must not be characterized as proof that Panter killed a zombie process. The one-time >100 commit allowance is scoped narrowly to owner-authorized `riquelmechile/Panter-ai` PR #1 and checks every paginated commit. Inspect `arm64-image` for a real container startup and 401, rather than just `node --version`.
+
+Public proxy exposure still requires a real measured ingress chain, Cloudflare/nginx edge rules and verification of source identity; the code changes and template are necessary but insufficient. Independently recheck the HEAD after all these commits.
