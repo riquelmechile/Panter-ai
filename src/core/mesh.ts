@@ -28,6 +28,8 @@ export class MeshEngine {
   private chain: Promise<unknown> = Promise.resolve();
   /** Emitted only AFTER the updated ledger is atomically persisted. */
   readonly events = new EventEmitter();
+  private writeGuard:((missionId:string,paths:string[])=>Promise<void>)|null=null;
+  setWriteGuard(guard:(missionId:string,paths:string[])=>Promise<void>){this.writeGuard=guard;}
   private constructor(dir: string) { this.file = join(resolve(dir), 'mesh.json'); }
 
   static async open(dir: string) {
