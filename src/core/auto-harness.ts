@@ -138,6 +138,13 @@ export class AutomaticHarness {
     });
   }
   get(runId:string){return this.read(s=>s.runs.find(r=>r.id===runId)??null);}
+  async authorizeDelegatedWrite(id:string,paths:string[]){
+    const run=await this.get(id);
+    ensure(run?.permission==='WRITE_APPROVED'&&run.writeGrantId&&paths.length>0,'Authorized run required');
+    const grant=await this.read(s=>s.grants?.find(g=>g.id===run.writeGrantId));
+    ensure(grant&&grant.boundRunId===id&&grant.expiresAt>Date.now(),'Active operator grant required');
+    for(const p of paths)ensure(run.paths.some(q=>p===q||p.startsWith(q+'/'))&&grant.allowedPaths.some(q=>p===q||p.startsWith(q+'/')),'Out-of-scope writer');
+  }
   /** Bind a PR discovered/created by an authorized host after work started.
    * This changes only Panter's routing metadata, never the remote repository. */
   async bindGithub(runId:string,input:{repository:string;prNumber:number;expectedBase?:string},expectedRevision:number){
