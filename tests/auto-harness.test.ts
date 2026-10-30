@@ -147,7 +147,7 @@ test('automatic final tick checks target GitHub PR evidence without manual agent
   const prSha='a'.repeat(40);
   const resources:Record<string,unknown>={
     '':{default_branch:'main'},
-    'pulls/4':{state:'open',draft:true,head:{sha:prSha,ref:'feat/feature'},base:{ref:'main'},body:'Refs #7',labels:[{name:'type:feature'}],additions:120,deletions:20,commits:1},
+    'pulls/4':{state:'open',draft:false,head:{sha:prSha,ref:'feat/feature'},base:{ref:'main'},body:'Refs #7',labels:[{name:'type:feature'}],additions:120,deletions:20,commits:1},
     'issues/7':{labels:[{name:'status:approved'}]},
     'pulls/4/commits?per_page=100':[{sha:prSha,commit:{message:'feat: change label'}}],
     [`commits/${prSha}/check-runs?per_page=100`]:{total_count:1,check_runs:[{name:'ci',status:'completed',conclusion:'success',head_sha:prSha}]}
