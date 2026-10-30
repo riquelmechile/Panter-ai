@@ -14,6 +14,7 @@ const issuer = 'https://panter.test.example';
 const resource = issuer + '/mcp';
 const callback = 'https://chatgpt.com/connector_platform_oauth_redirect';
 const secret = 'only-for-test-embedded-oauth-password-with-entropy';
+const operatorSecret = 'only-for-test-operator-mcp-control-secret-with-entropy';
 const verifier = 'b'.repeat(64);
 const challenge = createHash('sha256').update(verifier).digest('base64url');
 const clients = [];
@@ -51,6 +52,7 @@ try {
     ...process.env, PANTER_PORT: port, PANTER_BIND_HOST: '127.0.0.1', PANTER_DATA_DIR: dir,
     PANTER_AUTH_MODE: 'embedded', PANTER_PUBLIC_MCP_URL: resource,
     PANTER_OAUTH_REDIRECT_URIS: callback, PANTER_CONSENT_PASSWORD: secret,
+    PANTER_OPERATOR_TOKEN: operatorSecret,
   }, stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = ''; proc.stderr.on('data', c => stderr += String(c));
   let ready = false;
@@ -65,6 +67,14 @@ try {
   const aCredentials = await authorize('gpt-a'), bCredentials = await authorize('gpt-b');
   assert.notEqual(aCredentials.client, bCredentials.client);
   const a = await connect(aCredentials), b = await connect(bCredentials);
+  const operator = await connect({ client: 'local-operator', access_token: operatorSecret });
+  const requestGrant = { project:'operator-check', objective:'Authorized test change',
+    allowedPaths:['src/auth.ts'],ttlSeconds:600 };
+  const deniedGrant = await a.callTool({name:'panter_harness_write_grant',arguments:requestGrant});
+  assert.ok(deniedGrant.isError,'An OAuth GPT-A client must never issue an operator write grant');
+  const granted = await operator.callTool({name:'panter_harness_write_grant',arguments:requestGrant});
+  assert.ok(!granted.isError,JSON.stringify(granted.content));
+  assert.ok(unpack(granted).grantId,'Only the authenticated loopback operator can grant writes');
   let notify;
   const signal = new Promise(resolve => { notify = resolve; });
   a.setNotificationHandler('notifications/resources/updated', msg => {
@@ -90,7 +100,7 @@ try {
   const unauthorized = await request('/mcp', { method: 'POST', headers: { authorization: `Bearer ${bCredentials.access_token}`, 'content-type': 'application/json' }, body: '{}' });
   assert.equal(unauthorized.status, 401);
   await listening.close();
-  console.log('PASS embedded DCR -> PKCE -> human consent -> authenticated subscriptions/listen -> actor-bound MCP A2A -> revoke 401');
+  console.log('PASS embedded DCR -> PKCE -> human consent -> loopback operator grant / GPT-A denied -> subscriptions/listen -> actor-bound A2A -> revoke 401');
 } finally {
   for (const client of clients) await client.close().catch(() => {});
   if (proc) proc.kill('SIGTERM');

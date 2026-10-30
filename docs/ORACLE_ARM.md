@@ -34,14 +34,14 @@ Generate distinct random tokens locally, for example `openssl rand -hex 32` for 
 ```sh
 docker compose -f compose.dev.yml up -d --build
 docker compose -f compose.dev.yml ps
-curl -fsS http://127.0.0.1:8080/health
+curl -fsS http://127.0.0.1:18080/health
 ```
 
-The container listens internally on port 8080; Docker publishes it only to **127.0.0.1 of the Oracle host**. To inspect remotely, use SSH local forwarding from a separate trusted workstation:
+The container listens internally on port 8080; Docker publishes it only to **127.0.0.1 of the Oracle host** at port **18080 by default** (set `PANTER_HOST_PORT` to another free local port in `.env`). Do not collide with an existing Xanxittoo or other Oracle service. To inspect remotely, use SSH local forwarding from a separate trusted workstation:
 
 ```sh
-ssh -N -L 8080:127.0.0.1:8080 user@oracle-host
-# On the trusted workstation: http://127.0.0.1:8080/health
+ssh -N -L 18080:127.0.0.1:18080 user@oracle-host
+# On the trusted workstation: http://127.0.0.1:18080/health
 ```
 
 A browser AI app on the public Internet **cannot** connect to a loopback-only MCP; this is intentional at the present security stage. Do not publish the MCP endpoint with a plain shared bearer. A production-facing endpoint requires HTTPS, OAuth 2.1 with PKCE, protected-resource discovery, per-host actor identification, scopes and consent, and a verified host-native acceptance test for each application.
@@ -75,3 +75,7 @@ For a private proof on Oracle, use a trusted identity provider and keep its sign
 ## Panter-RDD trusted-runner acceptance (v0.15)
 
 The code can verify Ed25519 signatures **but does not create a trusted signer or native ChatGPT child**. Provision a separate authenticated runner, keep its private key outside MCP/model context, and mount its **public** key registry as `PANTER_RDD_RUNNER_KEYS_FILE`. For local Git approvals, pin the worktree and check argv in `PANTER_RDD_LOCAL_WORKTREES_FILE` on an operator-only read-only configuration volume. No caller may change those paths. Install `git` in the runtime image. A positive CI test using ephemeral fixture keys does not replace a live trust-chain acceptance test.
+
+## Operator admin path and Docker network caveat
+
+In embedded or external OAuth mode, `PANTER_OPERATOR_TOKEN` is a **separate** administrator secret, not a GPT-A client token. The HTTP server only recognizes it on direct loopback requests without `Origin` or forwarded headers. The embedded OAuth smoke suite exercises this directly and verifies that a GPT-A OAuth token cannot grant write permission. **Important:** traffic forwarded into a Docker container over a published TCP port can appear to originate from a Docker bridge IP rather than 127.0.0.1; a successful external SSH tunnel to a host loopback port does **not** itself prove operator admin access inside the container. Validate an actual admin MCP session from inside an operator-controlled local environment before enabling writable missions. Never weaken the remote-address check or expose the operator token to the browser or external AI clients to work around this limitation. Production administration needs an explicitly reviewed operator channel.
