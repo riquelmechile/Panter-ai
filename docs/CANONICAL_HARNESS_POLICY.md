@@ -27,3 +27,11 @@ This document is the single **Panter-owned** normative coordination policy. Bund
 ## Evidence and release law
 
 Only actual runtime proofs are reported as such; unit tests/CI prove code paths, not live-host or production guarantees. Do not merge `main` or deploy a release without separate human authorization and passing destination gates. A PR issue, labels, CI and review budget can legitimately remain blocked until the authorized operator resolves them.
+
+## GPT-A-only four-lens review without external hosts
+
+`GPT_A_ONLY` never requires Grok, Claude, Gemini or other remote A2A peers for 4R. When the host exposes native subagents, GPT-A automatically requests the four frozen 4R specialists at maximum host-reported native capacity and unchanged model/reasoning/Fast settings. Reviewer independence is not presumed from generated IDs: Panter-RDD still demands signed runner evidence, exact frozen SHA and Git/CI proof before approval.
+
+**No native subagent capacity:** GPT-A may complete all four lenses **sequentially in its own context**. `panter_harness_tick` returns one `READY_FOR_GPT_A_SOLO_4R` packet at a time, and GPT-A records each with `panter_native_review_submit_solo`. Reports are explicitly `REPORTED_SOLO` rather than host-native receipts, with `soloEvidenceComplete=true`, `evidenceComplete=false`, `approved=false`. This is a useful engineering self-review that can discover and route defects, **not** an independent 4R/runner-attested Panter-RDD approval and never permission to merge. The harness returns `SOLO_4R_COMPLETED_UNVERIFIED` after a clean four-lens pass; if native capacity becomes available on a future tick, it automatically opens a *new* independent review with a new idempotency generation, preserving the previous solo evidence without promoting it.
+
+A Judgment Day audit requires two separate blind judges; it **cannot** be completed by two passes in one GPT-A context. An unavailable native capacity must be reported as such instead of fabricating judges. The model/effort/Fast/subagent demands to the host in `src/core/policy.ts` are never downgraded by this fallback.
