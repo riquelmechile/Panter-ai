@@ -9,9 +9,11 @@ import { specialistPacket, GENTLE_AGENTS, type GentleAgentId } from './gentle-ca
 import { hostRequest } from './policy.js';
 import { type Host, type MeshEngine } from './mesh.js';
 import { type NativeSubagentReview } from './native-review-workflow.js';
-import { assessMeshReview } from './native-review.js';
+import { assessMeshReview, type NativeReviewBridge } from './native-review.js';
+import { type GitHubDeliveryGate } from './github-delivery.js';
 
 const shaPattern=/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
+const githubProject=/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const risky=/(^|\/)(auth|oauth|security|secrets|permissions?|rbac|payments?|billing|migrations?|database|db|deploy|infra|concurrency|crypto|tokens?|credential|production)(\/|\.|$)/i;
 const riskyGoal=/\b(authentication|authorization|security|secret|payment|migration|deploy|permission|credentials|autenticaci[oó]n|seguridad|contraseñas|pagos|migraci[oó]n|permisos|despliegue)\b/i;
 const codeAgent=new Set(GENTLE_AGENTS.map(x=>x.id));
@@ -26,12 +28,12 @@ export type HarnessPhase='DISCOVER'|'DESIGN'|'IMPLEMENT'|'VERIFY'|'REVIEW';
 export type HarnessStep={id:string;phase:HarnessPhase;agentId:GentleAgentId|null;status:'PENDING'|'ISSUED'|'COMPLETE';
   execution?:'GPT_A_INLINE'|'GPT_A_NATIVE'|'REMOTE_A2A';remoteWorkId?:string;
   result?:{summary:string;evidence:string[];runId?:string;digest:string};};
-export type HarnessRun={id:string;project:string;objective:string;key:string;inputDigest:string;permission:'READ_ONLY'|'WRITE_APPROVED';
+export type HarnessRun={id:string;project:string;githubRepository?:string;githubPrNumber?:number;githubExpectedBase?:string;objective:string;key:string;inputDigest:string;permission:'READ_ONLY'|'WRITE_APPROVED';
   mode:HarnessMode; paths:string[]; risk:'LOW'|'HIGH'; reason:string[]; candidateSha:string|null;
   reviewKind:'4r'|'judgment-day'|null; reviewId:string|null; reviewTransport:'NATIVE'|'REMOTE'|null;
   steps:HarnessStep[]; createdAt:string;revision:number;};
 type State={version:1;runs:HarnessRun[]};
-export type HarnessInput={project:string;objective:string;idempotencyKey:string;writesAuthorized:boolean;
+export type HarnessInput={project:string;githubRepository?:string;githubPrNumber?:number;githubExpectedBase?:string;objective:string;idempotencyKey:string;writesAuthorized:boolean;
   changeSurfaces?:string[];coordinationMode?:HarnessMode;judgmentDayRequested?:boolean;
   /** Facts supplied by the host, not agent selections. Missing facts are handled conservatively. */
   observations?:{requirementsClear?:boolean;resumableFromDiff?:boolean;independentWorkUnits?:number;unknownCodeArea?:boolean};};
@@ -43,6 +45,9 @@ export type HarnessRuntime={nativeSubagents:boolean;maxParallelSubagents:number;
 
 export function chooseHarness(input:HarnessInput){
   ensure(input.project.trim().length>0&&input.project.length<=100,'Invalid project');
+  if(input.githubRepository!==undefined)ensure(githubProject.test(input.githubRepository)&&!input.githubRepository.includes('..'),'Invalid GitHub repository identity');
+  if(input.githubPrNumber!==undefined)ensure(Number.isInteger(input.githubPrNumber)&&input.githubPrNumber>0&&!!input.githubRepository,'GitHub PR requires known repository');
+  if(input.githubExpectedBase!==undefined)ensure(!!input.githubRepository&&/^[a-zA-Z0-9._/-]{1,100}$/.test(input.githubExpectedBase),'Invalid GitHub base');
   ensure(input.objective.trim().length>0&&input.objective.length<=6000,'Invalid objective');
   ensure(input.idempotencyKey.trim().length>0&&input.idempotencyKey.length<=160,'Invalid idempotency key');
   ensure(input.coordinationMode===undefined||['AUTO','GPT_A_ONLY'].includes(input.coordinationMode),'Invalid harness mode');
@@ -70,10 +75,10 @@ export function chooseHarness(input:HarnessInput){
 export class AutomaticHarness {
   private state:State={version:1,runs:[]};
   private pending:Promise<unknown>=Promise.resolve();
-  private constructor(private readonly file:string,private readonly mesh:MeshEngine,private readonly native:NativeSubagentReview){}
-  static async open(dir:string,mesh:MeshEngine,native:NativeSubagentReview){
+  private constructor(private readonly file:string,private readonly mesh:MeshEngine,private readonly native:NativeSubagentReview,private readonly github?:GitHubDeliveryGate,private readonly officialRdd?:NativeReviewBridge){}
+  static async open(dir:string,mesh:MeshEngine,native:NativeSubagentReview,github?:GitHubDeliveryGate,officialRdd?:NativeReviewBridge){
     await mkdir(resolve(dir),{recursive:true,mode:0o700});
-    const engine=new AutomaticHarness(join(resolve(dir),'harness.json'),mesh,native);
+    const engine=new AutomaticHarness(join(resolve(dir),'harness.json'),mesh,native,github,officialRdd);
     try{const value:unknown=JSON.parse(await readFile(engine.file,'utf8'));
       ensure(!!value&&typeof value==='object'&&'version' in value&&value.version===1&&'runs' in value&&Array.isArray(value.runs),'Invalid harness store');
       engine.state=value as State;
@@ -90,14 +95,14 @@ export class AutomaticHarness {
   }
   async start(input:HarnessInput){
     const selected=chooseHarness(input);
-    const digest=hash({project:input.project,objective:input.objective,key:input.idempotencyKey,permission:input.writesAuthorized,paths:selected.paths,mode:selected.mode,risk:selected.risk,review:selected.reviewKind,observations:input.observations??{}});
+    const digest=hash({project:input.project,githubRepository:input.githubRepository??null,githubPrNumber:input.githubPrNumber??null,githubExpectedBase:input.githubExpectedBase??null,objective:input.objective,key:input.idempotencyKey,permission:input.writesAuthorized,paths:selected.paths,mode:selected.mode,risk:selected.risk,review:selected.reviewKind,observations:input.observations??{}});
     return this.write(s=>{
       const old=s.runs.find(r=>r.project===input.project&&r.key===input.idempotencyKey);
       if(old){ensure(old.inputDigest===digest,'Harness start idempotency conflict');return old;}
       const step=(phase:HarnessPhase):HarnessStep=>({id:randomUUID(),phase,
         agentId:phase==='DISCOVER'?'gentle-ai-explore':phase==='IMPLEMENT'?'gentle-ai-worker':phase==='VERIFY'?'gentle-ai-verify':null,
         status:'PENDING'});
-      const run:HarnessRun={id:randomUUID(),project:input.project,objective:input.objective,key:input.idempotencyKey,inputDigest:digest,
+      const run:HarnessRun={id:randomUUID(),project:input.project,githubRepository:input.githubRepository,githubPrNumber:input.githubPrNumber,githubExpectedBase:input.githubExpectedBase,objective:input.objective,key:input.idempotencyKey,inputDigest:digest,
         permission:input.writesAuthorized?'WRITE_APPROVED':'READ_ONLY',mode:selected.mode,
         paths:selected.paths,risk:selected.risk,reason:selected.reasons,candidateSha:null,reviewKind:selected.reviewKind,
         reviewId:null,reviewTransport:null,steps:selected.phases.map(step),createdAt:new Date().toISOString(),revision:1};
@@ -124,7 +129,8 @@ export class AutomaticHarness {
       if(step.phase==='IMPLEMENT'){
         ensure(r.permission==='WRITE_APPROVED','Unauthorized implementation');
         ensure(r.paths.length>0,'No discovery-confirmed edit surfaces');
-        if(r.risk==='HIGH')ensure(!!payload.candidateSha,'High-risk implementation needs frozen candidate SHA');
+        if(r.risk==='HIGH'||!!r.githubRepository||githubProject.test(r.project))ensure(!!payload.candidateSha,'GitHub/high-risk implementation needs frozen candidate SHA');
+        if(r.githubRepository||githubProject.test(r.project))ensure(!!payload.candidateSha&&/^[a-f0-9]{40}$/.test(payload.candidateSha),'GitHub requires an exact 40-character Git commit SHA');
         r.candidateSha=payload.candidateSha??null;
       }
       if(step.phase==='VERIFY'){
@@ -149,7 +155,16 @@ export class AutomaticHarness {
       capacityRequest:{model:policy.model,reasoning:policy.reasoningEffort,workerProcessing:policy.worker.preferredProcessing,
         requestedParallelism:Math.min(runtime.nativeSubagents?runtime.maxParallelSubagents:0,policy.plannerCeiling),
         capacityVerified:false},modelWorkersStartedByServer:0,approved:false};
-    if(!phase)return {...common,status:record.risk==='HIGH'?'AWAITING_RDD_AUTHORITY':'REPORTED_COMPLETE_UNVERIFIED',next:[]};
+    if(!phase){
+      const repository=record.githubRepository??(githubProject.test(record.project)?record.project:null);
+      if(!repository)return {...common,status:record.risk==='HIGH'?'AWAITING_RDD_AUTHORITY':'REPORTED_COMPLETE_UNVERIFIED',next:[]};
+      if(!record.githubPrNumber)return {...common,status:'AWAITING_GITHUB_PR_EVIDENCE',next:[],instruction:'GPT-A must identify or obtain permission to create the exact target PR; never push or open a PR without authorization.'};
+      if(!record.candidateSha||!(/^[a-f0-9]{40}$/.test(record.candidateSha)))return {...common,status:'BLOCKED_CANDIDATE_SHA',next:[]};
+      if(!this.github)return {...common,status:'GITHUB_VERIFICATION_NOT_CONFIGURED',next:[]};
+      const github=await this.github.inspect({repository,prNumber:record.githubPrNumber,expectedSha:record.candidateSha,expectedBase:record.githubExpectedBase});
+      return {...common,status:github.state==='REVIEWABLE'?(record.risk==='HIGH'?'AWAITING_RDD_AUTHORITY':'GITHUB_EVIDENCE_READY_NO_DELIVERY_AUTHORITY'):'GITHUB_GATE_BLOCKED',github,next:[],
+        instruction:'GitHub verification is evidence, not permission for commit, push, merge, release, or deployment.'};
+    }
     if(phase.execution==='REMOTE_A2A'&&phase.remoteWorkId){
       const inbox=await this.mesh.inbox('gpt-a');
       const work=inbox.works.find(w=>w.id===phase.remoteWorkId);
@@ -197,9 +212,13 @@ export class AutomaticHarness {
           return {...common,status:batch.dispatch,phaseId:phase.id,reviewId:now.reviewId,next:batch.packets,concurrentSlots:batch.concurrentSlots,
             instruction:'GPT-A: automatically dispatch the supplied separate native subagent packets in parallel when supported. No per-task agent selection or model-provider API.'};
         }
+        // When the real Go controller is installed on the operator-pinned
+        // worktree, automatically project its provider-issued next transition.
+        // No client-provided command is executed or treated as approval.
+        const officialRdd=review.severeFindings.length?null:(this.officialRdd?await this.officialRdd.status():null);
         return {...common,status:review.severeFindings.length?'REVIEW_FINDINGS_NEED_CORRECTION':'AWAITING_RDD_AUTHORITY',
-          phaseId:phase.id,reviewId:now.reviewId,review, next:[],
-          instruction:'Do not mark approved. Freeze a corrected candidate and restart review if severe findings remain; official RDD or trusted external gate must validate final approval.'};
+          phaseId:phase.id,reviewId:now.reviewId,review,officialRdd, next:[],
+          instruction:'Panter automatically retrieved the official RDD status if enabled. Follow only its exact provider-issued transition in a supported authorized host runtime; operator consent and Go authority still govern approval. Never mark approved from model reports.'};
       }
       const review=await this.mesh.reviewStatus('gpt-a',now.reviewId);
       const evidence=assessMeshReview({kind:review.review.kind,candidateSha:review.review.candidateSha,work:review.work});

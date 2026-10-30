@@ -18,6 +18,7 @@ import { planHostNative, nativePacket, nativeOddInstructions } from './core/nati
 import { NativeReviewBridge, assessMeshReview } from './core/native-review.js';
 import { NativeSubagentReview } from './core/native-review-workflow.js';
 import { AutomaticHarness } from './core/auto-harness.js';
+import { GitHubDeliveryGate } from './core/github-delivery.js';
 
 const port = Number(process.env.PANTER_PORT ?? '8080');
 const bind = process.env.PANTER_BIND_HOST ?? '127.0.0.1';
@@ -59,8 +60,13 @@ const store = await PanterStore.open(dataDir);
 const agents = await AgentEngine.open(dataDir, store);
 const mesh = await MeshEngine.open(dataDir);
 const nativeSubagentReview = await NativeSubagentReview.open(dataDir);
-const harness = await AutomaticHarness.open(dataDir,mesh,nativeSubagentReview);
+const githubGate = new GitHubDeliveryGate({
+  allowedRepositories:(process.env.PANTER_GITHUB_ALLOWED_REPOS??'').split(',').map(x=>x.trim()).filter(Boolean),
+  requiredChecks:(process.env.PANTER_GITHUB_REQUIRED_CHECKS??'').split(',').map(x=>x.trim()).filter(Boolean),
+  token:process.env.PANTER_GITHUB_TOKEN||undefined,
+});
 const nativeReview = await NativeReviewBridge.open({enabled:process.env.PANTER_NATIVE_REVIEW_ENABLED==='1',binary:process.env.PANTER_GENTLE_AI_BIN??'gentle-ai',repositoryRoot:process.env.PANTER_NATIVE_REVIEW_WORKTREE??''});
+const harness = await AutomaticHarness.open(dataDir,mesh,nativeSubagentReview,githubGate,nativeReview);
 const engramEnabled = process.env.PANTER_ENGRAM_ENABLED === '1';
 const memory = engramEnabled ? await openEngramBridge(dataDir, process.env.PANTER_ENGRAM_COMMAND ?? 'engram') : null;
 const principalContext = new AsyncLocalStorage<string>();
@@ -75,7 +81,7 @@ const missionStatus = z.enum(['DRAFT', 'READY', 'RUNNING', 'VERIFYING', 'DONE', 
 const bounded = (max = 2048) => z.string().trim().min(1).max(max);
 
 const handler = createMcpHandler(() => {
-  const server = new McpServer({ name: 'panter-ai', version: '0.12.0' }, {
+  const server = new McpServer({ name: 'panter-ai', version: '0.13.0' }, {
     capabilities: { resources: { subscribe: true } },
     instructions: 'Panter-ai is a host-operated development harness with NO provider inference. GPT-A is the coordinator. For a new user development request start with panter_harness_start (goal + permitted work and observed facts, NEVER ask the user to pick agents, roles, skills or review lenses). Then call panter_harness_tick and execute the returned phase automatically with host tools or native subagents; call panter_harness_report after observing actual results, and repeat until blocked by actual authorization/evidence or completed. The server automatically selects ODD discovery, planning, scoped implementation, independent verification and 4R by risk; Judgment Day only when explicitly requested. An initial Agent Studio preference may bind model/host but never requires per-task specialist selection. GPT_A_ONLY forbids remote delegation while preserving maximum requested model/effort, fast native worker processing, and maximum safe host-observed parallelism. If no remote peer is connected continue with GPT-A native/inline. The host owns model selection and subagent execution; claims of model, effort, speed or children are REQUESTED, not verified. Do not misstate packet preparation as subagent execution. Evidence and reviewer reports are not official Gentle AI RDD approval. Do not merge or deploy without separately authorized tools and exact-candidate proof.'
 
@@ -387,7 +393,7 @@ const handler = createMcpHandler(() => {
     toolsAvailable:z.boolean(),peerStates:z.partialRecord(z.enum(HOSTS),z.enum(['CONNECTED','UNAVAILABLE','UNKNOWN'])).optional()});
   server.registerTool('panter_harness_start',{
     description:'Automatically classify an engineering objective and persist ODD phases. GPT-A does NOT select agents/skills; no inference or edits run on the MCP.',
-    inputSchema:z.object({project:bounded(100),objective:bounded(6000),idempotencyKey:bounded(160),writesAuthorized:z.boolean(),
+    inputSchema:z.object({project:bounded(100),githubRepository:z.string().max(120).optional(),githubPrNumber:z.number().int().positive().optional(),githubExpectedBase:z.string().max(100).optional(),objective:bounded(6000),idempotencyKey:bounded(160),writesAuthorized:z.boolean(),
       changeSurfaces:z.array(z.string().min(1).max(256)).max(16).optional(),
       judgmentDayRequested:z.boolean().optional(),
       observations:z.object({requirementsClear:z.boolean().optional(),resumableFromDiff:z.boolean().optional(),
@@ -406,6 +412,23 @@ const handler = createMcpHandler(() => {
       runId:z.string().max(160).optional(),candidateSha:z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/).optional(),
       discoveredPaths:z.array(z.string().min(1).max(256)).max(16).optional()}),capabilities:harnessRuntimeSchema})
   },async x=>execute(async()=>{requireLeader();await harness.report(x.runId,x.stepId,x.report);return harness.tick(x.runId,x.capabilities)}));
+  server.registerTool('panter_harness_github_check',{
+    description:'Read-only Gentle Shell GitHub delivery gate: verify target allowlist, branch, exact frozen PR head SHA, approved linked issue, one type label, CI checks and review budget. Never pushes, merges, opens PRs or grants deployment permission.',
+    inputSchema:z.object({runId:z.uuid(),prNumber:z.number().int().positive(),expectedBase:z.string().max(100).optional(),
+      deliveryStrategy:z.enum(['single-pr','feature-branch-chain','stacked-to-main']).optional()}),
+    annotations:{readOnlyHint:true}
+  },async x=>execute(async()=>{requireLeader();const run=await harness.get(x.runId);
+    if(!run)throw new Error('Harness not found');
+    if(!run.candidateSha||!/^[a-f0-9]{40}$/.test(run.candidateSha))throw new Error('Exact Git commit SHA is required before remote verification');
+    const gate=await githubGate.inspect({repository:run.githubRepository??run.project,prNumber:x.prNumber,expectedSha:run.candidateSha,
+      expectedBase:x.expectedBase,deliveryStrategy:x.deliveryStrategy,
+      // A model cannot assert human consent for an oversize PR: choose the
+      // strategy with the user; authorization is separately operator-configured.
+      parentAuthorizedSinglePr:process.env.PANTER_GITHUB_SINGLE_PR_APPROVED==='1'});
+    return {...gate,reviewStatus:run.reviewKind?'NATIVE_RDD_AUTHORITY_STILL_REQUIRED':'NO_NATIVE_RDD_ASSERTION',
+      next:gate.state==='REVIEWABLE'?'Evidence is ready for human review, NOT permission to merge/deploy.':
+        'Resolve blockers through separately authorized GitHub operations; do not infer delivery permission.'};
+  }));
   server.registerTool('panter_harness_status',{
     description:'Recover exact automatic ODD route, risks, phase status and pending candidate/review gates after a session restart.',
     inputSchema:z.object({runId:z.uuid()}),annotations:{readOnlyHint:true}
@@ -508,7 +531,7 @@ const nodeHandler = toNodeHandler(handler);
 const http = createServer(async (req, res) => {
   if (req.url === '/health' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-    res.end(JSON.stringify({ status: 'ok', name: 'panter-ai', version: '0.12.0' }));
+    res.end(JSON.stringify({ status: 'ok', name: 'panter-ai', version: '0.13.0' }));
     return;
   }
   if (oauth && req.method === 'GET' && (req.url === '/.well-known/oauth-protected-resource' || req.url === '/.well-known/oauth-protected-resource/mcp')) {
