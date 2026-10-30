@@ -441,7 +441,7 @@ const handler = createMcpHandler(() => {
     server.registerTool('panter_oauth_client_revoke',{
       description:'Admin-only: permanently revoke all active OAuth embedded grants, tokens, codes and pending consent requests for one client ID.',
       inputSchema:z.object({clientId:z.string().regex(/^pc_[A-Za-z0-9_-]{24,64}$/)})
-    },async x=>execute(async()=>{requireAdmin();return {revokedGrants:await embedded.revokeClient(x.clientId)}));
+    },async x=>execute(async()=>{requireAdmin();return {revokedGrants:await embedded.revokeClient(x.clientId)};}));
   }
   server.registerTool('panter_harness_write_grant',{
     description:'Admin-only explicit bounded write authorization for a particular project/objective; GPT-A cannot issue its own permission.',
