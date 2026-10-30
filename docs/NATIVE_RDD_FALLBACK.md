@@ -33,3 +33,18 @@ Do **not** expose a general shell tool to models. Verify candidate tree hash and
 - Verify fallback in a real ChatGPT host with no peer connection; confirm actual native subagent creation or ordinary inline completion, never assume it from a declared capability.
 - End-to-end `gentle-ai` binary on isolated Oracle worktree, v2 protocol conformance and consent handling; this read-only adapter alone is not the entire native review lifecycle.
 - Integrate verified Git candidate evidence, authorized correction transitions and true runtime-identity receipt checks, then wire to protected delivery gate.
+
+
+## GPT-A maximum-capability contract (v0.10, Xanxittoo parity)
+
+**No remote workforce never means downgraded reasoning.** Operator selection `GPT_A_ONLY` (saved in Agent Studio or supplied per `panter_native_plan` turn) **disables remote A2A dispatch even when peers are CONNECTED**. `AUTO` uses remote specialists only when they are explicitly connected and assigned. If no eligible peers are present, GPT-A operates alone automatically. This choice is independent of request quality and native fanout.
+
+For **both** conditions Panter explicitly requests the same host control posture as Xanxittoo's `host_policy.py`:
+- Root: `gpt-6-astra` (model request), `max` reasoning, `xhigh` fallback **only if the host does not expose `max`**, ordinary root service tier. Do not switch to a weaker model merely because peers are absent.
+- Native branches: prefer Fast/priority processing with full model/effort; when Fast is unavailable, standard processing **preserves reasoning quality**.
+- Parallelism: request up to 32 native workers, bounded by observed support, independent tasks, and allowed file/worktree isolation. Keep host-native fanout distinct from remote peer count. Never invent workers.
+- When no native subagents exist, run ODD inline using the **same maximum-quality root** and available parallel I/O. Preserve scoped write permissions, frozen review candidates and independent verification gates.
+
+`panter_native_plan` returns `capacityContract` and `capacityGaps`. The former is always a `REQUESTED` policy and the latter explicitly identifies observed capability shortfalls; `fullCapacityObserved` is always false until real host-side attestation exists. No MCP server can itself switch a consumer ChatGPT model/tier or create invisible subagents. If it cannot obtain an effective capability, it must disclose this, not silently downgrade or claim full compliance.
+
+A user can select GPT-A-only for one session (`coordinationMode: GPT_A_ONLY`) without changing the saved Agent Studio preference; the saved mode applies to later calls without an explicit per-turn override. The server does not write to other hosts in this mode.

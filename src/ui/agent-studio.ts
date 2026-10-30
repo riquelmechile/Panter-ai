@@ -4,7 +4,7 @@ const app = new App({ name: 'Panter Agent Studio', version: '0.4.0' });
 const hostNames = ['gpt-a', 'gpt-b', 'grok', 'gemini', 'claude'] as const;
 const roleNames = ['explorer', 'architect', 'implementer', 'verifier', 'reviewer'] as const;
 type Host = typeof hostNames[number];
-type Profile = { host: Host; actorId: string; modelRequest: string; effortRequest: string; roles: string[]; revision: number; preferNativeSubagents?:boolean; maxRequestedNativeWorkers?:number };
+type Profile = { host: Host; actorId: string; modelRequest: string; effortRequest: string; roles: string[]; revision: number; preferNativeSubagents?:boolean; maxRequestedNativeWorkers?:number; coordinationMode?:'AUTO'|'GPT_A_ONLY' };
 const hostBox = document.getElementById('hosts')!;
 const status = document.getElementById('status')!;
 const refresh = document.getElementById('refresh') as HTMLButtonElement;
@@ -35,7 +35,7 @@ function card(host: Host, existing?: Profile) {
   const subtitle = document.createElement('p'); subtitle.textContent = existing ? `Perfil guardado · revisión ${existing.revision}` : 'Pendiente de configurar';
   article.append(heading, subtitle);
   const actor = field('Alias del actor (no es una credencial)', existing?.actorId ?? `actor-${host}`, 160);
-  const model = field('Modelo solicitado', existing?.modelRequest ?? 'host-default', 120);
+  const model = field('Modelo solicitado', existing?.modelRequest ?? (host==='gpt-a'?'gpt-6-astra':'host-default'), 120);
   const effort = field('Esfuerzo solicitado', existing?.effortRequest ?? 'max', 32);
   for (const inp of [actor, model, effort]) article.append(inp.parentElement!);
   const legend = document.createElement('label'); legend.textContent = 'Roles asignados';
@@ -52,16 +52,24 @@ function card(host: Host, existing?: Profile) {
   // Requested GPT-A capacity limits do not attest that the ChatGPT host really
   // exposes native subagents. Effective count is bounded again by host evidence.
   const nativePrefs=host==='gpt-a'?document.createElement('div'):null;
+  let coordination:HTMLSelectElement|null=null;
   let prefer:HTMLInputElement|null=null;
   let maxWorkers:HTMLInputElement|null=null;
   if(nativePrefs){
+    const modeLabel=document.createElement('label');modeLabel.textContent='Coordinación: fuerza de trabajo o GPT-A solo';
+    coordination=document.createElement('select');
+    for(const [value,label] of [['AUTO','Automático: delegar si está disponible'],['GPT_A_ONLY','Solo GPT-A: no delegar fuera']] as const){
+      const option=document.createElement('option');option.value=value;option.textContent=label;
+      if((existing?.coordinationMode??'AUTO')===value)option.selected=true;coordination.append(option);
+    }
+    nativePrefs.append(modeLabel,coordination);
     const lab=document.createElement('label');lab.textContent='Solicitar subagentes nativos cuando el host los permita';
     prefer=document.createElement('input');prefer.type='checkbox';prefer.checked=existing?.preferNativeSubagents!==false;
     lab.prepend(prefer);nativePrefs.append(lab);
     const caption=document.createElement('label');caption.textContent='Máximo solicitado de subagentes en paralelo (0–32)';
     maxWorkers=document.createElement('input');maxWorkers.type='number';maxWorkers.min='0';maxWorkers.max='32';maxWorkers.step='1';maxWorkers.value=String(existing?.maxRequestedNativeWorkers??32);
     nativePrefs.append(caption,maxWorkers);
-    const explain=document.createElement('p');explain.textContent='Estos valores son límites solicitados; no crean trabajadores ni cambian el modelo del host.';nativePrefs.append(explain);
+    const explain=document.createElement('p');explain.textContent='GPT-A solicita gpt-6-astra, esfuerzo máximo (xhigh si no existe max), ramas nativas Fast y máximo paralelismo confirmado. Sin subagentes conserva la calidad del modelo raíz. Son solicitudes: el MCP no puede forzar ajustes del host.';nativePrefs.append(explain);
     article.append(nativePrefs);
   }
   const save = document.createElement('button'); save.textContent = 'Guardar perfil'; save.type = 'button';
@@ -75,7 +83,7 @@ function card(host: Host, existing?: Profile) {
       if(host==='gpt-a'&&(!Number.isInteger(count)||count===undefined||count<0||count>32))throw new Error('Límite nativo inválido');
       const response = await call('panter_mesh_profile_set', {
         host, actorId: actor.value.trim(), modelRequest: model.value.trim(), effortRequest: effort.value.trim(),
-        roles: chosen, ...(host==='gpt-a'?{preferNativeSubagents:prefer!.checked,maxRequestedNativeWorkers:count}:{}), expectedRevision: existing?.revision ?? 0,
+        roles: chosen, ...(host==='gpt-a'?{coordinationMode:coordination!.value,preferNativeSubagents:prefer!.checked,maxRequestedNativeWorkers:count}:{}), expectedRevision: existing?.revision ?? 0,
       }) as Profile;
       existing = response;
       subtitle.textContent = `Perfil guardado · revisión ${response.revision}`;

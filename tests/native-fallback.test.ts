@@ -121,3 +121,59 @@ test('GPT-A native-subagent capacity preference is durable and cannot be set on 
     await assert.rejects(mesh.setProfile('gpt-a',{...owner,maxRequestedNativeWorkers:40},1),/ceiling/);
   }finally{await rm(dir,{recursive:true,force:true})}
 });
+
+
+test('Explicit GPT-A-only forbids remote delegation even when Claude is connected and demands full root capacity',()=>{
+ const bindings=[{agentId:'gentle-ai-explore',host:'claude' as const,modelRequest:'claude-model',effortRequest:'low',skillIds:['gentle-ai' as const],revision:1}];
+ const p=planHostNative({...base,signals:high,assignments:[task(),task('gentle-ai-verify')],bindings,peerStates:{claude:'CONNECTED'},coordinationMode:'GPT_A_ONLY',capabilities:{...base.capabilities,nativeSubagents:true,maxParallelSubagents:8,observedModel:'gpt-6-astra',observedReasoningEffort:'max',observedWorkerProcessing:'fast'}});
+ assert.equal(p.soloActive,true);assert.equal(p.soloReason,'USER_SELECTED_GPT_A_ONLY');
+ assert.ok(p.assignments.every(a=>a.host==='gpt-a'&&a.execution==='GPT_A_NATIVE_SUBAGENT'));
+ assert.ok(p.assignments.every(a=>a.modelRequest==='gpt-6-astra'&&a.effortRequest==='max'&&a.speedRequest==='fast-if-supported'));
+ assert.equal(p.capacityContract.requestedNativeWorkers,32);
+ assert.equal(p.capacityContract.hostReportedNativeWorkers,8);
+ assert.equal(p.capacityContract.scheduledNativeWorkers,2);
+ assert.equal(p.capacityContract.rootReasoning,'max');assert.equal(p.capacityContract.nativeWorkerPreferredSpeed,'fast-if-supported');
+});
+
+test('No external workforce keeps full GPT-A model/effort and fast branch preference',()=>{
+ const p=planHostNative({...base,signals:high,assignments:[task(),task('gentle-ai-verify')],capabilities:{...base.capabilities,nativeSubagents:true,maxParallelSubagents:3}});
+ assert.equal(p.soloReason,'NO_CONNECTED_PEERS');
+ assert.equal(p.capacityContract.rootModel,'gpt-6-astra');
+ assert.equal(p.capacityContract.rootReasoning,'max');
+ assert.equal(p.capacityContract.requestedNativeWorkers,32);
+ assert.equal(p.requestedSubagentSlots,2);
+ assert.equal(p.capacityContract.nativeWorkerFallbackSpeed,'standard-preserve-reasoning');
+});
+
+test('No native subagents continues same quality root inline and reports capacity gaps',()=>{
+ const p=planHostNative({...base,signals:high,assignments:[task(),task('gentle-ai-verify')],coordinationMode:'GPT_A_ONLY',capabilities:{...base.capabilities,observedModel:'another',observedReasoningEffort:'low'}});
+ assert.ok(p.assignments.every(x=>x.execution==='GPT_A_INLINE'&&x.modelRequest==='gpt-6-astra'&&x.effortRequest==='max'));
+ assert.equal(p.capacityContract.requestedNativeWorkers,32);
+ assert.equal(p.capacityContract.hostReportedNativeWorkers,0);
+ assert.equal(p.fullCapacityObserved,false);
+ assert.ok(p.capacityGaps.some(x=>/model/.test(x)));
+ assert.ok(p.capacityGaps.some(x=>/reasoning/.test(x)));
+ assert.ok(p.capacityGaps.some(x=>/subagents/.test(x)));
+});
+
+test('GPT-A-only preference persists and cannot be saved as a worker mode',async()=>{
+ const {mkdtemp,rm}=await import('node:fs/promises');
+ const {join}=await import('node:path');
+ const {tmpdir}=await import('node:os');
+ const {MeshEngine}=await import('../src/core/mesh.js');
+ const dir=await mkdtemp(join(tmpdir(),'panter-solo-preferences-'));
+ try{
+  const m=await MeshEngine.open(dir);
+  await m.setProfile('gpt-a',{host:'gpt-a',actorId:'actor-gpt-a',modelRequest:'gpt-6-astra',effortRequest:'max',roles:['orchestrator'],coordinationMode:'GPT_A_ONLY'},0);
+  const reread=await MeshEngine.open(dir);
+  assert.equal((await reread.profiles())[0]?.coordinationMode,'GPT_A_ONLY');
+  await assert.rejects(m.setProfile('gpt-a',{host:'claude',actorId:'actor-claude',modelRequest:'claude',effortRequest:'high',roles:['reviewer'],coordinationMode:'GPT_A_ONLY'},0),/GPT-A-only/);
+ } finally {await rm(dir,{recursive:true,force:true})}
+});
+
+
+test('Serial GPT-A only mode allows overlapping writer paths without claiming parallel isolation',()=>{
+ const p=planHostNative({...base,signals:high,assignments:[{agentId:'gentle-ai-worker',objective:'Implement A',allowedEditSurfaces:['src/core']},{agentId:'jd-fix-agent',objective:'Fix B',allowedEditSurfaces:['src/core/file.ts']}],coordinationMode:'GPT_A_ONLY'});
+ assert.ok(p.assignments.every(x=>x.execution==='GPT_A_INLINE'));
+ assert.equal(p.capacityContract.scheduledNativeWorkers,0);
+});

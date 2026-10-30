@@ -9,7 +9,7 @@ export const HOSTS = ['gpt-a', 'gpt-b', 'grok', 'gemini', 'claude'] as const;
 export type Host = typeof HOSTS[number];
 export type MeshRole = 'orchestrator' | 'explorer' | 'architect' | 'implementer' | 'verifier' | 'reviewer';
 export type MeshWorkState = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'WAITING_INPUT' | 'OUTCOME_UNKNOWN';
-export type ActorProfile = { host: Host; actorId: string; modelRequest: string; effortRequest: string; roles: MeshRole[]; revision: number; preferNativeSubagents?: boolean; maxRequestedNativeWorkers?: number };
+export type ActorProfile = { host: Host; actorId: string; modelRequest: string; effortRequest: string; roles: MeshRole[]; revision: number; preferNativeSubagents?: boolean; maxRequestedNativeWorkers?: number; coordinationMode?: 'AUTO' | 'GPT_A_ONLY' };
 export type MeshMessage = { id: string; missionId: string; from: Host; to: Host; workId: string | null; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' | 'RESULT'; text: string; createdAt: string; inboxRevision: number };
 export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null };
 export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
@@ -84,6 +84,7 @@ export class MeshEngine {
     check(profile.modelRequest.length <= 120 && profile.effortRequest.length <= 32, 'Invalid model request');
     check(profile.roles.length > 0 && profile.roles.every(r => roles.has(r)), 'Invalid roles');
     if(profile.preferNativeSubagents !== undefined) check(typeof profile.preferNativeSubagents==='boolean' && profile.host==='gpt-a', 'Native worker preferences are leader-only');
+    if(profile.coordinationMode !== undefined) check(profile.host==='gpt-a' && ['AUTO','GPT_A_ONLY'].includes(profile.coordinationMode), 'Coordination mode is GPT-A-only');
     if(profile.maxRequestedNativeWorkers !== undefined) check(profile.host==='gpt-a' && Number.isInteger(profile.maxRequestedNativeWorkers) && profile.maxRequestedNativeWorkers>=0 && profile.maxRequestedNativeWorkers<=32, 'Invalid native worker ceiling');
     check(profile.host !== 'gpt-a' || profile.roles.every(r => r === 'orchestrator'), 'GPT-A is the coordinator');
     check(profile.host === 'gpt-a' || !profile.roles.includes('orchestrator'), 'Only GPT-A is the coordinator');
