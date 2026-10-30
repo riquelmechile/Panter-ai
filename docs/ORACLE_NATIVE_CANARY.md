@@ -4,7 +4,26 @@
 
 Runbook de **canary privado**, sin Docker/Podman, proxy, túnel, reglas de firewall ni exposición externa. El servicio `panter-ai` es independiente de los servicios existentes. Las operaciones sobre otra unidad, puertos ya ocupados o archivos ajenos al directorio de Panter están fuera de alcance. No autoriza merge ni publicación.
 
-**Estado de la ejecución registrada:** el release fijado en `f6580088fb4a979031d0a3b4f5c4bac43b3f4679` pasó `npm ci`, `npm run check`, `npm run build`, `npm test` y los tres smokes. Se prepararon los directorios, el enlace `current`, el lanzador y un archivo de unidad de usuario. **No se generaron los secretos ni se habilitó/inició el servicio:** el host bloqueó la operación de escritura de secretos. No hay evidencia de que las pruebas de runtime, backup, restauración, rollback o snapshot final hayan pasado. No confundir esta preparación con un despliegue validado.
+**Estado de la ejecución registrada (30-oct-2026):** canary **en ejecución y validado** sobre el release `f6580088fb4a979031d0a3b4f5c4bac43b3f4679`.
+
+| Prueba | Resultado |
+| --- | --- |
+| Release | `npm ci`, `check`, `build`, `test` y los tres smokes en verde |
+| Secretos | generados en el host sin pasar por stdout, argumentos ni logs; `etc/panter.env` y `etc/operator.token` en `0600` |
+| 4a | unidad activa; único listener nuevo en loopback del puerto reservado |
+| 4b | `/health` 200 con `name=panter-ai` |
+| 4c | `/mcp` sin credenciales 401; token del operador **por TCP** 401 |
+| 4d | `data/` `0700`, socket `0600`; por socket token válido 200 (`tools/list` incluye `panter_oauth_clients` y `panter_oauth_client_revoke`), token erróneo 401 |
+| 4e | flujo OAuth completo (DCR → PKCE S256 → consentimiento con clave de operador → código → token): `/mcp` 200; tras reiniciar, el token sigue válido; `panter_oauth_client_revoke` revoca el grant y el mismo token pasa a 401, cliente `revoked: true` |
+| 4f | `kill -9` al proceso de Panter: `Restart=on-failure` lo levanta en ~1 s, socket recuperado |
+| Backup | `tar.gz` de `data/` en `0600` con digest SHA-256 (solo en el informe privado) |
+| Restauración | instancia temporal en otro puerto de loopback con datos y socket propios: `/health` 200, cliente revocado sigue revocado y el token sigue en 401; instancia cancelada y temporales borrados |
+| Rollback | `stop` libera el puerto; `start` vuelve a `/health` 200 |
+| Foto final | procesos y PID de los servicios preexistentes intactos, hashes de configuración del proxy idénticos; único listener nuevo el del canary |
+
+**Pendiente del responsable:** `host.system.service enable` (arranque automático tras reiniciar la VM) no se ejecutó: requiere autorización explícita. Mientras tanto, el canary corre pero no sobrevive a un reinicio del host.
+
+Nota operativa: al probar con `curl`, pasar los Bearer con `-H @archivo` (archivo `0600`, borrado al terminar), nunca en la línea de comandos, porque los argumentos son visibles para otros procesos del mismo usuario.
 
 La autorización de operaciones es acotada al canary y debe reevaluarse si cambia el SHA o el alcance. Para nuevos intentos, el operador debe verificar que la unidad sigue inactiva y los puertos de pruebas siguen libres.
 
