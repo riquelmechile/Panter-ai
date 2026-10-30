@@ -20,7 +20,7 @@
 
 ## Conditional merge gate
 
-Only **after** all of the following are true: no unresolved blocking comments, fresh green checks on the reviewed SHA, explicit favorable independent Claude review, dependency/build security requirements resolved, real trusted RDD evidence if the selected release policy requires it, repository rulesets satisfied, and the operator has confirmed the production release target and authorized merge. Use GitHub's actual merge action then confirm merged SHA. Never invent approval from Claude or force a merge past branch protection.
+Only **after** all of the following are true: no unresolved blocking comments, fresh green checks (`test` and `arm64-image`) on the reviewed SHA, explicit favorable independent Claude review, dependency/build security requirements resolved, real trusted RDD evidence if the selected release policy requires it, repository rulesets satisfied, and the operator has confirmed the production release target and authorized merge. Use GitHub's actual merge action then confirm merged SHA. Never invent approval from Claude or force a merge past branch protection.
 
 ## Oracle private canary (do not confuse with Xanxittoo)
 
