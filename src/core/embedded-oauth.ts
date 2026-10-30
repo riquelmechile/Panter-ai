@@ -197,19 +197,14 @@ export class EmbeddedOAuth {
     const id = secureId(28); const csrf = secureId(32);
     await this.change(d => {
       d.pending = d.pending.filter(p => p.expiresAt > ts());
-      // An abusive IP/client may hold at most five of the 100 consent slots.
-      // Evict its oldest pending request rather than locking all real clients out.
-      for(const same of [
-        (p:Pending)=>p.sourceDigest===sourceDigest,
-        (p:Pending)=>p.clientId===clientId
-      ]){
-        const matches=d.pending.filter(same);
-        if(matches.length>=5){
-          const oldest=matches[0]!;
-          d.pending=d.pending.filter(p=>p.id!==oldest.id);
-        }
-      }
-      if(d.pending.length>=100)d.pending.shift(); // preserve availability to a new identity
+      // Do not evict live consent sessions, including when an attacker knows
+      // another public client ID. A flood can deny *new* sessions until the TTL,
+      // but it can no longer silently invalidate a legitimate open consent.
+      check(d.pending.filter(p=>p.sourceDigest===sourceDigest).length<5,
+        'Pending consent quota for this source');
+      check(d.pending.filter(p=>p.clientId===clientId).length<5,
+        'Pending consent quota for this client');
+      check(d.pending.length<100,'Too many pending authorizations');
       d.pending.push({ id, clientId, redirectUri, challenge, state, requestedScopes: scopes, csrfDigest: hash(csrf), expiresAt: ts() + PENDING_TTL, failures: 0,sourceDigest });
     });
     return { id, csrf };
@@ -356,7 +351,13 @@ export class EmbeddedOAuth {
         const origin = String(req.headers.origin ?? '');
         const fromSameOrigin = req.headers['sec-fetch-site'] === 'same-origin';
         check(origin === this.issuer || ((origin === '' || origin === 'null') && fromSameOrigin), 'Invalid Origin');
+        // Bound all POST attempts from an IP (including invalid sids) before
+        // allocating a per-session rate key. An arbitrary sid MUST NOT create a
+        // new rate-map entry; valid sessions are bounded by the pending ledger.
+        this.throttled(`consent-ip:${rateLimitIdentity(this.clientIdentity(req))}`, 60);
         const id = params(req.url ?? '').get('sid') ?? '';
+        check(/^[A-Za-z0-9_-]{38}$/.test(id),'Invalid consent session ID');
+        await this.consent(id); // validate existence and expiry before slot quota
         this.throttled(`consent:${id}`, 6);
         const payload = await body(req);
         const result = await this.approve(id, field(payload, 'csrf'), field(payload, 'password'), field(payload, 'host'), field(payload, 'decision'));

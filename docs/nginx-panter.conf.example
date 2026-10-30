@@ -2,7 +2,7 @@
 # Place limit_req_zone directives in the Nginx 'http' context, not 'server'.
 limit_req_zone $binary_remote_addr zone=panter_register:10m rate=2r/m;
 limit_req_zone $binary_remote_addr zone=panter_authorize:10m rate=2r/s;
-limit_req_zone $binary_remote_addr zone=panter_consent:10m rate=2r/s;
+limit_req_zone $binary_remote_addr zone=panter_consent:10m rate=1r/s;
 limit_req_zone $binary_remote_addr zone=panter_token:10m rate=2r/s;
 limit_req_zone $binary_remote_addr zone=panter_revoke:10m rate=1r/s;
 # Real client IP MUST be established by a trusted edge before this file runs.
@@ -22,7 +22,7 @@ server {
     proxy_pass http://127.0.0.1:18080;
   }
   location = /oauth/consent {
-    limit_req zone=panter_consent burst=8 nodelay;
+    limit_req zone=panter_consent burst=6 nodelay;
     include snippets/panter_proxy_headers.conf;
     proxy_pass http://127.0.0.1:18080;
   }

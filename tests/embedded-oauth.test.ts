@@ -225,10 +225,24 @@ test('one IP cannot consume the 100 global consent slots or lock out a second IP
  const query=new URLSearchParams({client_id:client,redirect_uri:callbackA,response_type:'code',
    code_challenge:challenge,code_challenge_method:'S256',scope:'mcp',resource,state:'pending-flood'});
  const call=(source:string)=>request('/authorize?'+query,{headers:{'x-panter-client-ip':source}});
- for(let i=0;i<45;i++)assert.equal((await call('198.51.100.20')).status,302);
+ const first=await call('198.51.100.20');
+ assert.equal(first.status,302);
+ const consentLocation=first.headers.get('location')!;
+ const consentCookie=first.headers.get('set-cookie')!.split(';')[0]!;
+ for(let i=0;i<4;i++)assert.equal((await call('198.51.100.20')).status,302);
+ for(let i=0;i<40;i++)assert.equal((await call('198.51.100.20')).status,400);
  const data=JSON.parse(await (await import('node:fs/promises')).readFile(join(dir,'oauth.json'),'utf8'));
- assert.ok(data.pending.length<=5,'Only five pending consents can belong to the same IP/client');
- assert.equal((await call('198.51.100.21')).status,302,'Another IP must retain consent access');
+ assert.equal(data.pending.length,5,'Never evict the original pending session');
+ assert.equal((await request(consentLocation,{headers:{cookie:consentCookie}})).status,200,
+   'The initial legitimate consent remains usable after an abusive retry flood');
+ const other=await request('/register',{method:'POST',headers:{
+  'content-type':'application/json','x-panter-client-ip':'198.51.100.21'},
+  body:JSON.stringify({redirect_uris:[callbackA],token_endpoint_auth_method:'none'})});
+ assert.equal(other.status,201);
+ const otherId=(await other.json() as {client_id:string}).client_id;
+ const otherQuery=new URLSearchParams(query);otherQuery.set('client_id',otherId);
+ assert.equal((await request('/authorize?'+otherQuery,{headers:{'x-panter-client-ip':'198.51.100.21'}})).status,302,
+  'A separate client and source retain authorization capacity');
 },req=>new ClientAddressPolicy('127.0.0.1/32').identify(req)));
 test('rate-map saturation never clears live quota entries',()=>harness(async({oauth})=>{
  const internals=oauth as unknown as {throttled:(key:string,limit:number)=>void;
@@ -254,4 +268,53 @@ test('IPv6 /64 rotation cannot exceed the per-source registration quota',()=>har
  }
  assert.equal((await request('/register',{method:'POST',headers:{
    'content-type':'application/json','x-panter-client-ip':'2001:db8:abcd:43::1'},body})).status,201);
+},req=>new ClientAddressPolicy('127.0.0.1/32').identify(req)));
+
+test('N1: 4200 fake consent sids from one IP cannot fill global rate-map or block legitimate registration',()=>harness(async({request,oauth})=>{
+ const badSid=(i:number)=>'/oauth/consent?sid=junk'+i;
+ for(let i=0;i<4200;i++){
+  const response=await request(badSid(i),post({csrf:'invalid',password:'invalid',host:'gpt-a',decision:'allow'},
+    {origin:issuer,'x-panter-client-ip':'192.0.2.66'}));
+  assert.equal(response.status,403);
+ }
+ const map=(oauth as unknown as {rate:Map<string,unknown>}).rate;
+ assert.ok(map.size<=2,'Fake per-session IDs must not allocate unbounded rate entries');
+ assert.equal([...map.keys()].filter(k=>k.startsWith('consent:')).length,0);
+ const valid=await request('/register',{method:'POST',headers:{
+    'content-type':'application/json','x-panter-client-ip':'203.0.113.200'},
+    body:JSON.stringify({redirect_uris:[callbackA],token_endpoint_auth_method:'none'})});
+ assert.equal(valid.status,201,'A different source must still register after the fake-sid flood');
+},req=>new ClientAddressPolicy('127.0.0.1/32').identify(req)));
+
+test('M1 residual: 20 sources cannot evict a legitimate pending consent after reaching capacity',()=>harness(async({request,dir})=>{
+ const registerAt=async(ip:string)=>{
+  const r=await request('/register',{method:'POST',headers:{
+    'content-type':'application/json','x-panter-client-ip':ip},
+    body:JSON.stringify({redirect_uris:[callbackA],token_endpoint_auth_method:'none'})});
+  assert.equal(r.status,201);return (await r.json() as {client_id:string}).client_id;
+ };
+ const authorizeAt=(ip:string,clientId:string)=>{
+  const query=new URLSearchParams({client_id:clientId,redirect_uri:callbackA,response_type:'code',
+    code_challenge:challenge,code_challenge_method:'S256',scope:'mcp',resource,state:'flood-capacity'});
+  return request('/authorize?'+query,{headers:{'x-panter-client-ip':ip}});
+ };
+ const originalIp='192.0.2.1';
+ const originalClient=await registerAt(originalIp);
+ const original=await authorizeAt(originalIp,originalClient);
+ assert.equal(original.status,302);
+ const location=original.headers.get('location')!;
+ const cookie=original.headers.get('set-cookie')!.split(';')[0]!;
+ // 20 different source IPs, each using a different client, can fill 99 free
+ // slots but must NEVER cause eviction of an already opened consent.
+ for(let source=2;source<=21;source++){
+  const ip='192.0.2.'+source,client=await registerAt(ip);
+  const limit=source===21?4:5;
+  for(let j=0;j<limit;j++)assert.equal((await authorizeAt(ip,client)).status,302);
+ }
+ const ledger=JSON.parse(await (await import('node:fs/promises')).readFile(join(dir,'oauth.json'),'utf8'));
+ assert.equal(ledger.pending.length,100);
+ const over=await authorizeAt('192.0.2.21',await registerAt('192.0.2.22'));
+ assert.equal(over.status,400,'At capacity, new requests fail instead of evicting unrelated pending sessions');
+ assert.equal((await request(location,{headers:{cookie}})).status,200,
+   'The legitimate operator consent must remain available despite distributed pending saturation');
 },req=>new ClientAddressPolicy('127.0.0.1/32').identify(req)));
