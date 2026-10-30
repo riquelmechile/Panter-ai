@@ -131,10 +131,12 @@ export class EmbeddedOAuth {
     return next;
   }
   protectedResourceMetadata() {
-    return { resource: this.resource, authorization_servers: [this.issuer], scopes_supported: [...ALLOWED_SCOPES] };
+    return { resource: this.resource, authorization_servers: [this.issuer], bearer_methods_supported: ['header'], scopes_supported: [...ALLOWED_SCOPES] };
   }
   authorizationServerMetadata() {
-    return { issuer: this.issuer, authorization_endpoint: this.issuer + '/authorize', token_endpoint: this.issuer + '/token', registration_endpoint: this.issuer + '/register', revocation_endpoint: this.issuer + '/revoke', response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], token_endpoint_auth_methods_supported: ['none'], code_challenge_methods_supported: ['S256'], scopes_supported: [...ALLOWED_SCOPES] };
+    // RFC 9207: both consent outcomes return the exact `iss` in the redirect.
+    // ChatGPT needs this advertised to bind its stable OAuth callback.
+    return { issuer: this.issuer, authorization_response_iss_parameter_supported: true, authorization_endpoint: this.issuer + '/authorize', token_endpoint: this.issuer + '/token', registration_endpoint: this.issuer + '/register', revocation_endpoint: this.issuer + '/revoke', response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], token_endpoint_auth_methods_supported: ['none'], code_challenge_methods_supported: ['S256'], scopes_supported: [...ALLOWED_SCOPES] };
   }
   challenge() {
     return `Bearer realm="panter-ai", resource_metadata="${this.issuer}/.well-known/oauth-protected-resource", scope="mcp"`;

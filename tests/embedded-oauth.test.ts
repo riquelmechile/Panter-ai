@@ -56,9 +56,33 @@ async function token(request: (p: string, init?: RequestInit) => Promise<Respons
 
 test('embedded OAuth discovery, DCR, PKCE, consent, token, restart and no code replay', () => harness(async ({ oauth, dir, request }) => {
   const discovery = await request('/.well-known/oauth-authorization-server');
-  assert.equal(discovery.status, 200); assert.equal((await discovery.json() as { issuer: string }).issuer, issuer);
-  const metadata = await request('/.well-known/oauth-protected-resource/mcp');
-  assert.deepEqual((await metadata.json() as { authorization_servers: string[] }).authorization_servers, [issuer]);
+  assert.equal(discovery.status, 200);
+  const asMetadata = await discovery.json() as {
+    issuer: string;
+    authorization_response_iss_parameter_supported?: boolean;
+    client_id_metadata_document_supported?: boolean;
+    registration_endpoint: string;
+    token_endpoint_auth_methods_supported: string[];
+    code_challenge_methods_supported: string[];
+  };
+  assert.equal(asMetadata.issuer, issuer);
+  assert.equal(asMetadata.authorization_response_iss_parameter_supported, true);
+  assert.equal('client_id_metadata_document_supported' in asMetadata, false, 'Do not advertise unsupported CIMD');
+  assert.equal(asMetadata.registration_endpoint, issuer + '/register');
+  assert.deepEqual(asMetadata.token_endpoint_auth_methods_supported, ['none']);
+  assert.ok(asMetadata.code_challenge_methods_supported.includes('S256'));
+  for (const path of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp']) {
+    const metadata = await request(path);
+    assert.equal(metadata.status, 200);
+    const prm = await metadata.json() as {
+      resource: string;
+      authorization_servers: string[];
+      bearer_methods_supported: string[];
+    };
+    assert.equal(prm.resource, resource);
+    assert.deepEqual(prm.authorization_servers, [asMetadata.issuer]);
+    assert.deepEqual(prm.bearer_methods_supported, ['header']);
+  }
   const clientId = await register(request);
   const { code } = await authorize(request, clientId, 'gpt-a');
   const response = await token(request, clientId, code);
@@ -69,6 +93,39 @@ test('embedded OAuth discovery, DCR, PKCE, consent, token, restart and no code r
   const reopened = await EmbeddedOAuth.open({ dir, resource, redirectUris: [callbackA, callbackB], password: secret });
   assert.equal(await reopened.authenticate('Bearer ' + issued.access_token), 'gpt-a');
   assert.equal((await token(request, clientId, code)).status, 400);
+}));
+
+test('RFC 9207 issuer matches exact metadata on the denied ChatGPT callback', () => harness(async ({ request }) => {
+  const metadata = await (await request('/.well-known/oauth-authorization-server')).json() as {
+    issuer: string;
+    authorization_response_iss_parameter_supported?: boolean;
+  };
+  assert.equal(metadata.authorization_response_iss_parameter_supported, true);
+  const clientId = await register(request);
+  const q = new URLSearchParams({
+    client_id: clientId, redirect_uri: callbackA, response_type: 'code',
+    code_challenge: challenge, code_challenge_method: 'S256',
+    scope: 'mcp offline_access', resource, state: 'denial-state',
+  });
+  const start = await request('/authorize?' + q);
+  assert.equal(start.status, 302);
+  const cookie = start.headers.get('set-cookie')!.split(';')[0]!;
+  const location = start.headers.get('location')!;
+  const consent = await request(location, { headers: { cookie } });
+  assert.equal(consent.status, 200);
+  const csrf = /name="csrf" value="([^"]+)"/.exec(await consent.text())?.[1];
+  assert.ok(csrf);
+  const denied = await request(location, post(
+    { csrf, decision: 'deny', host: 'gpt-a' },
+    { cookie, origin: metadata.issuer }
+  ));
+  assert.equal(denied.status, 302);
+  const callback = new URL(denied.headers.get('location')!);
+  assert.equal(callback.origin + callback.pathname, callbackA);
+  assert.equal(callback.searchParams.get('error'), 'access_denied');
+  assert.equal(callback.searchParams.get('state'), 'denial-state');
+  assert.equal(callback.searchParams.get('iss'), metadata.issuer);
+  assert.equal(callback.searchParams.has('code'), false);
 }));
 
 test('two independent ChatGPT apps bind to different authenticated actors', () => harness(async ({ oauth, request }) => {

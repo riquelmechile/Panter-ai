@@ -104,6 +104,22 @@ Para regresar de release: respaldar los datos antes del cambio; detener Panter; 
 
 Repetir exactamente las mismas mediciones de procesos, listeners y hashes de configuración del preflight. Los procesos preexistentes deben conservar sus PID, sus hashes deben ser idénticos y el **único listener agregado** debe ser el del canary en loopback. Cualquier diferencia ajena a Panter exige detenerse y reportar, sin modificar servicios ajenos. Los PID/hashes reales son evidencia privada y nunca se comiten.
 
+## Compatibilidad OAuth ChatGPT (referencia DevZana)
+
+El servidor OAuth está integrado en Panter y funciona sobre Node con datos persistentes del canary. **No utiliza Railway ni requiere copiar PostgreSQL, el proveedor multi-tenant o secretos de DevZana.** La URL pública debe apuntar a la entrada HTTPS real del túnel; el servicio nativo continúa vinculado a loopback.
+
+El repositorio `DevZana` demostró el patrón de OAuth 2.1 con DCR, PKCE S256, redirect exacto y **RFC 9207**. En Panter, `/.well-known/oauth-authorization-server` anuncia `authorization_response_iss_parameter_supported: true` porque las respuestas de consentimiento autorizado y denegado incluyen `iss` idéntico al emisor del discovery; las dos rutas de protected-resource metadata deben referir al mismo emisor. Panter **no** anuncia CIMD, ya que no implementa client metadata documents.
+
+Verificación de compatibilidad antes de intentar el alta desde ChatGPT:
+
+- Confirmar que la metadata del authorization server incluye `registration_endpoint`, `S256`, `offline_access` y `authorization_response_iss_parameter_supported: true`.
+- Confirmar que ambas rutas protected-resource anuncian la URL MCP exacta y el issuer exacto.
+- Enviar un registro DCR sintético con un callback **desconocido** y esperar rechazo; no generar registros que parezcan cuentas ChatGPT reales.
+- Verificar en tests que el redirect permitido de ChatGPT es el callback fijo, que en aprobación y denegación se devuelve `iss` exacto y que un cliente nunca puede cambiar de rol por su cuenta.
+- La conexión real requiere iniciar un nuevo flujo de ChatGPT y comprobar las herramientas autenticadas. Un error genérico del formulario no identifica por sí solo una causa única.
+
+Para desplegar una corrección: esperar CI y revisión independiente del SHA; actualizar la copia de release de manera acotada, conservando la configuración del túnel y los datos persistentes. **Este documento no autoriza reiniciar servicios, cambiar tunnel ni exponer nuevos puertos.** La clave de consentimiento que haya sido compartida debe rotarse de forma segura; nunca publicarla en logs ni tickets.
+
 ## Pendiente antes de exponer
 
 - Migrar a un **usuario de sistema dedicado** sin login ni sudo, con unidad de sistema y permisos mínimos, separando estado y releases.
