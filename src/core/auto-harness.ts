@@ -114,7 +114,7 @@ export class AutomaticHarness {
   }
   async start(input:HarnessInput){
     const selected=chooseHarness(input);
-    const digest=hash({project:input.project,githubRepository:input.githubRepository??null,githubPrNumber:input.githubPrNumber??null,githubExpectedBase:input.githubExpectedBase??null,objective:input.objective,key:input.idempotencyKey,permission:input.writesAuthorized,writeGrantId:input.writeGrantId??null,paths:selected.paths,mode:selected.mode,risk:selected.risk,review:selected.reviewKind,observations:input.observations??{}});
+    const digest=hash({project:input.project,githubRepository:input.githubRepository??null,githubPrNumber:input.githubPrNumber??null,githubExpectedBase:input.githubExpectedBase??null,objective:input.objective,key:input.idempotencyKey,permission:input.writesAuthorized,writeGrantId:input.writeGrantId??null,paths:selected.paths,mode:selected.mode,risk:selected.risk,review:selected.reviewKind,judgmentRequested:input.judgmentDayRequested===true,observations:input.observations??{}});
     return this.write(s=>{
       const old=s.runs.find(r=>r.project===input.project&&r.key===input.idempotencyKey);
       if(old){ensure(old.inputDigest===digest,'Harness start idempotency conflict');return old;}
@@ -173,8 +173,9 @@ export class AutomaticHarness {
       ensure(r.permission==='WRITE_APPROVED'&&r.paths.length>0,'Correction is not authorized within a scoped writable run');
       ensure((r.correctionAttempts??0)<2,'Correction attempt budget exhausted');
       ensure(r.candidateSha&&r.candidateSha!==payload.candidateSha,'Corrected candidate requires a fresh SHA');
-      const review=r.steps.find(st=>st.phase==='REVIEW');ensure(review,'No review requiring correction');
-      ensure(review.status!=='COMPLETE'||!!r.judgmentId,'Closed review cannot be silently rewritten');
+      const review=r.steps.find(st=>st.phase==='REVIEW');const judgment=r.steps.find(st=>st.phase==='JUDGMENT');
+      ensure(review||judgment,'No review requiring correction');
+      ensure(!review||review.status!=='COMPLETE'||(!!judgment&&judgment.status!=='COMPLETE'&&!!r.judgmentId),'Closed review cannot be silently rewritten');
       r.previousReviewId=r.reviewId;
       r.candidateSha=payload.candidateSha;r.reviewId=null;r.reviewTransport=null;r.judgmentId=null;
       r.correctionAttempts=(r.correctionAttempts??0)+1;r.correctionRunId=payload.runId;
@@ -259,7 +260,7 @@ export class AutomaticHarness {
       }
       if(step.phase==='VERIFY'){
         ensure(payload.candidateSha===r.candidateSha&&!!r.candidateSha,'Verifier must report exact candidate SHA');
-        ensure(!!payload.runId&&payload.runId!=='gpt-a'&&payload.runId!==r.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId&&payload.runId!==r.correctionRunId,
+        ensure(!!payload.runId&&payload.runId!=='gpt-a'&&payload.runId!==r.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId&&payload.runId!==r.correctionRunId&&!(r.units??[]).some(u=>u.runId===payload.runId),
           'Independent verifier run ID required');
       }
       step.status='COMPLETE';step.result={summary:payload.summary,evidence:payload.evidence,runId:payload.runId,digest};
@@ -283,11 +284,13 @@ export class AutomaticHarness {
       const repository=record.githubRepository??(githubProject.test(record.project)?record.project:null);
       const nativeVerdict=this.rdd&&record.reviewId?await this.rdd.getForReview(record.reviewId):null;
       if(record.risk==='HIGH'&&nativeVerdict?.state!=='ACKNOWLEDGED')return {...common,status:'AWAITING_PANTER_RDD_AUTHORITY',rdd:nativeVerdict,next:[]};
+      const judgmentVerdict=this.rdd&&record.judgmentId?await this.rdd.getForReview(record.judgmentId):null;
+      if(record.judgmentRequested&&judgmentVerdict?.state!=='ACKNOWLEDGED')return {...common,status:'AWAITING_JUDGMENT_RDD_AUTHORITY',rdd:judgmentVerdict,next:[]};
       if(!repository)return {...common,status:record.risk==='HIGH'?'PANTER_RDD_REVIEWED_NO_GITHUB_DELIVERY_AUTHORITY':'REPORTED_COMPLETE_UNVERIFIED',next:[]};
       if(!record.githubPrNumber)return {...common,status:'AWAITING_GITHUB_PR_EVIDENCE',next:[],instruction:'GPT-A must identify or obtain permission to create the exact target PR; never push or open a PR without authorization.'};
       if(!record.candidateSha||!(/^[a-f0-9]{40}$/.test(record.candidateSha)))return {...common,status:'BLOCKED_CANDIDATE_SHA',next:[]};
       if(!this.github)return {...common,status:'GITHUB_VERIFICATION_NOT_CONFIGURED',next:[]};
-      const github=await this.github.inspect({repository,prNumber:record.githubPrNumber,expectedSha:record.candidateSha,expectedBase:record.githubExpectedBase,deliveryStrategy:record.deliveryStrategy});
+      const github=await this.github.inspect({repository,prNumber:record.githubPrNumber,expectedSha:record.candidateSha,expectedBase:record.githubExpectedBase,deliveryStrategy:record.deliveryStrategy,parentAuthorizedSinglePr:record.deliveryStrategy==='single-pr'});
       return {...common,status:github.state==='REVIEWABLE'?(record.risk==='HIGH'?'PANTER_RDD_REVIEWED_NO_DELIVERY_AUTHORITY':'GITHUB_EVIDENCE_READY_NO_DELIVERY_AUTHORITY'):'GITHUB_GATE_BLOCKED',github,next:[],
         instruction:'GitHub verification is evidence, not permission for commit, push, merge, release, or deployment.'};
     }
@@ -449,11 +452,13 @@ export class AutomaticHarness {
         phase:'IMPLEMENT',execution:'GPT_A_INLINE',unitReports:record.units,
         instruction:'Integrate all completed units, verify shared invariants, run applicable tests, and report the actual final Git commit SHA. No extra writer may bypass unit scopes.'}]};
     }
+    if(phase.status==='ISSUED')return {...common,status:'WAITING_HOST_PHASE_REPORT',phaseId:phase.id,next:[],instruction:'Reconcile the original issued phase; never dispatch a duplicate when peer availability changes.'};
     if(!runtime.toolsAvailable)return {...common,status:'BLOCKED_HOST_TOOLS',phaseId:phase.id,next:[]};
-    const objective=phase.phase==='DISCOVER'?`Explore the repository for: ${record.objective}. Return exact permitted edit surfaces, risks and path:line evidence. Do not write.`:
-      phase.phase==='DESIGN'?`Plan the smallest authorized change for: ${record.objective}. Preserve exact specification, acceptance checks and ODD task IDs. Confirm scoped edit surfaces: ${record.paths.join(', ')||'unknown; do not write yet'}.`:
-      phase.phase==='IMPLEMENT'?`Implement the authorized scoped change: ${record.objective}. Allowed surfaces: ${record.paths.join(', ')}. Test first when applicable; return the exact commit SHA for high-risk review.`:
-      `Verify the exact frozen candidate ${record.candidateSha} against: ${record.objective}. Independently reproduce checks, read-only; report run identity and evidence.`;
+    const brief=record.objective.length>5000?record.objective.slice(0,5000)+' [Full objective is stored in harness status; retrieve it before writing.]':record.objective;
+    const objective=phase.phase==='DISCOVER'?`Explore the repository for: ${brief}. Return exact permitted edit surfaces, risks and path:line evidence. Do not write.`:
+      phase.phase==='DESIGN'?`Plan the smallest authorized change for: ${brief}. Preserve exact specification, acceptance checks and ODD task IDs. Confirm scoped edit surfaces: ${record.paths.join(', ')||'unknown; do not write yet'}.`:
+      phase.phase==='IMPLEMENT'?`Implement the authorized scoped change: ${brief}. Allowed surfaces: ${record.paths.join(', ')}. Test first when applicable; return the exact commit SHA for high-risk review.`:
+      `Verify the exact frozen candidate ${record.candidateSha} against: ${brief}. Independently reproduce checks, read-only; report run identity and evidence.`;
     if(phase.phase==='DESIGN'){
       await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;if(st.status==='PENDING'){st.status='ISSUED';r.revision++;}});
       return {...common,status:'GPT_A_INLINE',phaseId:phase.id,next:[{phase:phase.phase,agentId:null,instruction:objective,
@@ -470,7 +475,7 @@ export class AutomaticHarness {
     if(remoteEligible){
       const work=await this.mesh.delegateBoundSpecialist('gpt-a',{missionId:record.id,agentId:phase.agentId,objective,
         candidateSha:record.candidateSha??undefined,allowedEditSurfaces:phase.phase==='IMPLEMENT'?record.paths:undefined,
-        idempotencyKey:`harness:${record.id}:${phase.id}`});
+        idempotencyKey:`harness:${record.id}:${phase.id}:${record.candidateSha??'none'}:${record.correctionAttempts??0}`});
       await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;
         if(st.status==='PENDING'){st.status='ISSUED';st.execution='REMOTE_A2A';st.remoteWorkId=work.id;r.revision++;}});
       return {...common,status:'REMOTE_A2A_DISPATCHED',phaseId:phase.id,next:[{agentId:phase.agentId,workId:work.id,
