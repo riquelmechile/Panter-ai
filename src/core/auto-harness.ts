@@ -363,7 +363,8 @@ export class AutomaticHarness {
       if(previous){
         const nativeStatus=(phase.phase==='JUDGMENT'||record.reviewTransport==='NATIVE')?await this.native.status(previous):null;
         const rddRecord=phase.phase==='REVIEW'&&this.rdd?await this.rdd.getForReview(previous):null;
-        const severe=nativeStatus?.severeFindings??[];
+        // Finish the four solo lenses before triaging their aggregate findings.
+        const severe=nativeStatus&&(!nativeStatus.soloEvidenceComplete&&nativeStatus.reviewMode==='IN_PROGRESS')?[]:nativeStatus?.severeFindings??[];
         if(severe.length||rddRecord?.state==='NEEDS_CORRECTION'){
           const findings=severe.length?severe.map(f=>`${f.id}: ${f.location}: ${f.claim}`):['See Panter-RDD severe findings'];
           if((record.correctionAttempts??0)>=2)return {...common,status:'CORRECTION_BUDGET_EXHAUSTED',phaseId:phase.id,next:[],findings};
