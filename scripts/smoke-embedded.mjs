@@ -55,7 +55,7 @@ async function operatorCall(name,args={}){
   const result=await new Promise((ok,fail)=>{
     const req=unixRequest({socketPath,path:'/mcp',method:'POST',
       headers:{authorization:`Bearer ${operatorSecret}`,'content-type':'application/json',
-        accept:'application/json, text/event-stream','mcp-protocol-version':'2026-07-28',
+        accept:'application/json, text/event-stream','mcp-protocol-version':'2026-07-28','mcp-method':'tools/call','mcp-name':name,
         'content-length':Buffer.byteLength(body)}},res=>{
       let text='';res.setEncoding('utf8');res.on('data',c=>text+=c);
       res.on('end',()=>ok({status:res.statusCode,text}));
