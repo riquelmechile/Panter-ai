@@ -476,6 +476,7 @@ export class AutomaticHarness {
       phase.phase==='DESIGN'?`Plan the smallest authorized change for: ${brief}. Preserve exact specification, acceptance checks and ODD task IDs. Confirm scoped edit surfaces: ${record.paths.join(', ')||'unknown; do not write yet'}.`:
       phase.phase==='IMPLEMENT'?`Implement the authorized scoped change: ${brief}. Allowed surfaces: ${record.paths.join(', ')}. Test first when applicable; return the exact commit SHA for high-risk review.`:
       `Verify the exact frozen candidate ${record.candidateSha} against: ${brief}. Independently reproduce checks, read-only; report run identity and evidence.`;
+    const packetObjective=objective.length>5800?objective.slice(0,5700)+' [Retrieve complete objective and paths from panter_harness_status.]':objective;
     if(phase.phase==='DESIGN'){
       await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;if(st.status==='PENDING'){st.status='ISSUED';r.revision++;}});
       return {...common,status:'GPT_A_INLINE',phaseId:phase.id,next:[{phase:phase.phase,agentId:null,instruction:objective,
@@ -490,7 +491,7 @@ export class AutomaticHarness {
     const remoteEligible=effectiveMode==='AUTO'&&binding&&runtime.peerStates?.[binding.host]==='CONNECTED'&&candidateVerifierIsIndependent&&
       (await this.mesh.profiles()).some(p=>p.host===binding.host&&p.roles.includes(requestedRole));
     if(remoteEligible){
-      const work=await this.mesh.delegateBoundSpecialist('gpt-a',{missionId:record.id,agentId:phase.agentId,objective,
+      const work=await this.mesh.delegateBoundSpecialist('gpt-a',{missionId:record.id,agentId:phase.agentId,objective:packetObjective,
         candidateSha:record.candidateSha??undefined,allowedEditSurfaces:phase.phase==='IMPLEMENT'?record.paths:undefined,
         idempotencyKey:`harness:${record.id}:${phase.id}:${record.candidateSha??'none'}:${record.correctionAttempts??0}`});
       await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;
@@ -498,7 +499,7 @@ export class AutomaticHarness {
       return {...common,status:'REMOTE_A2A_DISPATCHED',phaseId:phase.id,next:[{agentId:phase.agentId,workId:work.id,
         execution:'REMOTE_A2A',host:binding.host,automatic:true}]};
     }
-    const packet=await specialistPacket({agentId:phase.agentId,objective,skillIds:phase.phase==='IMPLEMENT'?['gentle-ai','work-unit-commits']:
+    const packet=await specialistPacket({agentId:phase.agentId,objective:packetObjective,skillIds:phase.phase==='IMPLEMENT'?['gentle-ai','work-unit-commits']:
       phase.phase==='DISCOVER'?['gentle-ai']:['gentle-ai'],modelRequest:policy.model,effortRequest:policy.reasoningEffort,
       candidateSha:phase.phase==='VERIFY'?record.candidateSha??undefined:undefined,
       allowedEditSurfaces:phase.phase==='IMPLEMENT'?record.paths:undefined});
