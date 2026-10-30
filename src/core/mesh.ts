@@ -155,6 +155,8 @@ export class MeshEngine {
     check(roles.has(input.role) && input.role !== 'orchestrator', 'Invalid role');
     check(input.instruction.trim().length > 0 && input.instruction.length <= 50000, 'Invalid instruction');
     check(input.idempotencyKey.length > 0 && input.idempotencyKey.length <= 160, 'Invalid idempotency');
+    if(input.role==='implementer'&&this.writeGuard)
+      await this.writeGuard(input.missionId,input.specialist?.allowedEditSurfaces??[]);
     return this.write(d => {
       check(!d.profiles.some(p=>p.host==='gpt-a'&&p.coordinationMode==='GPT_A_ONLY'),
         'GPT_A_ONLY forbids remote delegation; use native GPT-A phases');
