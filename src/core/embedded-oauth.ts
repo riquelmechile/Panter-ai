@@ -91,19 +91,22 @@ export class EmbeddedOAuth {
   private serial: Promise<unknown> = Promise.resolve();
   private readonly callbacks: Set<string>;
   private readonly operatorPassword: string;
+  private readonly clientIdentity:(req:IncomingMessage)=>string;
   private readonly rate = new Map<string, { count: number; since: number }>();
   private readonly consentCookie = '__Host-panter-consent';
-  private constructor(dir: string, resource: string, callbacks: string[], password: string) {
+  private constructor(dir: string, resource: string, callbacks: string[], password: string, clientIdentity:(req:IncomingMessage)=>string) {
     this.resource = validateResource(resource);
     this.issuer = new URL(this.resource).origin;
     check(validString(password, 512) && password.length >= 32, 'PANTER_CONSENT_PASSWORD must be at least 32 characters');
     this.operatorPassword = password;
+    this.clientIdentity=clientIdentity;
     check(callbacks.length > 0 && callbacks.length <= 30, 'Configure approved OAuth redirect URIs');
     this.callbacks = new Set(callbacks.map(validateRedirect));
     this.file = join(resolve(dir), 'oauth.json');
   }
-  static async open(cfg: { dir: string; resource: string; redirectUris: string[]; password: string }) {
-    const provider = new EmbeddedOAuth(cfg.dir, cfg.resource, cfg.redirectUris, cfg.password);
+  static async open(cfg: { dir: string; resource: string; redirectUris: string[]; password: string; clientIdentity?:(req:IncomingMessage)=>string }) {
+    const provider = new EmbeddedOAuth(cfg.dir, cfg.resource, cfg.redirectUris, cfg.password,
+      cfg.clientIdentity??(req=>req.socket.remoteAddress??'unknown'));
     await mkdir(resolve(cfg.dir), { recursive: true, mode: 0o700 });
     try {
       const parsed: Ledger = JSON.parse(await readFile(provider.file, 'utf8'));
@@ -304,12 +307,13 @@ export class EmbeddedOAuth {
       reply(res, 200, this.authorizationServerMetadata()); return true;
     }
     if (req.method === 'POST' && path === '/register') {
-      try { this.throttled(`register:${req.socket.remoteAddress ?? 'unknown'}`, 20); const registered = await this.register(await body(req)); reply(res, 201, registered); }
+      try { this.throttled(`register:${this.clientIdentity(req)}`, 20); const registered = await this.register(await body(req)); reply(res, 201, registered); }
       catch (err) { reply(res, 400, { error: 'invalid_client_metadata', error_description: err instanceof Error ? err.message : 'Invalid request' }); }
       return true;
     }
     if (req.method === 'GET' && path === '/authorize') {
       try {
+        this.throttled(`authorize:${this.clientIdentity(req)}`,100);
         const { id, csrf } = await this.authorize(params(req.url ?? ''));
         res.setHeader('Set-Cookie', `${this.consentCookie}=${csrf}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=600`);
         redirect(res, `/oauth/consent?sid=${encodeURIComponent(id)}`);
@@ -344,7 +348,7 @@ export class EmbeddedOAuth {
       return true;
     }
     if (path === '/token' && req.method === 'POST') {
-      try { this.throttled(`token:${req.socket.remoteAddress ?? 'unknown'}`, 100); const result = await this.exchange(await body(req)); reply(res, 'error' in result ? 400 : 200, result); }
+      try { this.throttled(`token:${this.clientIdentity(req)}`, 100); const result = await this.exchange(await body(req)); reply(res, 'error' in result ? 400 : 200, result); }
       catch { reply(res, 400, { error: 'invalid_grant' }); }
       return true;
     }
@@ -353,7 +357,8 @@ export class EmbeddedOAuth {
         // RFC 7009 allows unauthenticated public clients to revoke a token they
         // possess. The opaque token is the capability; invalid values remain 200.
         // Rate-limit the endpoint and avoid rewriting the full ledger for misses.
-        this.throttled('revoke:global',500);
+        this.throttled(`revoke:${this.clientIdentity(req)}`,100);
+        this.throttled('revoke:global',5000);
         const input = await body(req); const clientId = field(input, 'client_id'); const token = field(input, 'token');
         check(/^pc_[A-Za-z0-9_-]{24,64}$/.test(clientId)&&token.length>=32&&token.length<=200,'Invalid revocation request');
         const digest=hash(token);
