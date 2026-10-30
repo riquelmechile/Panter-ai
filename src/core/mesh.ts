@@ -99,6 +99,21 @@ export class MeshEngine {
       return next;
     });
   }
+  /** Persist the user's single-host choice without reopening Agent Studio. */
+  setCoordinationMode(caller:Host, coordinationMode:'AUTO'|'GPT_A_ONLY', expectedRevision:number){
+    check(caller==='gpt-a','GPT-A alone may change coordination mode');
+    check(coordinationMode==='AUTO'||coordinationMode==='GPT_A_ONLY','Invalid coordination mode');
+    return this.write(d=>{
+      const before=d.profiles.find(p=>p.host==='gpt-a');
+      check((before?.revision??0)===expectedRevision,'Stale GPT-A coordination revision');
+      const next:ActorProfile={...(before??{
+        host:'gpt-a',actorId:'actor-gpt-a',modelRequest:'gpt-6-astra',effortRequest:'max',roles:['orchestrator'],
+        preferNativeSubagents:true,maxRequestedNativeWorkers:32,revision:0
+      }),coordinationMode,revision:expectedRevision+1};
+      if(before)d.profiles[d.profiles.indexOf(before)]=next;else d.profiles.push(next);
+      this.notify(d,'gpt-a');return next;
+    });
+  }
   profiles() { return this.read(d => d.profiles); }
   specialistBindings() { return this.read(d => d.specialistBindings ?? []); }
   /** GPT-A configures many specialist definitions independently of the five hosts. */
@@ -139,6 +154,8 @@ export class MeshEngine {
     check(input.instruction.trim().length > 0 && input.instruction.length <= 50000, 'Invalid instruction');
     check(input.idempotencyKey.length > 0 && input.idempotencyKey.length <= 160, 'Invalid idempotency');
     return this.write(d => {
+      check(!d.profiles.some(p=>p.host==='gpt-a'&&p.coordinationMode==='GPT_A_ONLY'),
+        'GPT_A_ONLY forbids remote delegation; use native GPT-A phases');
       if (input.specialist) {
         const binding=(d.specialistBindings??[]).find(b=>b.agentId===input.specialist?.agentId);
         check(binding?.host===input.target && binding.revision===input.specialist.bindingRevision, 'Specialist binding changed during dispatch');
@@ -184,6 +201,8 @@ export class MeshEngine {
       return specialistPacket({agentId:id,skillIds:binding.skillIds,objective:input.objective,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,candidateSha:input.candidateSha});
     }));
     return this.write(d=>{
+      check(!d.profiles.some(p=>p.host==='gpt-a'&&p.coordinationMode==='GPT_A_ONLY'),
+        'GPT_A_ONLY forbids remote review fanout; use native review/evidence gates');
       const reviews=d.reviews??=[];
       const previous=reviews.find(r=>r.missionId===input.missionId && r.idempotencyKey===input.idempotencyKey);
       if(previous){check(previous.kind===input.kind && previous.candidateSha===input.candidateSha && previous.objective===input.objective,'Conflicting review idempotency');return previous;}
