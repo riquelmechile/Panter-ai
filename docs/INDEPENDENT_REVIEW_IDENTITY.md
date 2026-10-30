@@ -22,7 +22,11 @@ GitHub no permite que el autor de un PR lo apruebe. Todas las identidades que us
 
 ## Qué significa "independiente"
 
-La cuenta es solo el vehículo. Lo independiente es que **quien revisa no es quien escribió el código**. Panter-ai lo hace cumplir así:
+La cuenta es solo el vehículo. Lo independiente es que **la ejecución que revisa no es la que escribió el código**.
+
+**Con un solo modelo se puede trabajar solo.** El mismo modelo puede implementar y revisar, siempre que la revisión la haga un **subagente nuevo o una sesión nueva desde cero**: sin el contexto, el razonamiento ni las conclusiones de quien implementó, partiendo solo del diff, el SHA, la especificación (issue o PR) y el repositorio. Si el host no permite crear un subagente o una sesión limpia, la autorrevisión queda como evidencia no independiente (en Panter-RDD, `SOLO_4R_COMPLETED_UNVERIFIED`) y no se publica como `APPROVE`.
+
+La regla de identidad compara **cuentas de GitHub**, no modelos: los commits salen con la cuenta del responsable y la aprobación con la cuenta revisora. Panter-ai lo hace cumplir así:
 
 1. `PANTER_GITHUB_INDEPENDENT_REVIEWER=sebastianriquelme95-max` activa el chequeo en `GitHubDeliveryGate` (`src/core/github-delivery.ts`).
 2. El gate exige que la **última revisión decisiva** de esa cuenta (`APPROVED`, `CHANGES_REQUESTED` o `DISMISSED`; los comentarios no cuentan) sea `APPROVED` **sobre el SHA exacto** del head del PR. Cualquier push nuevo deja la aprobación como `STALE_SHA` y obliga a revisar de nuevo.
@@ -37,7 +41,7 @@ Sin la variable, el gate mantiene el comportamiento anterior y emite una adverte
 
 Toda revisión publicada con esta cuenta empieza identificando:
 
-- qué agente revisó (por ejemplo `Claude (Opus 5.5)`) y que opera una cuenta del responsable;
+- qué agente revisó (por ejemplo `Claude (Opus 5.5), subagente nuevo sin contexto de implementación`) y que opera una cuenta del responsable;
 - el SHA exacto revisado;
 - el alcance: merge a `main` sí o no, y despliegue privado o público sí o no;
 - las pruebas efectivamente ejecutadas y los riesgos residuales.
