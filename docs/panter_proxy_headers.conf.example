@@ -1,0 +1,11 @@
+# Install this file at /etc/nginx/snippets/panter_proxy_headers.conf.
+# INCLUDE IT ONLY from a tightly controlled Panter server block.
+proxy_http_version 1.1;
+proxy_set_header Host panter.example.org;
+# $remote_addr must already represent the verified source after nginx's
+# trusted real_ip processing; DO NOT blindly trust arbitrary XFF headers.
+proxy_set_header X-Panter-Client-IP $remote_addr;
+proxy_set_header X-Forwarded-For "";
+proxy_set_header X-Forwarded-Host "";
+proxy_set_header Connection "";
+proxy_buffering off;
