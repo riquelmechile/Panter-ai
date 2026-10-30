@@ -48,11 +48,13 @@ test('an expired writer can be reconciled only by the exact fenced operator deci
   assert.equal(lost.state,'OUTCOME_UNKNOWN');
   await assert.rejects(m.reconcileWriter({workId:work.id,attemptId:'00000000-0000-0000-0000-000000000000',
     leaseGeneration:claimed.leaseGeneration,resolution:'CONFIRMED_NO_EFFECTS',
+    isolationEvidence:'Operator stopped the worker process and revoked its write credentials before release.',
     evidence:'Operator inspected Git HEAD and workspace and confirmed no changes.'}),/Stale writer attempt/);
   await assert.rejects(m.delegateBoundSpecialist('gpt-a',{missionId:'uncertain-mission',agentId:'gentle-ai-worker',
    objective:'Fix another task',idempotencyKey:'uncertain-2',allowedEditSurfaces:['src/index.ts']}),/Overlapping active writer/);
   const done=await m.reconcileWriter({workId:work.id,attemptId:claimed.attemptId!,
     leaseGeneration:claimed.leaseGeneration,resolution:'CONFIRMED_NO_EFFECTS',
+    isolationEvidence:'Operator stopped the worker process and revoked its write credentials before release.',
     evidence:'Operator inspected Git HEAD and workspace, verified no effects and no running worker.'});
   assert.equal(done.state,'ABORTED_NO_EFFECTS');
   assert.equal((await m.delegateBoundSpecialist('gpt-a',{missionId:'uncertain-mission',agentId:'gentle-ai-worker',
@@ -76,5 +78,24 @@ test('operator-confirmed completion produces the real candidate receipt without 
   assert.equal(reconciled.state,'COMPLETED');
   const inbox=await m.inbox('gpt-a');
   assert.equal(JSON.parse(inbox.messages.find(x=>x.workId===w.id)!.text).candidateSha,result.candidateSha);
+ }finally{Date.now=original;}
+}));
+
+test('operator can inspect uncertain attempt fences without unlocking the writer',()=>withMesh(async m=>{
+ await m.setProfile('gpt-a',{...profile,roles:['implementer']},0);
+ const w=await m.delegate('gpt-a',{missionId:'m-admin-inspection',target:'grok',role:'implementer',
+   instruction:'Implement change',idempotencyKey:'inspect'});
+ const c=await m.claim('grok',w.id,30);
+ const original=Date.now;
+ try{
+  Date.now=()=>original()+31000;
+  const listed=await m.uncertainWriters();
+  assert.equal(listed.length,1);
+  assert.equal(listed[0]!.attemptId,c.attemptId);
+  assert.equal(listed[0]!.leaseGeneration,c.leaseGeneration);
+  await assert.rejects(m.reconcileWriter({workId:w.id,attemptId:c.attemptId!,
+    leaseGeneration:c.leaseGeneration,resolution:'CONFIRMED_NO_EFFECTS',
+    evidence:'We inspected the workspace and did not observe changes'}),/Confirm peer credentials/);
+  assert.equal((await m.uncertainWriters()).length,1);
  }finally{Date.now=original;}
 }));

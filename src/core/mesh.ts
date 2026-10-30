@@ -296,11 +296,19 @@ export class MeshEngine {
       return w;
     });
   }
+  /** Operator-only ledger view; does not expose credentials and cannot stop a worker. */
+  uncertainWriters(){
+    return this.read(d=>d.works.filter(w=>w.role==='implementer'&&
+      (w.state==='OUTCOME_UNKNOWN'||(w.state==='RUNNING'&&Date.parse(w.leaseUntil??'')<=Date.now())))
+      .map(w=>({workId:w.id,missionId:w.missionId,target:w.target,state:w.state,
+        attemptId:w.attemptId,leaseGeneration:w.leaseGeneration,leaseUntil:w.leaseUntil,
+        allowedEditSurfaces:w.specialist?.allowedEditSurfaces??[],createdAt:w.createdAt})));
+  }
   /** A lost writer result is NEVER replayed automatically. Only a trusted operator,
    * after inspecting the actual workspace, can resolve its exact fenced attempt.
    * This is an audit record of a human decision, not cryptographic proof. */
   async reconcileWriter(input:{workId:string;attemptId:string;leaseGeneration:number;
-    resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;
+    resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;isolationEvidence?:string;
     result?:{summary:string;evidence:string[];candidateSha:string;runId:string}}){
     check(/^[0-9a-f-]{36}$/i.test(input.workId),'Invalid work ID');
     check(input.evidence.trim().length>=32&&input.evidence.length<=2000,'Detailed operator reconciliation evidence required');
@@ -310,7 +318,12 @@ export class MeshEngine {
         result.evidence.length>0&&result.evidence.every(x=>typeof x==='string'&&x.trim().length>0)&&
         /^[a-f0-9]{40}$/.test(result.candidateSha)&&/^[A-Za-z0-9._:-]{8,160}$/.test(result.runId),
         'Confirmed writer completion requires observed SHA, run ID and evidence');
-    }else check(!input.result,'No-effects resolution cannot supply completed work');
+    }else {
+      check(!input.result,'No-effects resolution cannot supply completed work');
+      check(typeof input.isolationEvidence==='string'&&input.isolationEvidence.trim().length>=40&&
+        input.isolationEvidence.length<=2000,
+        'Confirm peer credentials revoked or worker terminated and worktree isolated before releasing scope');
+    }
     return this.write(d=>{
       const w=d.works.find(w=>w.id===input.workId);
       check(w&&w.role==='implementer','Unknown implementer work');
@@ -318,7 +331,7 @@ export class MeshEngine {
         'Stale writer attempt: reconciliation must match original fence');
       check((w.state==='OUTCOME_UNKNOWN'||(w.state==='RUNNING'&&
         Date.parse(w.leaseUntil??'')<=Date.now())), 'Writer is not in an expired uncertain state');
-      w.reconciliation={resolution:input.resolution,evidence:input.evidence,at:iso()};
+      w.reconciliation={resolution:input.resolution,evidence:input.evidence+(input.isolationEvidence?'\nIsolation: '+input.isolationEvidence:''),at:iso()};
       w.completedAt=iso();w.leaseUntil=null;
       if(input.resolution==='CONFIRMED_COMPLETE'){
         const result=JSON.stringify(input.result);

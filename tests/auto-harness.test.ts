@@ -437,6 +437,7 @@ test('operator-reconciled no-effects A2A writer creates a NEW attempt rather tha
   assert.equal(held.status,'REMOTE_OUTCOME_NEEDS_RECONCILIATION');
   await m.reconcileWriter({workId,attemptId:claimed.attemptId!,
     leaseGeneration:claimed.leaseGeneration,resolution:'CONFIRMED_NO_EFFECTS',
+    isolationEvidence:'Operator terminated the remote worker and disabled its isolated worktree mount.',
     evidence:'Operator inspected the exact worktree and verified it did not change any file or commit.'});
   const reconciled=await h.tick(run.id,capacity);
   assert.equal(reconciled.status,'REMOTE_NO_EFFECTS_RECONCILED');
