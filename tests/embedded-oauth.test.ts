@@ -271,7 +271,8 @@ test('IPv6 /64 rotation cannot exceed the per-source registration quota',()=>har
 },req=>new ClientAddressPolicy('127.0.0.1/32').identify(req)));
 
 test('N1: 4200 fake consent sids from one IP cannot fill global rate-map or block legitimate registration',()=>harness(async({request,oauth})=>{
- const badSid=(i:number)=>'/oauth/consent?sid=junk'+i;
+ const badSid=(i:number)=>'/oauth/consent?sid='+
+   (i%2===0?'junk'+i:'A'.repeat(34)+i.toString(36).padStart(4,'0')); // malformed AND valid-format unknown
  for(let i=0;i<4200;i++){
   const response=await request(badSid(i),post({csrf:'invalid',password:'invalid',host:'gpt-a',decision:'allow'},
     {origin:issuer,'x-panter-client-ip':'192.0.2.66'}));

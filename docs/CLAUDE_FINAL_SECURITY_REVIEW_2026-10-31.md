@@ -63,3 +63,11 @@ Publicar una revisión SHA-bound en GitHub PR #1 con: identidad del revisor, com
 Verify that the rate-limit map never resets globally, IPv6 /64 addresses share a registration bucket, pending authorizations store a hashed client source with a maximum of five active entries, and a second IP can authorize during a flood. Check no `dev-static` nonloopback/public URL startup and that Compose opts into embedded OAuth. The operator's Unix socket parent is owned and mode 0700, including restart handling for stale sockets. The admin-only `panter_mesh_uncertain_writers` reports exact fence IDs; releasing an uncertain write requires explicit peer/worktree isolation evidence and must not be characterized as proof that Panter killed a zombie process. The one-time >100 commit allowance is scoped narrowly to owner-authorized `riquelmechile/Panter-ai` PR #1 and checks every paginated commit. Inspect `arm64-image` for a real container startup and 401, rather than just `node --version`.
 
 Public proxy exposure still requires a real measured ingress chain, Cloudflare/nginx edge rules and verification of source identity; the code changes and template are necessary but insufficient. Independently recheck the HEAD after all these commits.
+
+## Claude review addendum: N1 and distributed M1 pending slots
+
+On the updated SHA after `d508e36f`, `POST /oauth/consent` limits by source, validates the 38-character session ID, checks the session exists and is unexpired, and only then allocates a per-valid-session counter. The HTTP test submits 4,200 requests with malformed OR syntactically valid but nonexistent IDs, checks that no per-fake-session counters are allocated, and verifies another IP can register.
+
+For distributed M1, `GET /authorize` does not evict an unrelated active consent. It caps five sessions per source, five per client, and 100 globally. An HTTP test fills the global 100 slots using 20 distinct client/source pairs and verifies a preexisting consent still works. **This does not remove distributed denial of NEW authorizations**: WAF/edge rules remain a separate public deployment gate.
+
+Claude should repeat its original N1 attack, the syntactically valid nonexistent SID variant, and the distributed 100-slot saturation case. Review new SHA/checks and the two open PR review threads before resolving them. No automatic merge or public deployment.
