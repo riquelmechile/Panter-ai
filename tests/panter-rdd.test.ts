@@ -173,3 +173,20 @@ test('signed review must cover exact report content, not just the declared run i
 }));
 
 test('RDD forwards operator-approved single-PR strategy for oversized bootstrap',()=>setup(async({native,rdd})=>{const v=await input(native);const tx=await rdd.begin({...v.begin,deliveryStrategy:'single-pr'});await reportAll(native,v.review);const x=await rdd.assess(tx.id);assert.equal(x.github?.state,'REVIEWABLE');assert.equal(x.approved,true);},gate({additions:750})));
+
+test('all unit builders, integration and prior correctors are excluded from signed 4R reviewers',()=>setup(async({native,rdd})=>{
+ const v=await input(native);
+ const tx=await rdd.begin({...v.begin,implementerRunIds:['builder-unit-1','independent-child-0','corrector-old-1','builder-1']});
+ await reportAll(native,v.review); // Ed25519 reports are valid; reviewer 0 reused an author identity
+ const decision=await rdd.assess(tx.id);
+ assert.equal(decision.approved,false);
+ assert.equal(decision.record.state,'NEEDS_REVIEW_EVIDENCE');
+ await assert.rejects(rdd.acknowledge(tx.id,decision.record.revision),/Cannot acknowledge/);
+}));
+test('RDD freezes complete author identity set across repeated begin calls',()=>setup(async({native,rdd})=>{
+ const v=await input(native);
+ const first=await rdd.begin({...v.begin,implementerRunIds:['builder-two','builder-one']});
+ assert.equal((await rdd.begin({...v.begin,implementerRunIds:['builder-one','builder-two']})).id,first.id);
+ await assert.rejects(rdd.begin({...v.begin,implementerRunIds:['builder-one']}),/Conflicting review registration/);
+ await assert.rejects(rdd.begin({...v.begin,implementerRunIds:['builder-one','builder-one']}),/Invalid or duplicate/);
+}));
