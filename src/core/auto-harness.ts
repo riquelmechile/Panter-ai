@@ -30,7 +30,7 @@ export type HarnessStep={id:string;phase:HarnessPhase;agentId:GentleAgentId|null
   execution?:'GPT_A_INLINE'|'GPT_A_NATIVE'|'REMOTE_A2A';remoteWorkId?:string;
   result?:{summary:string;evidence:string[];runId?:string;digest:string};};
 export type HarnessRun={id:string;project:string;githubRepository?:string;githubPrNumber?:number;githubExpectedBase?:string;objective:string;key:string;inputDigest:string;permission:'READ_ONLY'|'WRITE_APPROVED';
-  mode:HarnessMode; paths:string[]; risk:'LOW'|'HIGH'; reason:string[]; candidateSha:string|null;
+  mode:HarnessMode; paths:string[]; risk:'LOW'|'HIGH'; reviewTier?:'passive'|'medium'|'high'; reason:string[]; candidateSha:string|null;
   reviewKind:'4r'|null; reviewId:string|null; reviewTransport:'NATIVE'|'REMOTE'|null;
   judgmentRequested?:boolean; judgmentId?:string|null; writeGrantId?:string;
   correctionAttempts?:number; correctionRunId?:string; previousReviewId?:string|null; deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main';
@@ -62,20 +62,23 @@ export function chooseHarness(input:HarnessInput){
   if(o.independentWorkUnits!==undefined)ensure(Number.isInteger(o.independentWorkUnits)&&o.independentWorkUnits>=0&&o.independentWorkUnits<=32,'Invalid unit count');
   const reasons:string[]=[];
   const unknown=o.unknownCodeArea===true||(!paths.length&&input.writesAuthorized);
-  const risk:'LOW'|'HIGH'=input.writesAuthorized&&(input.judgmentDayRequested===true||unknown||o.requirementsClear===false||o.resumableFromDiff===false||
+  const risk:'LOW'|'HIGH'=input.writesAuthorized&&(unknown||o.requirementsClear===false||o.resumableFromDiff===false||
     paths.some(p=>risky.test(p))||riskyGoal.test(input.objective))?'HIGH':'LOW';
   if(unknown)reasons.push('Code surfaces unknown: run read-only discovery before any edit');
   if(paths.some(p=>risky.test(p))||riskyGoal.test(input.objective))reasons.push('Security, data, delivery, or other high-impact surface');
   if(o.requirementsClear===false)reasons.push('Requirements need exploration/clarification');
   if(o.resumableFromDiff===false)reasons.push('Durable ODD tracking required');
+  const tier:'passive'|'medium'|'high'=risk==='HIGH'?'high':!input.writesAuthorized||
+    (paths.length>0&&paths.every(p=>/\.(?:md|mdx|txt|rst)$/.test(p)))?'passive':'medium';
   const phases:HarnessPhase[]=!input.writesAuthorized?['DISCOVER']:
-    risk==='LOW' && !unknown && (o.independentWorkUnits??1)<=1?['IMPLEMENT']:
+    risk==='LOW' && !unknown && (o.independentWorkUnits??1)<=1?
+      (input.judgmentDayRequested?['IMPLEMENT','JUDGMENT']:['IMPLEMENT']):
     [...(unknown||o.requirementsClear===false?['DISCOVER'] as HarnessPhase[]:[]),'DESIGN','IMPLEMENT',
       ...(risk==='HIGH'?['VERIFY','REVIEW'] as HarnessPhase[]:[]),
       ...(input.judgmentDayRequested===true?['JUDGMENT'] as HarnessPhase[]:[])];
   // Judgment Day is an explicitly requested special workflow, never silently automatic.
   const reviewKind:'4r'|null=input.writesAuthorized&&risk==='HIGH'?'4r':null;
-  return {paths,risk,reasons,phases,reviewKind,mode:input.coordinationMode??'AUTO'};
+  return {paths,risk,tier,reasons,phases,reviewKind,mode:input.coordinationMode??'AUTO'};
 }
 
 export class AutomaticHarness {
@@ -128,7 +131,7 @@ export class AutomaticHarness {
         status:'PENDING'});
       const run:HarnessRun={id:randomUUID(),project:input.project,githubRepository:input.githubRepository,githubPrNumber:input.githubPrNumber,githubExpectedBase:input.githubExpectedBase,objective:input.objective,key:input.idempotencyKey,inputDigest:digest,
         permission:input.writesAuthorized?'WRITE_APPROVED':'READ_ONLY',writeGrantId:grant?.id,mode:selected.mode,
-        paths:selected.paths,risk:selected.risk,reason:selected.reasons,candidateSha:null,reviewKind:selected.reviewKind,
+        paths:selected.paths,risk:selected.risk,reviewTier:selected.tier,reason:selected.reasons,candidateSha:null,reviewKind:selected.reviewKind,
         reviewId:null,reviewTransport:null,judgmentRequested:input.judgmentDayRequested===true,judgmentId:null,correctionAttempts:0,steps:selected.phases.map(step),createdAt:new Date().toISOString(),revision:1};
       if(grant)grant.boundRunId=run.id;
       s.runs.push(run);return run;
@@ -250,7 +253,7 @@ export class AutomaticHarness {
         ensure(!r.units||r.units.every(u=>u.state==='REPORTED'),'All isolated implementation units must finish before integration');
         ensure(r.permission==='WRITE_APPROVED','Unauthorized implementation');
         ensure(r.paths.length>0,'No discovery-confirmed edit surfaces');
-        if(r.risk==='HIGH'||!!r.githubRepository||githubProject.test(r.project))ensure(!!payload.candidateSha,'GitHub/high-risk implementation needs frozen candidate SHA');
+        if(r.risk==='HIGH'||r.judgmentRequested||!!r.githubRepository||githubProject.test(r.project))ensure(!!payload.candidateSha,'GitHub/high-risk implementation needs frozen candidate SHA');
         if(r.githubRepository||githubProject.test(r.project))ensure(!!payload.candidateSha&&/^[a-f0-9]{40}$/.test(payload.candidateSha),'GitHub requires an exact 40-character Git commit SHA');
         r.candidateSha=payload.candidateSha??null;
       }
