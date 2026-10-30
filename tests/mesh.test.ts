@@ -33,3 +33,48 @@ test('identical bounded builder delegation is idempotent before writer overlap c
   assert.equal((await make('writer-attempt-one')).id,first.id);
   assert.equal((await m.inbox('gpt-a')).works.filter(w=>w.id===first.id).length,1);
 }));
+
+test('an expired writer can be reconciled only by the exact fenced operator decision, never replayed silently',()=>withMesh(async m=>{
+ await m.setProfile('gpt-a',{...profile,roles:['implementer']},0);
+ await m.bindSpecialist('gpt-a',{agentId:'gentle-ai-worker',host:'grok',modelRequest:'host-default',effortRequest:'max',skillIds:['gentle-ai']},0);
+ m.setWriteGuard(async()=>{});
+ const work=await m.delegateBoundSpecialist('gpt-a',{missionId:'uncertain-mission',agentId:'gentle-ai-worker',
+   objective:'Fix application',idempotencyKey:'uncertain-1',allowedEditSurfaces:['src/index.ts']});
+ const claimed=await m.claim('grok',work.id,30);
+ const oldNow=Date.now;
+ try{
+  Date.now=()=>oldNow()+31000;
+  const lost=await m.claim('grok',work.id,30);
+  assert.equal(lost.state,'OUTCOME_UNKNOWN');
+  await assert.rejects(m.reconcileWriter({workId:work.id,attemptId:'00000000-0000-0000-0000-000000000000',
+    leaseGeneration:claimed.leaseGeneration,resolution:'CONFIRMED_NO_EFFECTS',
+    evidence:'Operator inspected Git HEAD and workspace and confirmed no changes.'}),/Stale writer attempt/);
+  await assert.rejects(m.delegateBoundSpecialist('gpt-a',{missionId:'uncertain-mission',agentId:'gentle-ai-worker',
+   objective:'Fix another task',idempotencyKey:'uncertain-2',allowedEditSurfaces:['src/index.ts']}),/Overlapping active writer/);
+  const done=await m.reconcileWriter({workId:work.id,attemptId:claimed.attemptId!,
+    leaseGeneration:claimed.leaseGeneration,resolution:'CONFIRMED_NO_EFFECTS',
+    evidence:'Operator inspected Git HEAD and workspace, verified no effects and no running worker.'});
+  assert.equal(done.state,'ABORTED_NO_EFFECTS');
+  assert.equal((await m.delegateBoundSpecialist('gpt-a',{missionId:'uncertain-mission',agentId:'gentle-ai-worker',
+   objective:'Fix another task',idempotencyKey:'uncertain-2',allowedEditSurfaces:['src/index.ts']})).state,'QUEUED');
+  await assert.rejects(m.complete('grok',work.id,claimed.attemptId!,claimed.leaseGeneration,'late result'),/Stale work lease/);
+ }finally{Date.now=oldNow;}
+}));
+test('operator-confirmed completion produces the real candidate receipt without rerunning an uncertain writer',()=>withMesh(async m=>{
+ await m.setProfile('gpt-a',{...profile,roles:['implementer']},0);
+ const w=await m.delegate('gpt-a',{missionId:'m-recovery',target:'grok',role:'implementer',instruction:'Write once',idempotencyKey:'recovered'});
+ const claim=await m.claim('grok',w.id,30);
+ const original=Date.now;
+ try{
+  Date.now=()=>original()+31000;
+  await m.claim('grok',w.id,30);
+  const result={summary:'Confirmed commit',evidence:['Checked Git history and exact diff'],candidateSha:'a'.repeat(40),runId:'grok-real-run-001'};
+  const reconciled=await m.reconcileWriter({workId:w.id,attemptId:claim.attemptId!,
+    leaseGeneration:claim.leaseGeneration,resolution:'CONFIRMED_COMPLETE',
+    evidence:'Operator verified exact commit and live workspace with no other effects.',
+    result});
+  assert.equal(reconciled.state,'COMPLETED');
+  const inbox=await m.inbox('gpt-a');
+  assert.equal(JSON.parse(inbox.messages.find(x=>x.workId===w.id)!.text).candidateSha,result.candidateSha);
+ }finally{Date.now=original;}
+}));

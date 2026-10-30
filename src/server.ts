@@ -359,6 +359,14 @@ const handler = createMcpHandler(() => {
     inputSchema:z.object({missionId:bounded(120),agentId:z.enum(GENTLE_AGENTS.map(a=>a.id) as [string,...string[]]),objective:bounded(6000),idempotencyKey:bounded(160),candidateSha:z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/).optional(),allowedEditSurfaces:z.array(z.string().min(1).max(256)).max(16).optional()})
   },async input=>execute(()=>mesh.delegateBoundSpecialist(hostPrincipal(),input)));
 
+  server.registerTool('panter_mesh_reconcile_writer',{
+    description:'OPERATOR ONLY: reconcile an expired A2A implementer after inspecting its actual workspace. No automatic retry of uncertain writes. The original attempt ID and lease generation must match.',
+    inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),
+      resolution:z.enum(['CONFIRMED_COMPLETE','CONFIRMED_NO_EFFECTS']),
+      evidence:z.string().trim().min(32).max(2000),
+      result:z.object({summary:bounded(10000),evidence:z.array(bounded(1000)).min(1).max(40),
+        candidateSha:z.string().regex(/^[a-f0-9]{40}$/),runId:bounded(160)}).optional()})
+  },async x=>execute(async()=>{requireAdmin();return mesh.reconcileWriter(x)}));
   server.registerTool('panter_odd_route',{
     description:'GPT-A applies the Gentle Shell ODD small/inline vs exploratory/coordinated and risk-based verification rules; planning-only.',
     inputSchema:z.object({requirementsClear:z.boolean(),resumableFromDiff:z.boolean(),risk:z.enum(['low','high']),unknownCodeArea:z.boolean(),independentWorkUnits:z.number().int().min(0).max(32),writesAuthorized:z.boolean()}),

@@ -8,10 +8,10 @@ import { agentDefinition, checkSkills, specialistPacket, REVIEW_4R, JUDGMENT_DAY
 export const HOSTS = ['gpt-a', 'gpt-b', 'grok', 'gemini', 'claude'] as const;
 export type Host = typeof HOSTS[number];
 export type MeshRole = 'orchestrator' | 'explorer' | 'architect' | 'implementer' | 'verifier' | 'reviewer';
-export type MeshWorkState = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'WAITING_INPUT' | 'OUTCOME_UNKNOWN';
+export type MeshWorkState = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'WAITING_INPUT' | 'OUTCOME_UNKNOWN' | 'ABORTED_NO_EFFECTS';
 export type ActorProfile = { host: Host; actorId: string; modelRequest: string; effortRequest: string; roles: MeshRole[]; revision: number; preferNativeSubagents?: boolean; maxRequestedNativeWorkers?: number; coordinationMode?: 'AUTO' | 'GPT_A_ONLY' };
 export type MeshMessage = { id: string; missionId: string; from: Host; to: Host; workId: string | null; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' | 'RESULT'; text: string; createdAt: string; inboxRevision: number };
-export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null };
+export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string} };
 export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
 type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
@@ -294,6 +294,45 @@ export class MeshEngine {
       const revision = this.notify(d, 'gpt-a');
       d.messages.push({ id: randomUUID(), missionId: w.missionId, from: caller, to: 'gpt-a', workId: id, kind: 'RESULT', text: result, createdAt: iso(), inboxRevision: revision });
       return w;
+    });
+  }
+  /** A lost writer result is NEVER replayed automatically. Only a trusted operator,
+   * after inspecting the actual workspace, can resolve its exact fenced attempt.
+   * This is an audit record of a human decision, not cryptographic proof. */
+  async reconcileWriter(input:{workId:string;attemptId:string;leaseGeneration:number;
+    resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;
+    result?:{summary:string;evidence:string[];candidateSha:string;runId:string}}){
+    check(/^[0-9a-f-]{36}$/i.test(input.workId),'Invalid work ID');
+    check(input.evidence.trim().length>=32&&input.evidence.length<=2000,'Detailed operator reconciliation evidence required');
+    if(input.resolution==='CONFIRMED_COMPLETE'){
+      const result=input.result;
+      check(!!result&&result.summary.trim().length>0&&Array.isArray(result.evidence)&&
+        result.evidence.length>0&&result.evidence.every(x=>typeof x==='string'&&x.trim().length>0)&&
+        /^[a-f0-9]{40}$/.test(result.candidateSha)&&/^[A-Za-z0-9._:-]{8,160}$/.test(result.runId),
+        'Confirmed writer completion requires observed SHA, run ID and evidence');
+    }else check(!input.result,'No-effects resolution cannot supply completed work');
+    return this.write(d=>{
+      const w=d.works.find(w=>w.id===input.workId);
+      check(w&&w.role==='implementer','Unknown implementer work');
+      check(w.attemptId===input.attemptId&&w.leaseGeneration===input.leaseGeneration,
+        'Stale writer attempt: reconciliation must match original fence');
+      check((w.state==='OUTCOME_UNKNOWN'||(w.state==='RUNNING'&&
+        Date.parse(w.leaseUntil??'')<=Date.now())), 'Writer is not in an expired uncertain state');
+      w.reconciliation={resolution:input.resolution,evidence:input.evidence,at:iso()};
+      w.completedAt=iso();w.leaseUntil=null;
+      if(input.resolution==='CONFIRMED_COMPLETE'){
+        const result=JSON.stringify(input.result);
+        w.state='COMPLETED';w.result=result;
+        w.receiptDigest=sha(JSON.stringify({reconciledWorkId:w.id,attemptId:w.attemptId,
+          generation:w.leaseGeneration,result,operatorEvidence:input.evidence}));
+        const revision=this.notify(d,'gpt-a');
+        d.messages.push({id:randomUUID(),missionId:w.missionId,from:w.target,to:'gpt-a',
+          workId:w.id,kind:'RESULT',text:result,createdAt:iso(),inboxRevision:revision});
+      }else{
+        w.state='ABORTED_NO_EFFECTS';w.result=null;w.receiptDigest=null;
+        this.notify(d,'gpt-a');
+      }
+      return {workId:w.id,state:w.state,reconciliation:w.reconciliation,leaseGeneration:w.leaseGeneration};
     });
   }
   async message(caller: Host, input: { missionId: string; to: Host; workId?: string; text: string; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' }) {

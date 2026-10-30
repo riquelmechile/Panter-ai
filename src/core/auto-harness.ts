@@ -27,7 +27,7 @@ function safePath(p:string){
 export type HarnessMode='AUTO'|'GPT_A_ONLY';
 export type HarnessPhase='DISCOVER'|'DESIGN'|'IMPLEMENT'|'VERIFY'|'REVIEW'|'JUDGMENT';
 export type HarnessStep={id:string;phase:HarnessPhase;agentId:GentleAgentId|null;status:'PENDING'|'ISSUED'|'COMPLETE';
-  execution?:'GPT_A_INLINE'|'GPT_A_NATIVE'|'REMOTE_A2A';remoteWorkId?:string;
+  execution?:'GPT_A_INLINE'|'GPT_A_NATIVE'|'REMOTE_A2A';remoteWorkId?:string;redispatchGeneration?:number;
   result?:{summary:string;evidence:string[];runId?:string;digest:string;verificationMode?:'SELF_UNVERIFIED'|'HOST_REPORTED_UNVERIFIED'};};
 export type HarnessRun={id:string;project:string;githubRepository?:string;githubPrNumber?:number;githubExpectedBase?:string;objective:string;key:string;inputDigest:string;permission:'READ_ONLY'|'WRITE_APPROVED';
   mode:HarnessMode; paths:string[]; risk:'LOW'|'HIGH'; reviewTier?:'passive'|'medium'|'high'; reason:string[]; candidateSha:string|null;
@@ -349,6 +349,17 @@ export class AutomaticHarness {
     if(phase.execution==='REMOTE_A2A'&&phase.remoteWorkId){
       const inbox=await this.mesh.inbox('gpt-a');
       const work=inbox.works.find(w=>w.id===phase.remoteWorkId);
+      if(work?.state==='ABORTED_NO_EFFECTS'){
+        await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;
+          const st=r.steps.find(x=>x.id===phase.id)!;
+          ensure(st.execution==='REMOTE_A2A'&&st.remoteWorkId===work.id&&st.status==='ISSUED',
+            'Cannot reset a different or completed writer');
+          st.execution=undefined;st.remoteWorkId=undefined;st.status='PENDING';
+          st.redispatchGeneration=(st.redispatchGeneration??0)+1;r.revision++;
+        });
+        return {...common,status:'REMOTE_NO_EFFECTS_RECONCILED',phaseId:phase.id,workId:work.id,
+          next:[],instruction:'The trusted operator confirmed no effects. A NEW fenced attempt may be dispatched on the next tick if authorization is still valid.'};
+      }
       if(work?.state==='FAILED'||work?.state==='OUTCOME_UNKNOWN')
         return {...common,status:'REMOTE_OUTCOME_NEEDS_RECONCILIATION',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
       if(work?.state==='COMPLETED'){
@@ -557,7 +568,7 @@ export class AutomaticHarness {
     if(remoteEligible){
       const work=await this.mesh.delegateBoundSpecialist('gpt-a',{missionId:record.id,agentId:phase.agentId,objective:packetObjective,
         candidateSha:record.candidateSha??undefined,allowedEditSurfaces:phase.phase==='IMPLEMENT'?record.paths:undefined,
-        idempotencyKey:`harness:${record.id}:${phase.id}:${record.candidateSha??'none'}:${record.correctionAttempts??0}`});
+        idempotencyKey:`harness:${record.id}:${phase.id}:${record.candidateSha??'none'}:${record.correctionAttempts??0}:${phase.redispatchGeneration??0}`});
       await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;
         if(st.status==='PENDING'){st.status='ISSUED';st.execution='REMOTE_A2A';st.remoteWorkId=work.id;r.revision++;}});
       return {...common,status:'REMOTE_A2A_DISPATCHED',phaseId:phase.id,next:[{agentId:phase.agentId,workId:work.id,
