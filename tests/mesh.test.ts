@@ -12,3 +12,24 @@ test('questions and answers have actor-bound messaging, never cross-mission',()=
 test('state persists and notification emission follows durable commit',()=>withMesh(async m=>{await m.setProfile('gpt-a',profile,0);let event=0;m.events.on('gpt-a',n=>event=n);const w=await m.delegate('gpt-a',{missionId:'m2',target:'grok',role:'reviewer',instruction:'Check',idempotencyKey:'b'});const c=await m.claim('grok',w.id);await m.complete('grok',w.id,c.attemptId!,c.leaseGeneration,'done');assert.ok(event>0);const reopened=await MeshEngine.open((m as any).file.replace(/\/mesh.json$/,''));assert.equal((await reopened.inbox('gpt-a')).messages[0]?.text,'done')}));
 
 test('direct implementer is denied without operator authorization',()=>withMesh(async m=>{await m.setProfile('gpt-a',{...profile,roles:['implementer']},0);m.setWriteGuard(async()=>{throw Error('operator grant required')});await assert.rejects(m.delegate('gpt-a',{missionId:'m1',target:'grok',role:'implementer',instruction:'Edit',idempotencyKey:'w1'}),/operator grant required/)}));
+
+test('identical bounded builder delegation is idempotent before writer overlap checks',()=>withMesh(async m=>{
+  await m.setProfile('gpt-a',{...profile,roles:['implementer']},0);
+  await m.bindSpecialist('gpt-a',{agentId:'gentle-ai-worker',host:'grok',modelRequest:'host-default',effortRequest:'max',skillIds:['gentle-ai']},0);
+  m.setWriteGuard(async (_mission,paths)=>{assert.deepEqual(paths,['src/auth.ts']);});
+  const make=(key:string,objective='Fix authentication')=>m.delegateBoundSpecialist('gpt-a',{
+    missionId:'mission-overlap',agentId:'gentle-ai-worker',objective,
+    idempotencyKey:key,allowedEditSurfaces:['src/auth.ts']
+  });
+  const first=await make('writer-attempt-one');
+  assert.equal(first.state,'QUEUED');
+  const retry=await make('writer-attempt-one');
+  assert.equal(retry.id,first.id);
+  assert.equal((await m.pending('grok')).length,1);
+  await assert.rejects(make('writer-attempt-one','Change credentials'),/Idempotency conflict/);
+  await assert.rejects(make('distinct-writer-attempt'),/Overlapping active writer edit surfaces/);
+  const claimed=await m.claim('grok',first.id);
+  assert.equal(claimed.state,'RUNNING');
+  assert.equal((await make('writer-attempt-one')).id,first.id);
+  assert.equal((await m.inbox('gpt-a')).works.filter(w=>w.id===first.id).length,1);
+}));

@@ -165,16 +165,18 @@ export class MeshEngine {
         check(binding?.host===input.target && binding.revision===input.specialist.bindingRevision, 'Specialist binding changed during dispatch');
         check(input.specialist.packetDigest===sha(input.instruction), 'Specialist packet digest mismatch');
       }
-      if(input.specialist?.allowedEditSurfaces?.length){
-        const conflict=d.works.find(w=>w.missionId===input.missionId && w.role==='implementer' && ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state) && (w.specialist?.allowedEditSurfaces??[]).some(a=>input.specialist!.allowedEditSurfaces.some(b=>a===b || a.startsWith(b+'/') || b.startsWith(a+'/'))));
-        check(!conflict,'Overlapping active writer edit surfaces');
-      }
       const profile = d.profiles.find(p => p.host === input.target);
       check(profile?.roles.includes(input.role), 'Target agent role is not configured');
+      // Idempotent retransmission does not create a second writer and must not
+      // conflict with its own still-active reservation. Keep this check atomic.
       const dup = d.works.find(w => w.missionId === input.missionId && w.idempotencyKey === input.idempotencyKey);
       if (dup) {
         check(dup.target === input.target && dup.role === input.role && dup.instruction === input.instruction && JSON.stringify(dup.specialist??null)===JSON.stringify(input.specialist??null), 'Idempotency conflict');
         return dup;
+      }
+      if(input.specialist?.allowedEditSurfaces?.length){
+        const conflict=d.works.find(w=>w.missionId===input.missionId && w.role==='implementer' && ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state) && (w.specialist?.allowedEditSurfaces??[]).some(a=>input.specialist!.allowedEditSurfaces.some(b=>a===b || a.startsWith(b+'/') || b.startsWith(a+'/'))));
+        check(!conflict,'Overlapping active writer edit surfaces');
       }
       const w: MeshWork = { id: randomUUID(), missionId: input.missionId, from: 'gpt-a', target: input.target, role: input.role, instruction: input.instruction, idempotencyKey: input.idempotencyKey, specialist: input.specialist, state: 'QUEUED', attemptId: null, leaseGeneration: 0, leaseUntil: null, result: null, receiptDigest: null, createdAt: iso(), completedAt: null };
       d.works.push(w);
