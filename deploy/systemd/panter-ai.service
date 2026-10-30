@@ -1,0 +1,19 @@
+# Example systemd --user unit. %h resolves to the service account home.
+# Install before the first start; do not copy host-specific paths into Git.
+[Unit]
+Description=Panter-ai private native canary
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/panter-ai/current
+EnvironmentFile=%h/panter-ai/etc/panter.env
+ExecStart=%h/panter-ai/bin/run
+Restart=on-failure
+UMask=0077
+NoNewPrivileges=yes
+MemoryMax=1G
+TasksMax=128
+
+[Install]
+WantedBy=default.target
