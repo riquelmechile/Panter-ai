@@ -54,3 +54,7 @@ GPT-A applies the upstream Gentle Shell branch-pr, work-unit-commits and chained
 `panter_harness_tick` automatically queries GitHub for a bound completed run, and `panter_harness_github_check` verifies it again on demand. Neither operation mutates GitHub or grants permission to create commits, push, open a PR, apply labels, merge or deploy. Never treat model-reported test output, a GitHub URL or 4R subagent output as official Gentle AI Go RDD approval. Preserve missing or failed evidence and request only genuinely necessary approvals.
 
 If a PR is created or discovered after implementation, call `panter_harness_github_bind` with its observed number and the same allowlisted repository. Never infer permission to create a PR from the ability to bind one. Resume automatic CI/diff inspection via `panter_harness_tick`.
+
+## Panter-RDD review law (v0.14)
+
+When the automatic ODD harness reaches high-risk review, use the Panter-RDD controller with exact frozen Git SHA, completed verifier and separately collected 4R/Judgment Day reviewer packets. Do not ask the user which agents to use. Distinct reported child run IDs do not prove cryptographic independence. Only Panter-RDD may report a Panter review acknowledgement, and only after server-side GitHub PR/CI checks match the frozen SHA. A review receipt, even acknowledged, never grants GitHub write/merge/deploy consent. Critical findings require an authorized correction and a **new** SHA-bound review. The optional official Gentle AI bridge is not a prerequisite for Panter-RDD.
