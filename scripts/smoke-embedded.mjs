@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { request as unixRequest } from 'node:http';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -68,12 +69,13 @@ async function operatorCall(name,args={}){
   assert.equal(payload.jsonrpc,'2.0');return payload.result;
 }
 try {
-  proc = spawn(process.execPath, ['dist/server.js'], { env: {
+  const serverEnv = {
     ...process.env, PANTER_PORT: port, PANTER_BIND_HOST: '127.0.0.1', PANTER_DATA_DIR: dir,
     PANTER_AUTH_MODE: 'embedded', PANTER_PUBLIC_MCP_URL: resource,
     PANTER_OAUTH_REDIRECT_URIS: callback, PANTER_CONSENT_PASSWORD: secret,
     PANTER_OPERATOR_TOKEN: operatorSecret, PANTER_ADMIN_SOCKET: socketPath,
-  }, stdio: ['ignore', 'ignore', 'pipe'] });
+  };
+  proc = spawn(process.execPath, ['dist/server.js'], { env: serverEnv, stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = ''; proc.stderr.on('data', c => stderr += String(c));
   let ready = false;
   for (let i = 0; i < 80; i++) {
@@ -139,6 +141,21 @@ try {
   },body:'{}'});
   assert.equal(revokedAccess.status,401,'Operator revocation must invalidate live access immediately');
   await listening.close();
+  // A process crash/restart leaves a stale Unix filesystem socket. A new server
+  // must reject live sockets but recover a same-owner stale inode safely.
+  proc.kill('SIGTERM');await once(proc,'exit');
+  assert.ok((await stat(socketPath)).isSocket());
+  proc=spawn(process.execPath,['dist/server.js'],{env:serverEnv,stdio:['ignore','ignore','pipe']});
+  let restarted=false;
+  for(let i=0;i<80;i++){
+    if(proc.exitCode!==null)throw new Error('Restart failed with a stale operator socket');
+    try{if((await request('/health')).status===200){restarted=true;break;}}catch{}
+    await sleep(100);
+  }
+  assert.ok(restarted,'Could not restart service with stale Unix socket');
+  assert.equal((await stat(socketPath)).mode&0o777,0o600);
+  const reconnected=await operatorCall('panter_oauth_clients',{});
+  assert.ok(unpack(reconnected).some(x=>x.clientId===aCredentials.client),'Admin socket must recover after restart');
   console.log('PASS embedded DCR -> PKCE -> human consent -> Unix-only operator grant / public TCP denied -> subscriptions/listen -> actor-bound A2A -> revoke 401');
 } finally {
   for (const client of clients) await client.close().catch(() => {});
