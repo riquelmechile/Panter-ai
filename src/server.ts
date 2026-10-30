@@ -1,10 +1,11 @@
 import { ExternalOAuthVerifier, staticBearerMatch } from './core/oauth.js';
 import { EmbeddedOAuth } from './core/embedded-oauth.js';
 import { openEngramBridge } from './core/engram-runtime.js';
-import { readFile } from 'node:fs/promises';
+import { readFile, chmod, mkdir, lstat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import type { EngramMemory } from './core/engram-memory.js';
-import { resolve } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
+import { ClientAddressPolicy } from './core/trusted-proxy.js';
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { MeshEngine, HOSTS, isHost } from './core/mesh.js';
@@ -33,6 +34,11 @@ const token = process.env.PANTER_TOKEN ?? '';
 const operatorToken=process.env.PANTER_OPERATOR_TOKEN??'';
 if(operatorToken&&(operatorToken.length<32||operatorToken===token))throw new Error('Invalid PANTER_OPERATOR_TOKEN');
 const dataDir = process.env.PANTER_DATA_DIR ?? '.panter-data';
+const clientAddresses=new ClientAddressPolicy(process.env.PANTER_TRUSTED_PROXY_CIDRS??'');
+// A private filesystem socket, not TCP loopback or request headers, is the
+// administrative trust boundary in OAuth mode.
+const adminSocketPath=operatorToken&&authMode!=='dev-static'?
+  resolve(process.env.PANTER_ADMIN_SOCKET??join(dataDir,'operator.sock')):null;
 const allowedHosts = (process.env.PANTER_ALLOWED_HOSTS ?? '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
 const allowedOrigins = (process.env.PANTER_ALLOWED_ORIGINS ?? '').split(',').map(x => x.trim()).filter(Boolean);
 const loopback = ['127.0.0.1', 'localhost', '::1'].includes(bind);
@@ -50,6 +56,7 @@ const embedded = authMode === 'embedded' ? await EmbeddedOAuth.open({
   dir: dataDir, resource: process.env.PANTER_PUBLIC_MCP_URL ?? '',
   redirectUris: (process.env.PANTER_OAUTH_REDIRECT_URIS ?? '').split(',').map(s => s.trim()).filter(Boolean),
   password: process.env.PANTER_CONSENT_PASSWORD ?? '',
+  clientIdentity:req=>clientAddresses.identify(req),
 }) : null;
 function hostname(host: string | undefined): string {
   try { return new URL(`http://${host ?? ''}`).hostname.toLowerCase().replace(/^\[|\]$/g, ''); }
@@ -647,12 +654,8 @@ const http = createServer(async (req, res) => {
   }
   if (req.url !== '/mcp') { res.writeHead(404); res.end('Not found'); return; }
   const h = hostname(req.headers.host);
-  const remoteAddr=req.socket.remoteAddress??'';
-  const fromLoopback=['127.0.0.1','::1','::ffff:127.0.0.1'].includes(remoteAddr);
-  const localOperator=!!operatorToken&&authMode!=='dev-static'&&fromLoopback&&['localhost','127.0.0.1','::1'].includes(h)&&
-    !req.headers.origin&&!req.headers['x-forwarded-for']&&!req.headers['x-forwarded-host']&&
-    staticBearerMatch(req.headers.authorization,operatorToken);
-  if (!h || !(localOperator||(allowedHosts.length ? allowedHosts.includes(h) : ['localhost', '127.0.0.1', '::1'].includes(h)))) {
+  // No HTTP proxy can turn this public TCP listener into an administrator.
+  if (!h || !(allowedHosts.length ? allowedHosts.includes(h) : ['localhost', '127.0.0.1', '::1'].includes(h))) {
     res.writeHead(403); res.end('Host not allowed'); return;
   }
   if (req.headers.origin && !allowedOrigins.includes(req.headers.origin)) {
@@ -660,9 +663,7 @@ const http = createServer(async (req, res) => {
   }
   const peer=Object.entries(peerTokens).find(([,v])=>staticBearerMatch(req.headers.authorization,v))?.[0];
   let actor: string | undefined;
-  if (localOperator) {
-    actor='admin';
-  } else if (embedded) {
+  if (embedded) {
     try { actor=await embedded.authenticate(req.headers.authorization); } catch { /* invalid credentials */ }
   } else if (oauth) {
     try { actor=oauth.verifyBearer(req.headers.authorization); } catch { /* invalid credentials are indistinguishable */ }
@@ -681,4 +682,40 @@ const http = createServer(async (req, res) => {
     if (!res.writableEnded) res.end('Internal error');
   }
 });
+// Separate Unix-domain listener. Never share it through nginx, cloudflared,
+// Docker port publishing, or a public reverse proxy. The operator must control
+// BOTH the filesystem ACL and its distinct bearer credential.
+if(adminSocketPath){
+  await mkdir(dirname(adminSocketPath),{recursive:true,mode:0o700});
+  try{
+    const existing=await lstat(adminSocketPath);
+    throw new Error(existing.isSocket()?
+      'Operator socket already exists; inspect the owner/process before cleaning a stale socket':
+      'Operator socket path is occupied by a non-socket file');
+  }catch(e){if(!(e instanceof Error&&'code' in e&&e.code==='ENOENT'))throw e;}
+  const adminServer=createServer(async(req,res)=>{
+    if(req.url!=='/mcp'||!['POST','GET','DELETE'].includes(req.method??'')){
+      res.writeHead(404);res.end();return;
+    }
+    if(req.headers.origin||req.headers['x-forwarded-for']||req.headers['x-forwarded-host']||
+       !staticBearerMatch(req.headers.authorization,operatorToken)){
+      res.writeHead(401,{'cache-control':'no-store'});res.end('Unauthorized');return;
+    }
+    res.setHeader('Cache-Control','no-store');
+    try{await principalContext.run('admin',()=>nodeHandler(req,res));}
+    catch(error){console.error('Operator MCP error:',error instanceof Error?error.message:'error');
+      if(!res.headersSent)res.writeHead(500);
+      if(!res.writableEnded)res.end('Internal error');}
+  });
+  // Keep the socket owner-only from the instant it becomes visible.
+  const mask=process.umask(0o077);
+  try{
+    await new Promise<void>((ok,fail)=>{
+      adminServer.once('error',fail);
+      adminServer.listen(adminSocketPath,()=>{adminServer.removeListener('error',fail);ok();});
+    });
+  }finally{process.umask(mask);}
+  await chmod(adminSocketPath,0o600);
+  console.error('Panter operator Unix socket ready (private filesystem channel)');
+}
 http.listen(port, bind, () => console.error(`Panter-ai MCP ready on ${bind}:${port}/mcp`));
