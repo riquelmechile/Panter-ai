@@ -74,10 +74,69 @@ async function load() {
   try {
     const profiles = await call('panter_mesh_profiles', {}) as Profile[];
     hostBox.replaceChildren(...hostNames.map(host => card(host, profiles.find(p => p.host === host))));
-    setStatus(`Conectado. ${profiles.length} de ${hostNames.length} perfiles configurados.`);
+    await loadSpecialists();
   } catch (error) { setStatus(error instanceof Error ? error.message : 'No se pudo consultar MCP', true); }
   finally { refresh.disabled = false; }
 }
 refresh.addEventListener('click', () => { void load(); });
 app.ontoolresult = () => { void load(); };
 void app.connect().then(load).catch(error => setStatus(`No se pudo conectar la vista: ${String(error)}`, true));
+
+type Specialist = { id:string; role:string; summary:string; defaultSkills:readonly string[] };
+type Skill = { id:string; summary:string };
+type Assignment = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:string[];revision:number};
+const specialistBox = document.getElementById('specialists')!;
+function specialistCard(a:Specialist, skills:Skill[], current?:Assignment) {
+  const article=document.createElement('article'); article.className='host';
+  const heading=document.createElement('h2');heading.textContent=a.id;
+  const info=document.createElement('p');info.textContent=`${a.summary} · ${a.role}`;
+  const subtitle=document.createElement('p');subtitle.textContent=current?`Revisión ${current.revision}`:'Sin asignación';
+  article.append(heading,info,subtitle);
+  const label=document.createElement('label');label.textContent='Aplicación que ejecutará el agente';
+  const select=document.createElement('select');
+  for(const host of hostNames.filter(x=>x!=='gpt-a')){
+    const option=document.createElement('option');option.value=host;option.textContent=host.toUpperCase();
+    if ((current?.host??'gpt-b')===host)option.selected=true;
+    select.append(option);
+  }
+  article.append(label,select);
+  const model=field('Modelo solicitado a este agente',current?.modelRequest??'host-default',120);
+  const effort=field('Esfuerzo solicitado',current?.effortRequest??'high',32);
+  article.append(model.parentElement!,effort.parentElement!);
+  const details=document.createElement('details');
+  const summary=document.createElement('summary');summary.textContent='Skills MCP asignadas';
+  details.append(summary);
+  const skillBox=document.createElement('div');skillBox.className='roles';
+  const checks:Array<[string,HTMLInputElement]>=[];
+  for (const skill of skills){
+    const wrap=document.createElement('label');wrap.title=skill.summary;
+    const check=document.createElement('input');check.type='checkbox';
+    check.checked=(current?.skillIds??a.defaultSkills).includes(skill.id);
+    wrap.append(check,document.createTextNode(skill.id));
+    checks.push([skill.id,check]);skillBox.append(wrap);
+  }
+  details.append(skillBox);article.append(details);
+  const save=document.createElement('button');save.type='button';save.textContent='Guardar agente';
+  save.addEventListener('click',async()=>{
+    save.disabled=true;
+    try{
+      const chosen=checks.filter(([,v])=>v.checked).map(([id])=>id);
+      if(chosen.length>8)throw new Error('Máximo 8 skills por agente');
+      const result=await call('panter_specialist_bind',{agentId:a.id,host:select.value,modelRequest:model.value.trim(),effortRequest:effort.value.trim(),skillIds:chosen,expectedRevision:current?.revision??0}) as Assignment;
+      current=result;subtitle.textContent=`Revisión ${result.revision}`;
+      setStatus(`Guardado ${a.id} en ${result.host.toUpperCase()} · ${chosen.length} skills.`);
+    }catch(error){setStatus(error instanceof Error?error.message:'No se guardó',true)}
+    finally{save.disabled=false}
+  });
+  article.append(save);
+  return article;
+}
+async function loadSpecialists(){
+  const [catalog,bindings]=await Promise.all([
+    call('panter_gentle_catalog',{}) as Promise<{agents:Specialist[];skills:Skill[]}>,
+    call('panter_specialist_assignments',{}) as Promise<Assignment[]>
+  ]);
+  specialistBox.replaceChildren(...catalog.agents.map(agent=>specialistCard(agent,catalog.skills,bindings.find(x=>x.agentId===agent.id))));
+  setStatus(`Conectado · ${catalog.agents.length} agentes, ${catalog.skills.length} skills · ${bindings.length} configurados.`);
+}
+// The existing five-host cards and new per-specialist cards share one refresh.

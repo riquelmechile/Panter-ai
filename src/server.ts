@@ -12,6 +12,7 @@ import * as z from 'zod/v4';
 import { hostRequest, assessEvidence } from './core/policy.js';
 import { PanterStore } from './core/store.js';
 import { AgentEngine, AGENT_ROLES, routeFlow } from './core/agents.js';
+import { gentleCatalog, readAgent, readSkill, GENTLE_AGENTS, GENTLE_SKILLS, REVIEW_4R, JUDGMENT_DAY } from './core/gentle-catalog.js';
 
 const port = Number(process.env.PANTER_PORT ?? '8080');
 const bind = process.env.PANTER_BIND_HOST ?? '127.0.0.1';
@@ -64,7 +65,7 @@ const missionStatus = z.enum(['DRAFT', 'READY', 'RUNNING', 'VERIFYING', 'DONE', 
 const bounded = (max = 2048) => z.string().trim().min(1).max(max);
 
 const handler = createMcpHandler(() => {
-  const server = new McpServer({ name: 'panter-ai', version: '0.6.0' }, {
+  const server = new McpServer({ name: 'panter-ai', version: '0.7.0' }, {
     capabilities: { resources: { subscribe: true } },
     instructions: 'Panter-ai is a remote MCP engineering workspace. Reasoning, model choice and native subagents belong to the connected AI host. The model and effort policy returned by panter_host_policy is only REQUESTED, never proof. For meaningful work use panter_flow_route to choose inline versus coordinated execution, then create a durable flow only when useful. The parent session coordinates, and focused native host agents perform scoped exploration, implementation, verification and review. Use panter_agent_packet to obtain bounded context; never imply an agent was launched merely because its task was enqueued. Worker completions are reported evidence, not trusted verification. The server runs no model inference or shell. Do not claim a test, review, wake or execution succeeded without external evidence.'
   });
@@ -238,6 +239,42 @@ const handler = createMcpHandler(() => {
   server.registerTool('panter_mesh_complete',{description:'Submit fenced terminal receipt; result is automatically delivered to GPT-A inbox.',inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),result:z.string().max(50000),success:z.boolean().default(true)})},async x=>execute(()=>mesh.complete(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.result,x.success)));
   server.registerTool('panter_mesh_message',{description:'Send actor-bound A2A question, answer or progress update to collaborator or GPT-A.',inputSchema:z.object({missionId:bounded(120),to:hostEnum,workId:z.uuid(),kind:z.enum(['QUESTION','ANSWER','UPDATE']),text:bounded(10000)})},async x=>execute(()=>mesh.message(hostPrincipal(),x)));
   server.registerTool('panter_mesh_inbox',{description:'Retrieve only the authenticated actor inbox; since is a durable per-actor revision cursor.',inputSchema:z.object({since:z.number().int().nonnegative().default(0)}),annotations:{readOnlyHint:true}},async x=>execute(()=>mesh.inbox(hostPrincipal(),x.since)));
+
+  // The catalog is centrally stored in MCP: hosts receive only a frozen,
+  // relevant packet after assignment. Skills do not grant execution rights.
+  server.registerTool('panter_gentle_catalog',{
+    description:'List all ten Gentle Shell specialist definitions, thirteen MCP-hosted skills, 4R lenses and Judgment Day agents; only GPT-A configures them.',
+    inputSchema:z.object({}),annotations:{readOnlyHint:true}
+  },async()=>execute(async()=>{requireLeader();return gentleCatalog()}));
+  server.registerTool('panter_gentle_agent_read',{
+    description:'GPT-A reads one allowlisted, version-pinned upstream agent definition.',
+    inputSchema:z.object({id:z.enum(GENTLE_AGENTS.map(a=>a.id) as [string,...string[]])}),annotations:{readOnlyHint:true}
+  },async ({id})=>execute(async()=>{requireLeader();return readAgent(id)}));
+  server.registerTool('panter_gentle_skill_read',{
+    description:'GPT-A reads one MCP-hosted skill; worker packets contain only assigned skills.',
+    inputSchema:z.object({id:z.enum(GENTLE_SKILLS.map(s=>s.id) as [string,...string[]])}),annotations:{readOnlyHint:true}
+  },async ({id})=>execute(async()=>{requireLeader();return readSkill(id)}));
+  server.registerTool('panter_specialist_bind',{
+    description:'GPT-A assigns an individual specialist to one authenticated host, requested model/effort and selected MCP skills. Separate from host credentials.',
+    inputSchema:z.object({agentId:z.enum(GENTLE_AGENTS.map(a=>a.id) as [string,...string[]]),host:hostEnum,
+      modelRequest:z.string().max(120),effortRequest:z.string().max(32),skillIds:z.array(z.enum(GENTLE_SKILLS.map(s=>s.id) as [string,...string[]])).max(8),expectedRevision:z.number().int().nonnegative()})
+  },async ({expectedRevision,...input})=>execute(()=>mesh.bindSpecialist(hostPrincipal(),input,expectedRevision)));
+  server.registerTool('panter_specialist_assignments',{
+    description:'Read individual specialist assignments (distinct from five host connection profiles).',
+    inputSchema:z.object({}),annotations:{readOnlyHint:true}
+  },async()=>execute(async()=>{requireLeader();return mesh.specialistBindings()}));
+  server.registerTool('panter_specialist_delegate',{
+    description:'GPT-A dispatches a centrally versioned agent + assigned skills as a frozen A2A task to its configured host; result returns to GPT-A inbox.',
+    inputSchema:z.object({missionId:bounded(120),agentId:z.enum(GENTLE_AGENTS.map(a=>a.id) as [string,...string[]]),objective:bounded(6000),idempotencyKey:bounded(160),candidateSha:z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/).optional(),allowedEditSurfaces:z.array(z.string().min(1).max(256)).max(16).optional()})
+  },async input=>execute(()=>mesh.delegateBoundSpecialist(hostPrincipal(),input)));
+  server.registerTool('panter_review_blueprints',{
+    description:'Return native 4R and Judgment Day workflow blueprints. Requires a frozen SHA; planned tasks are not executed by this read.',
+    inputSchema:z.object({candidateSha:z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/),kind:z.enum(['4r','judgment-day'])}),annotations:{readOnlyHint:true}
+  },async ({candidateSha,kind})=>execute(async()=>{requireLeader();const ids=kind==='4r'?REVIEW_4R:JUDGMENT_DAY;
+    const bindings=await mesh.specialistBindings();const steps=ids.map((id,index)=>({agentId:id,host:bindings.find(b=>b.agentId===id)?.host??null,stage:kind==='judgment-day'?(index<2?'BLIND_JUDGE':'CONDITIONAL_SCOPED_FIX'):'INDEPENDENT_LENS',candidateSha}));
+    return {kind,candidateSha,steps,ready:steps.every(s=>s.host!==null),rules:kind==='4r'?'Four independent lens reports; do not claim verified until external evidence.':'Exactly two initially blind judge delegations; correction only for frozen severe findings after controller validation; no automatic merge.'};
+  }));
+
   // MCP 2026-07-28 uses subscriptions/listen: the SDK owns the stream and
   // matches resourceSubscriptions against the resourceUpdated URI. The shared
   // notification carries NO private work metadata. Reading inbox data still
@@ -250,10 +287,10 @@ const handler = createMcpHandler(() => {
   const studioUri = 'ui://panter/agent-studio.html';
   registerAppTool(server, 'panter_agent_studio', {
     title: 'Panter Agent Studio',
-    description: 'GPT-A opens a visual configuration panel for the five authenticated host agent profiles. Only GPT-A may save profiles.',
+    description: 'GPT-A configures five hosts plus all Gentle Shell specialist agents, requested models and centrally hosted skills. Only GPT-A saves settings.',
     inputSchema: z.object({}),
     _meta: { ui: { resourceUri: studioUri } },
-  }, async () => execute(async () => { requireLeader(); return { profiles: await mesh.profiles(), hosts: HOSTS, modelPoliciesAreRequests: true }; }));
+  }, async () => execute(async () => { requireLeader(); return { profiles: await mesh.profiles(), specialists: await mesh.specialistBindings(), catalog: gentleCatalog(), hosts: HOSTS, modelPoliciesAreRequests: true }; }));
   registerAppResource(server, 'Panter Agent Studio', studioUri, { mimeType: RESOURCE_MIME_TYPE }, async () => {
     requireLeader();
     const html = await readFile(resolve('dist/ui/agent-studio.html'), 'utf8');
@@ -284,7 +321,7 @@ const nodeHandler = toNodeHandler(handler);
 const http = createServer(async (req, res) => {
   if (req.url === '/health' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-    res.end(JSON.stringify({ status: 'ok', name: 'panter-ai', version: '0.6.0' }));
+    res.end(JSON.stringify({ status: 'ok', name: 'panter-ai', version: '0.7.0' }));
     return;
   }
   if (oauth && req.method === 'GET' && (req.url === '/.well-known/oauth-protected-resource' || req.url === '/.well-known/oauth-protected-resource/mcp')) {

@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { EventEmitter } from 'node:events';
+import { agentDefinition, checkSkills, specialistPacket, type GentleSkillId } from './gentle-catalog.js';
 
 export const HOSTS = ['gpt-a', 'gpt-b', 'grok', 'gemini', 'claude'] as const;
 export type Host = typeof HOSTS[number];
@@ -10,8 +11,9 @@ export type MeshRole = 'orchestrator' | 'explorer' | 'architect' | 'implementer'
 export type MeshWorkState = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'WAITING_INPUT' | 'OUTCOME_UNKNOWN';
 export type ActorProfile = { host: Host; actorId: string; modelRequest: string; effortRequest: string; roles: MeshRole[]; revision: number };
 export type MeshMessage = { id: string; missionId: string; from: Host; to: Host; workId: string | null; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' | 'RESULT'; text: string; createdAt: string; inboxRevision: number };
-export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null };
-type MeshData = { version: 1; profiles: ActorProfile[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
+export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null };
+export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
+type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
 const hosts = new Set<string>(HOSTS);
 const roles = new Set<MeshRole>(['orchestrator', 'explorer', 'architect', 'implementer', 'verifier', 'reviewer']);
 export function isHost(x: string): x is Host { return hosts.has(x); }
@@ -21,7 +23,7 @@ function iso() { return new Date().toISOString(); }
 
 export class MeshEngine {
   private file: string;
-  private state: MeshData = { version: 1, profiles: [], works: [], messages: [], inboxRevision: { 'gpt-a': 0, 'gpt-b': 0, 'grok': 0, 'gemini': 0, 'claude': 0 } };
+  private state: MeshData = { version: 1, profiles: [], specialistBindings: [], works: [], messages: [], inboxRevision: { 'gpt-a': 0, 'gpt-b': 0, 'grok': 0, 'gemini': 0, 'claude': 0 } };
   private chain: Promise<unknown> = Promise.resolve();
   /** Emitted only AFTER the updated ledger is atomically persisted. */
   readonly events = new EventEmitter();
@@ -44,6 +46,8 @@ export class MeshEngine {
         historical[m.to] = Math.max(historical[m.to], m.inboxRevision);
       }
       for (const host of HOSTS) parsed.inboxRevision[host] = Math.max(parsed.inboxRevision[host], historical[host]);
+      if (parsed.specialistBindings !== undefined) check(Array.isArray(parsed.specialistBindings), 'Invalid specialist binding ledger');
+      parsed.specialistBindings ??= [];
       x.state = parsed;
     } catch (e) {
       if (!(e instanceof Error) || !('code' in e) || e.code !== 'ENOENT') throw e;
@@ -91,22 +95,62 @@ export class MeshEngine {
     });
   }
   profiles() { return this.read(d => d.profiles); }
-  async delegate(caller: Host, input: { missionId: string; target: Host; role: MeshRole; instruction: string; idempotencyKey: string }) {
+  specialistBindings() { return this.read(d => d.specialistBindings ?? []); }
+  /** GPT-A configures many specialist definitions independently of the five hosts. */
+  bindSpecialist(caller:Host, input:{agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:string[]}, expectedRevision:number) {
+    check(caller==='gpt-a', 'Only GPT-A configures specialist bindings');
+    const definition=agentDefinition(input.agentId);
+    check(definition, 'Unknown catalog agent');
+    check(isHost(input.host) && input.host!=='gpt-a', 'Specialists require a worker host');
+    check(input.modelRequest.length<=120 && input.effortRequest.length<=32, 'Invalid model configuration');
+    check(Number.isSafeInteger(expectedRevision) && expectedRevision>=0,'Invalid binding revision');
+    const skills=checkSkills(input.skillIds);
+    return this.write(d=>{
+      const bindings=d.specialistBindings ??= [];
+      const i=bindings.findIndex(b=>b.agentId===input.agentId);
+      check((bindings[i]?.revision??0)===expectedRevision,'Stale specialist binding revision');
+      const next:SpecialistBinding={agentId:definition.id,host:input.host,modelRequest:input.modelRequest,effortRequest:input.effortRequest,skillIds:skills,revision:expectedRevision+1};
+      if(i===-1)bindings.push(next);else bindings[i]=next;
+      this.notify(d,'gpt-a');
+      return next;
+    });
+  }
+  /** Assemble immutable role+skill packet from MCP-hosted catalog. The ledger
+   * retains the exact packet; later skill updates cannot change in-flight work.
+   */
+  async delegateBoundSpecialist(caller:Host,input:{missionId:string;agentId:string;objective:string;idempotencyKey:string;candidateSha?:string;allowedEditSurfaces?:string[]}) {
+    check(caller==='gpt-a','Only GPT-A can delegate');
+    const binding=await this.read(d=>(d.specialistBindings??[]).find(b=>b.agentId===input.agentId)??null);
+    check(binding,'Specialist must be configured in Agent Studio');
+    const packet=await specialistPacket({agentId:binding.agentId,skillIds:binding.skillIds,objective:input.objective,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,candidateSha:input.candidateSha,allowedEditSurfaces:input.allowedEditSurfaces});
+    return this.delegate(caller,{missionId:input.missionId,target:binding.host,role:packet.role,instruction:packet.instruction,idempotencyKey:input.idempotencyKey,
+      specialist:{agentId:packet.agentId,skillIds:packet.skillIds,packetDigest:packet.digest,assetDigests:packet.assetDigests,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,bindingRevision:binding.revision,candidateSha:input.candidateSha,allowedEditSurfaces:packet.allowedEditSurfaces}});
+  }
+  async delegate(caller: Host, input: { missionId: string; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?:NonNullable<MeshWork['specialist']> }) {
     check(caller === 'gpt-a', 'Only GPT-A can delegate');
     check(input.missionId.length > 0 && input.missionId.length <= 120, 'Invalid mission');
     check(isHost(input.target) && input.target !== 'gpt-a', 'Invalid target');
     check(roles.has(input.role) && input.role !== 'orchestrator', 'Invalid role');
-    check(input.instruction.trim().length > 0 && input.instruction.length <= 20000, 'Invalid instruction');
+    check(input.instruction.trim().length > 0 && input.instruction.length <= 50000, 'Invalid instruction');
     check(input.idempotencyKey.length > 0 && input.idempotencyKey.length <= 160, 'Invalid idempotency');
     return this.write(d => {
+      if (input.specialist) {
+        const binding=(d.specialistBindings??[]).find(b=>b.agentId===input.specialist?.agentId);
+        check(binding?.host===input.target && binding.revision===input.specialist.bindingRevision, 'Specialist binding changed during dispatch');
+        check(input.specialist.packetDigest===sha(input.instruction), 'Specialist packet digest mismatch');
+      }
+      if(input.specialist?.allowedEditSurfaces?.length){
+        const conflict=d.works.find(w=>w.missionId===input.missionId && w.role==='implementer' && ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state) && (w.specialist?.allowedEditSurfaces??[]).some(a=>input.specialist!.allowedEditSurfaces.some(b=>a===b || a.startsWith(b+'/') || b.startsWith(a+'/'))));
+        check(!conflict,'Overlapping active writer edit surfaces');
+      }
       const profile = d.profiles.find(p => p.host === input.target);
       check(profile?.roles.includes(input.role), 'Target agent role is not configured');
       const dup = d.works.find(w => w.missionId === input.missionId && w.idempotencyKey === input.idempotencyKey);
       if (dup) {
-        check(dup.target === input.target && dup.role === input.role && dup.instruction === input.instruction, 'Idempotency conflict');
+        check(dup.target === input.target && dup.role === input.role && dup.instruction === input.instruction && JSON.stringify(dup.specialist??null)===JSON.stringify(input.specialist??null), 'Idempotency conflict');
         return dup;
       }
-      const w: MeshWork = { id: randomUUID(), missionId: input.missionId, from: 'gpt-a', target: input.target, role: input.role, instruction: input.instruction, idempotencyKey: input.idempotencyKey, state: 'QUEUED', attemptId: null, leaseGeneration: 0, leaseUntil: null, result: null, receiptDigest: null, createdAt: iso(), completedAt: null };
+      const w: MeshWork = { id: randomUUID(), missionId: input.missionId, from: 'gpt-a', target: input.target, role: input.role, instruction: input.instruction, idempotencyKey: input.idempotencyKey, specialist: input.specialist, state: 'QUEUED', attemptId: null, leaseGeneration: 0, leaseUntil: null, result: null, receiptDigest: null, createdAt: iso(), completedAt: null };
       d.works.push(w);
       this.notify(d, input.target);
       this.notify(d, 'gpt-a');

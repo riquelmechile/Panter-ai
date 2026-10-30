@@ -99,3 +99,7 @@ Verification: `npm run smoke:oauth` tests signed fixture tokens and an actual tw
 `PANTER_AUTH_MODE=embedded` enables self-hosted OAuth 2.1 authorization endpoints: `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource`, `/register`, `/authorize`, `/oauth/consent`, `/token` and `/revoke`. The operator approves each app client and chooses its host (GPT-A, GPT-B, Grok, Gemini or Claude). Clients use authorization code + PKCE S256 and exact allowlisted HTTPS callbacks. Access and refresh token digests are stored in a private file; refresh rotates and reuse revokes the family. See [embedded OAuth guide](docs/OAUTH_EMBEDDED.md).
 
 The previous external-JWT mode remains optional. **Neither mode is evidence of a real GPT-A autonomous wake or production safety**. Validate real host onboarding, SDK compatibility, revocation after restart, security review and proxy configurations before internet exposure.
+
+## v0.7: centrally hosted Gentle Shell agent and skill catalog
+
+The [Gentle Shell MCP compatibility guide](docs/GENTLE_SHELL_COMPAT.md) explains the exact upstream MIT-pinned catalog of **10 specialists** and **13 skills**, individual agent-to-host assignments in Agent Studio, host-specific requested models, immutable on-demand skill packets, and A2A completion into GPT-A's inbox. All five hosts may share specialist definitions; no provider inference API is used. The review 4R/Judgment Day blueprints are **planning and delegated contracts**, not a claim that the native Pi review engine has been ported.
