@@ -1,3 +1,7 @@
+# Status update (v0.15)
+
+The automatic harness now treats 4R and explicitly requested Judgment Day as **separate** phases. Bounded implementation units may be prepared for distinct worktrees, but no host agent or filesystem isolation is instantiated by the MCP. Server-exposed writes require operator-issued grants; Panter-RDD signatures and trusted Git evidence are required for approval. See [`CANONICAL_HARNESS_POLICY.md`](CANONICAL_HARNESS_POLICY.md). Statements below about official Go approval as the only authority describe v0.12 behavior.
+
 # Panter automatic ODD harness — v0.12 developer preview
 
 Panter-ai follows the **organic** work routing of Gentle Shell: GPT-A receives the user objective and **never asks the user to choose an agent, skill, reviewer, review lens, model per task, or how many workers to start**. Agent Studio is for initial *optional* preferences only. The actual work route is selected dynamically according to scope, authorization, risk and observed host capabilities.

@@ -1,3 +1,7 @@
+# Status update (v0.15)
+
+This v0.11 document describes evidence collection but not current Panter-RDD approval. Panter-RDD now requires Ed25519 trusted-runner attestations plus an exact SHA GitHub or local Git proof; reported child IDs are not enough. 4R and explicitly requested Judgment Day execute in separate phases. See [`CANONICAL_HARNESS_POLICY.md`](CANONICAL_HARNESS_POLICY.md). The older official-Go requirements below are historical.
+
 # GPT-A-only native-subagent review (v0.11 developer preview)
 
 Panter-ai can now **prepare and collect** independent 4R or Judgment Day reviewer work with GPT-A as the only authenticated MCP host. Remote GPT-B, Grok, Gemini and Claude connections are not needed. The MCP never creates LLM agents or calls inference APIs: the ChatGPT host launches its own genuinely available native subagents. Model choice, MAX/xhigh effort, Fast and parallelism are requested host-side, not imposed or proven by Panter-ai.

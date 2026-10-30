@@ -1,3 +1,7 @@
+# Current developer preview and authoritative policy
+
+Panter-ai v0.15 supersedes the *historical* v0.1-v0.14 milestones below. Use [`docs/CANONICAL_HARNESS_POLICY.md`](docs/CANONICAL_HARNESS_POLICY.md) for current rules and [`docs/PANTER_RDD_NATIVE.md`](docs/PANTER_RDD_NATIVE.md) for self-hosted review. Old headings saying "not implemented yet" refer only to the named historical milestone; they are **not** the current feature inventory. Real GPT-A subagents, Oracle, Engram, OAuth providers and live Git runner operation remain acceptance tests, not established production facts. The GPT-A host request for model/effort/Fast/parallelism is unchanged.
+
 # Panter-ai
 
 **An independent, open-source development control plane for AI hosts.**

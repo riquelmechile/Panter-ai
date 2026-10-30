@@ -1,3 +1,7 @@
+# Status update (v0.15)
+
+This v0.9 document is historical. Panter now has **its own Panter-RDD**, which requires trusted runner signatures and GitHub or configured local Git evidence before acknowledgement; Gentle AI Go is optional for comparison, not a prerequisite. See [`CANONICAL_HARNESS_POLICY.md`](CANONICAL_HARNESS_POLICY.md), [`PANTER_RDD_NATIVE.md`](PANTER_RDD_NATIVE.md) and [`GITHUB_GENTLE_WORKFLOW.md`](GITHUB_GENTLE_WORKFLOW.md). Statements below about mandatory official-Go approval describe the old v0.9 behavior.
+
 # Native RDD and no-workforce GPT-A continuity (v0.9)
 
 ## GPT-A works with no peers

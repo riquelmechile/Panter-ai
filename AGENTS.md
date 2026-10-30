@@ -1,3 +1,7 @@
+# Canonical instructions
+
+Follow [`docs/CANONICAL_HARNESS_POLICY.md`](docs/CANONICAL_HARNESS_POLICY.md) first when any older version-specific text conflicts. Preserve `src/core/policy.ts` host model/effort/Fast/parallellism demands unchanged. All GitHub writes, merges, deployments and privilege grants require their own authorization.
+
 # Panter-ai host and agent contract
 
 This is a remote MCP control plane. Model selection, login and reasoning belong to the connected AI host, **not** to this server. No provider inference APIs or server-side model workers are permitted.
@@ -43,7 +47,7 @@ Write original source and documentation. Avoid embedding secrets, private accoun
 
 ## Panter MCP-hosted Gentle Shell catalog (v0.7)
 
-GPT-A is the sole coordinator. Before first multi-host development, request user selection of host and desired model/effort for each of the ten specialist agents via `panter_agent_studio`. Agent descriptions and thirteen skills are version-pinned MIT assets in `vendor/gentle-shell`; the GPT-A tool `panter_gentle_catalog` enumerates them. Do not download or silently execute unapproved skills or assume the host uses the requested model.
+GPT-A is the sole coordinator. Agent Studio provides optional persistent **preferences only**. Do not request per-task host/agent/model selections; the automatic harness assigns specialists by observed capability and risk. Agent descriptions and thirteen skills are version-pinned MIT assets in `vendor/gentle-shell`; the GPT-A tool `panter_gentle_catalog` enumerates them. Do not download or silently execute unapproved skills or assume the host uses the requested model.
 
 For external-host work use `panter_specialist_delegate`, `panter_mesh_claim`, `panter_mesh_complete`, and the inbox. Keep `panter_agent_*` for legacy admin-only workflow planning; it must not be treated as a second authority for the same delegated work. The ODD classifier is `panter_odd_route`, 4R/Judgment Day atomic fanout is `panter_review_start`, and review results are reported (not independently attested) through `panter_review_status`. Implementers require narrow planned edit surfaces; runtime filesystem/tool enforcement remains a separate gate.
 

@@ -1,3 +1,7 @@
+# Roadmap status
+
+The checkboxes below are a **historical per-release backlog** and should not be interpreted as the current release inventory. Normative behavior and current known acceptance gaps are in [`CANONICAL_HARNESS_POLICY.md`](CANONICAL_HARNESS_POLICY.md). In v0.15 embedded OAuth, GitHub verification, Panter-RDD, GPT-A native packet planning and Engram MCP bridges exist in code, but real host onboarding, Oracle deployment, runner signatures, secure worktrees and multi-process persistence remain unverified/incomplete. Do not toggle these boxes simply to declare production ready.
+
 # Panter-ai roadmap
 
 ## Foundation (v0.1)

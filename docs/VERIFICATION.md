@@ -1,17 +1,13 @@
-# Verification — Panter-ai v0.2.0
+# Verification (current developer preview)
 
-## Verified locally
+## Repeatable CI checks
 
-- All seven TypeScript source/test files parsed successfully using the local TypeScript compiler, with no syntax diagnostics.
-- Eleven core tests passed using an ESM transpilation of the project-owned core modules (mission persistence, idempotent claims, model request policy, scoped agent admission, workflow routing, dependency-aware claims, lease fencing, human question relay, SHA freezing and independent review gates).
-- The project-owned implementation and documentation contain no references to the earlier repositories discussed during design.
+Run `npm run check`, `npm run build`, `npm test`, `npm run smoke:http`, `npm run smoke:oauth`, and `npm run smoke:embedded` from a clean checkout. The package requires Node 22 and dependencies installed by npm. Check GitHub Actions on the exact commit SHA before describing CI as successful.
 
-## Not verified in this environment
+## What CI cannot prove
 
-- Full TypeScript type-check, MCP HTTP integration, OAuth, npm release/install and Docker build. The sandbox lacks the npm packages and the registry could not be used with the available offline cache.
-- Production host-native agent execution and automatic wake. The server only coordinates tasks and emits requested policies, it does not run a model.
-- Remote GitHub commit SHA authenticity, CI status, actual repository path isolation or independent worker identity. These are host-reported values pending authenticated integration.
+Passing tests does not prove production OAuth with each provider app, Oracle host process health, user-visible Fast tier, actual GPT-A native child invocations, a trusted Ed25519 signer outside the model, or operating-system worktree isolation. Panter-RDD refuses positive unsigned evidence. See [`CANONICAL_HARNESS_POLICY.md`](CANONICAL_HARNESS_POLICY.md) for current acceptance gates.
 
-## Safety boundary
+## Historical v0.2 verification
 
-This release is a **single-process, single-tenant alpha** using a static high-entropy bearer. It must not be exposed to untrusted users as an autonomous coding service. Agent task reservations are planning-level controls rather than kernel or tool-level enforcement.
+Past v0.2 assessments are not current behavior claims. The canonical state is the code under the reviewed SHA and the observed CI run.
