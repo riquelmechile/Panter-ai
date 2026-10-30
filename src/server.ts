@@ -73,7 +73,7 @@ const bounded = (max = 2048) => z.string().trim().min(1).max(max);
 const handler = createMcpHandler(() => {
   const server = new McpServer({ name: 'panter-ai', version: '0.9.0' }, {
     capabilities: { resources: { subscribe: true } },
-    instructions: 'Panter-ai is a remote MCP engineering workspace. Reasoning, model choice and native subagents belong to the connected AI host. The model and effort policy returned by panter_host_policy is only REQUESTED, never proof. For meaningful work use panter_flow_route to choose inline versus coordinated execution, then create a durable flow only when useful. The parent session coordinates, and focused native host agents perform scoped exploration, implementation, verification and review. Use panter_agent_packet to obtain bounded context; never imply an agent was launched merely because its task was enqueued. Worker completions are reported evidence, not trusted verification. The server runs no model inference; a separately enabled read-only Gentle AI review CLI bridge may query a fixed operator worktree. GPT-A owns orchestration. If remote peers are unavailable or unknown, GPT-A must CONTINUE ODD inline using panter_native_plan and panter_native_packet, or native subagents only when its host actually offers them. Never require a remote binding to carry out local steps. The five hosts are optional capacity, not a prerequisite. At first setup, ask the user to assign the desired host and model for each Gentle Shell specialist and open panter_agent_studio; store each specialist binding separately. Resolve only the selected MCP-hosted skills and dispatch using panter_specialist_delegate. Use panter_odd_route for risk-based ODD decisions, panter_review_start for durable 4R/Judgment Day fanout, and panter_mesh_inbox for results. Never invent host wake, native subagents, or independent self-review. A completed model review is not a native RDD approval. Use panter_review_evidence and panter_native_review_status for proof when a trusted native runner exists; fail closed when unavailable. Do not claim a test, review, wake or execution succeeded without external evidence.'
+    instructions: 'Panter-ai is a remote MCP engineering workspace. Reasoning, model choice and native subagents belong to the connected AI host. The model and effort policy returned by panter_host_policy is only REQUESTED, never proof. For meaningful work use panter_flow_route to choose inline versus coordinated execution, then create a durable flow only when useful. The parent session coordinates, and focused native host agents perform scoped exploration, implementation, verification and review. Use panter_agent_packet to obtain bounded context; never imply an agent was launched merely because its task was enqueued. Worker completions are reported evidence, not trusted verification. The server runs no model inference; a separately enabled read-only Gentle AI review CLI bridge may query a fixed operator worktree. GPT-A owns orchestration. If remote peers are unavailable or unknown, GPT-A must CONTINUE ODD using panter_native_mission_create, panter_native_flow_start, panter_native_phase_enqueue/claim/complete and panter_native_plan/native_packet, or native subagents only when its host actually offers them. Never require a remote binding to carry out local steps. The five hosts are optional capacity, not a prerequisite. At first setup, ask the user to assign the desired host and model for each Gentle Shell specialist and open panter_agent_studio; store each specialist binding separately. Resolve only the selected MCP-hosted skills and dispatch using panter_specialist_delegate. Use panter_odd_route for risk-based ODD decisions, panter_review_start for durable 4R/Judgment Day fanout, and panter_mesh_inbox for results. Never invent host wake, native subagents, or independent self-review. A completed model review is not a native RDD approval. Use panter_review_evidence and panter_native_review_status for proof when a trusted native runner exists; fail closed when unavailable. Do not claim a test, review, wake or execution succeeded without external evidence.'
   });
 
   // Preserve Zod schema inference for legacy admin tools while enforcing
@@ -336,6 +336,46 @@ const handler = createMcpHandler(() => {
   }));
 
   const nativeAssignmentSchema = z.object({agentId:z.enum(GENTLE_AGENTS.map(a=>a.id) as [string,...string[]]), objective:bounded(6000),candidateSha:z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/).optional(),allowedEditSurfaces:z.array(z.string().min(1).max(256)).max(16).optional()});
+  // GPT-A uses the existing durable ODD AgentEngine without the legacy
+  // administrator bearer. No collaborator is needed to make progress.
+  server.registerTool('panter_native_mission_create',{
+    description:'GPT-A creates a durable engineering mission for ODD fallback. Does not authorize filesystem writes.',
+    inputSchema:z.object({project:bounded(100),goal:bounded(4000)})
+  },async x=>execute(async()=>{requireLeader();return store.createMission(x.project,x.goal)}));
+  server.registerTool('panter_native_flow_start',{
+    description:'GPT-A records the verbatim request, risk, authorizations and review requirement to recover ODD across sessions.',
+    inputSchema:z.object({missionId:z.uuid(),spec:bounded(30000),signals:flowSignals,reviewRequired:z.boolean().default(false)})
+  },async x=>execute(async()=>{requireLeader();return agents.createFlow(x.missionId,x.spec,x.signals,x.reviewRequired)}));
+  server.registerTool('panter_native_phase_enqueue',{
+    description:'GPT-A records a durable scout/designer/builder phase for inline or genuine native-subagent execution; never self-registers as an independent reviewer.',
+    inputSchema:z.object({flowId:z.uuid(),role:z.enum(['scout','designer','builder']),objective:bounded(10000),
+      scopes:z.array(bounded(256)).max(32).default([]),workspace:bounded(100).default('default'),dependsOn:z.array(z.uuid()).max(32).default([]),idempotencyKey:bounded(160)})
+  },async x=>execute(async()=>{requireLeader();return agents.addTask({...x,target:'gpt-a'})}));
+  server.registerTool('panter_native_phase_claim',{
+    description:'GPT-A claims the next dependency-ready native phase. This is a durable lease, NOT proof of model invocation.',
+    inputSchema:z.object({leaseSeconds:z.number().int().min(30).max(3600).default(300)})
+  },async ({leaseSeconds})=>execute(async()=>{requireLeader();return agents.claim('gpt-a','gpt-a',leaseSeconds)}));
+  server.registerTool('panter_native_phase_packet',{
+    description:'GPT-A reads the exact ODD requirement and handoff of a recorded phase. Use panter_native_packet for agent+skill instructions.',
+    inputSchema:z.object({taskId:z.uuid()}),annotations:{readOnlyHint:true}
+  },async ({taskId})=>execute(async()=>{requireLeader();const task=await agents.getTask(taskId);if(task?.target!=='gpt-a')throw new Error('Not GPT-A native phase');return agents.packet(taskId)}));
+  server.registerTool('panter_native_phase_complete',{
+    description:'GPT-A records a claimed inline/native-subagent phase result and its host-reported evidence. Independent verification is never inferred.',
+    inputSchema:z.object({taskId:z.uuid(),leaseGeneration:z.number().int().positive(),result:z.object({summary:bounded(10000),evidence:z.array(bounded(1000)).max(40)}),success:z.boolean().default(true)})
+  },async x=>execute(async()=>{requireLeader();const task=await agents.getTask(x.taskId);if(task?.target!=='gpt-a'||!['scout','designer','builder'].includes(task.role))throw new Error('Not a permitted GPT-A native phase');return agents.report(x.taskId,'gpt-a',x.leaseGeneration,x.result,x.success)}));
+  server.registerTool('panter_native_flow_status',{
+    description:'Recover a durable GPT-A ODD flow and its native-phase evidence after context loss or disconnection.',
+    inputSchema:z.object({flowId:z.uuid()}),annotations:{readOnlyHint:true}
+  },async ({flowId})=>execute(async()=>{requireLeader();return agents.summary(flowId)}));
+  server.registerTool('panter_native_candidate_freeze',{
+    description:'GPT-A records the candidate commit SHA for subsequent independent verification; a SHA string is not independently verified.',
+    inputSchema:z.object({flowId:z.uuid(),candidateSha:z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/),expectedRevision:z.number().int().positive()})
+  },async x=>execute(async()=>{requireLeader();return agents.freezeCandidate(x.flowId,x.candidateSha,x.expectedRevision)}));
+  server.registerTool('panter_native_flow_close',{
+    description:'Close a completed GPT-A ODD flow only if the stored verification/review gates allow it. High-risk flows cannot self-approve.',
+    inputSchema:z.object({flowId:z.uuid(),expectedRevision:z.number().int().positive()})
+  },async x=>execute(async()=>{requireLeader();return agents.closeFlow(x.flowId,x.expectedRevision)}));
+
   server.registerTool('panter_native_plan',{
     description:'GPT-A continues the full Gentle Shell ODD workflow even with zero remote peers. Plan optional native subagents/parallels only if host reports their availability. No inference or agent launch occurs server-side.',
     inputSchema:z.object({signals:z.object({requirementsClear:z.boolean(),resumableFromDiff:z.boolean(),risk:z.enum(['low','high']),unknownCodeArea:z.boolean(),independentWorkUnits:z.number().int().min(0).max(32),writesAuthorized:z.boolean()}), assignments:z.array(nativeAssignmentSchema).min(1).max(32),peerStates:z.partialRecord(z.enum(HOSTS),z.enum(['CONNECTED','UNAVAILABLE','UNKNOWN'])).optional(),capabilities:z.object({nativeSubagents:z.boolean(),maxParallelSubagents:z.number().int().min(0).max(32),toolsAvailable:z.boolean()})}),annotations:{readOnlyHint:true}
