@@ -83,6 +83,7 @@ export class GitHubDeliveryGate {
       const base=String(prData.base?.ref??'');
       const head=String(prData.head?.sha??'');
       result.headSha=head;result.baseBranch=base;result.draft=prData.draft===true;
+       if(result.draft)blocked.push('Pull request is still draft; mark ready before review');
       const branch=String(prData.head?.ref??'');
       if(!inspectBranchName(branch))blocked.push('Branch violates Gentle Shell type/description naming');else ok.push('branch');
       if(head!==input.expectedSha)blocked.push('Pull request HEAD differs from frozen candidate SHA');else ok.push('exact_sha');
