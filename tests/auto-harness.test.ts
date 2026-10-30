@@ -414,3 +414,35 @@ test('Judgment Day-only low-risk run accepts a bounded fresh-SHA correction',()=
  assert.notEqual(fresh.reviewId,first.reviewId);
  assert.equal(fresh.next[0]?.candidateSha,'b'.repeat(40));
 }));
+
+test('operator-reconciled no-effects A2A writer creates a NEW attempt rather than reusing uncertain work',()=>withHarness(async(h,n,m)=>{
+ await m.setProfile('gpt-a',{host:'grok',actorId:'writer-grok-001',modelRequest:'host-default',
+   effortRequest:'max',roles:['implementer']},0);
+ await m.bindSpecialist('gpt-a',{agentId:'gentle-ai-worker',host:'grok',
+   modelRequest:'host-default',effortRequest:'max',skillIds:['gentle-ai']},0);
+ const run=await h.start({project:'app',objective:'Update short button copy',
+   idempotencyKey:'aborted-retry-generation',writesAuthorized:true,
+   changeSurfaces:['src/ui/button.ts'],coordinationMode:'AUTO'});
+ const capacity={nativeSubagents:true,maxParallelSubagents:2,toolsAvailable:true,
+   peerStates:{grok:'CONNECTED' as const}};
+ const first=await h.tick(run.id,capacity);
+ assert.equal(first.status,'REMOTE_A2A_DISPATCHED');
+ const workId=first.next[0]!.workId as string;
+ const claimed=await m.claim('grok',workId,30);
+ const original=Date.now;
+ try{
+  Date.now=()=>original()+31000;
+  assert.equal((await m.claim('grok',workId,30)).state,'OUTCOME_UNKNOWN');
+  const held=await h.tick(run.id,capacity);
+  assert.equal(held.status,'REMOTE_OUTCOME_NEEDS_RECONCILIATION');
+  await m.reconcileWriter({workId,attemptId:claimed.attemptId!,
+    leaseGeneration:claimed.leaseGeneration,resolution:'CONFIRMED_NO_EFFECTS',
+    evidence:'Operator inspected the exact worktree and verified it did not change any file or commit.'});
+  const reconciled=await h.tick(run.id,capacity);
+  assert.equal(reconciled.status,'REMOTE_NO_EFFECTS_RECONCILED');
+  const next=await h.tick(run.id,capacity);
+  assert.equal(next.status,'REMOTE_A2A_DISPATCHED');
+  assert.notEqual(next.next[0]!.workId,workId);
+  assert.equal((await m.pending('grok')).filter(w=>w.missionId===run.id).length,1);
+ }finally{Date.now=original;}
+}));
