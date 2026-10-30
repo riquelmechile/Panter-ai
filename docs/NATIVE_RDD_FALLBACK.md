@@ -48,3 +48,5 @@ For **both** conditions Panter explicitly requests the same host control posture
 `panter_native_plan` returns `capacityContract` and `capacityGaps`. The former is always a `REQUESTED` policy and the latter explicitly identifies observed capability shortfalls; `fullCapacityObserved` is always false until real host-side attestation exists. No MCP server can itself switch a consumer ChatGPT model/tier or create invisible subagents. If it cannot obtain an effective capability, it must disclose this, not silently downgrade or claim full compliance.
 
 A user can select GPT-A-only for one session (`coordinationMode: GPT_A_ONLY`) without changing the saved Agent Studio preference; the saved mode applies to later calls without an explicit per-turn override. The server does not write to other hosts in this mode.
+
+`panter_native_mode_set` switches `AUTO` / `GPT_A_ONLY` durably using the GPT-A profile revision. In solo mode `mesh.delegate` and `mesh.startReview` fail closed at the persistence boundary before creating remote work; existing work remains available for explicit reconciliation, never silently cancelled. The user may explicitly re-enable `AUTO`.
