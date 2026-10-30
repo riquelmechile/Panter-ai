@@ -71,3 +71,7 @@ Do not label this production ready until all conditions are demonstrated: OAuth 
 ## External OAuth validation (pre-production only)
 
 For a private proof on Oracle, use a trusted identity provider and keep its signing public JWKS and actor mapping mounted read-only outside the repository. Set `PANTER_AUTH_MODE=external-jwt`, HTTPS `PANTER_PUBLIC_MCP_URL`, issuer, and paths documented in [OAUTH_EXTERNAL.md](OAUTH_EXTERNAL.md). Do **not** mount an identity provider's private key. Verify `/.well-known/oauth-protected-resource` and that an unauthenticated `/mcp` request returns 401 with a resource metadata challenge; then confirm two distinct OAuth client identities cannot impersonate each other. Do not replace validated OAuth with an unprotected shared bearer on a public endpoint.
+
+## Panter-RDD trusted-runner acceptance (v0.15)
+
+The code can verify Ed25519 signatures **but does not create a trusted signer or native ChatGPT child**. Provision a separate authenticated runner, keep its private key outside MCP/model context, and mount its **public** key registry as `PANTER_RDD_RUNNER_KEYS_FILE`. For local Git approvals, pin the worktree and check argv in `PANTER_RDD_LOCAL_WORKTREES_FILE` on an operator-only read-only configuration volume. No caller may change those paths. Install `git` in the runtime image. A positive CI test using ephemeral fixture keys does not replace a live trust-chain acceptance test.

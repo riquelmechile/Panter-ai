@@ -1,3 +1,7 @@
+# Status update (v0.15)
+
+**Security correction:** Different host-reported `subagentRunId` values do **not** independently prove execution and can no longer obtain a positive Panter-RDD verdict. Every native reviewer must carry a valid Ed25519 signature from an operator-trusted *runner* covering `panter.review-run/v1` and the exact `reviewId`, `slotId`, agent, SHA, packet digest, run ID, evidence and findings. Public keys live in `PANTER_RDD_RUNNER_KEYS_FILE` (operator filesystem), private keys only in an external runner. Missing/invalid signatures cause `NEEDS_RUNNER_ATTESTATION`. A trusted local worktree can replace a GitHub PR only when a protected `PANTER_RDD_LOCAL_WORKTREES_FILE` supplies its fixed checkout and commands; Git HEAD, clean state and required checks are revalidated. **No implementation of a trusted host-runner is claimed by these software-only gates.** For 4R/explicit Judgment Day, authorized corrective changes must use a new SHA and fresh verifier and review. See [`CANONICAL_HARNESS_POLICY.md`](CANONICAL_HARNESS_POLICY.md).
+
 # Panter-RDD — self-hosted review authority (v0.14)
 
 Panter-RDD is **Panter-ai's independent review controller**, inspired by the safety properties of Gentle Shell/Gentle AI. It does not embed the official Gentle AI Go binary, impersonate a provider reviewer or claim official `gentle-ai.review-integration/v2` conformance.
