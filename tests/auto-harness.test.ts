@@ -330,3 +330,42 @@ test('expired operator grant rejects a fresh-SHA correction without changing the
   assert.equal(after?.correctionAttempts,0);
  }finally{Date.now=originalNow;await rm(dir,{recursive:true,force:true});}
 });
+
+test('GPT-A alone performs full four-lens 4R without peers or native children, never granting independent authority',()=>withHarness(async(h,n)=>{
+ const run=await h.start({project:'app',objective:'Repair login security',idempotencyKey:'solo-4r-harness',
+   writesAuthorized:true,changeSurfaces:['src/auth/login.ts'],coordinationMode:'GPT_A_ONLY'});
+ const cap={nativeSubagents:false,maxParallelSubagents:0,toolsAvailable:true};
+ let step=await h.tick(run.id,cap);
+ assert.equal(step.status,'GPT_A_INLINE');
+ await h.report(run.id,step.phaseId!,{summary:'Designed',evidence:['Design spec']});
+ step=await h.tick(run.id,cap);
+ await h.report(run.id,step.phaseId!,{summary:'Implemented',evidence:['Git diff and tests'],candidateSha:sha,runId:'builder-1'});
+ step=await h.tick(run.id,cap);
+ await h.report(run.id,step.phaseId!,{summary:'Verified',evidence:['Independent tool checks'],candidateSha:sha,runId:'verifier-run-1'});
+ let reviewId='';
+ for(let i=0;i<4;i++){
+  step=await h.tick(run.id,cap);
+  assert.equal(step.status,'READY_FOR_GPT_A_SOLO_4R');
+  assert.equal(step.reviewMode,'GPT_A_SOLO_UNVERIFIED');
+  assert.equal(step.concurrentSlots,1);assert.equal(step.next.length,1);
+  if(i===0)reviewId=step.reviewId!;
+  assert.equal(step.reviewId,reviewId);
+  const packet=step.next[0]!;
+  assert.deepEqual(packet.agentId,['review-risk','review-readability','review-reliability','review-resilience'][i]);
+  assert.equal(packet.execution,'GPT_A_SOLO_LENS_REQUESTED');
+  await n.submitSolo(reviewId,packet.slotId as string,{agentId:packet.agentId as string,candidateSha:sha,
+    packetDigest:packet.packetDigest as string,evidence:['Examined frozen source and tests'],findings:[]});
+ }
+ const final=await h.tick(run.id,cap);
+ assert.equal(final.status,'SOLO_4R_COMPLETED_UNVERIFIED');
+ assert.equal(final.approved,false);
+ const persisted=await h.get(run.id);
+ assert.equal(persisted?.steps.find(x=>x.phase==='REVIEW')?.status,'COMPLETE');
+ assert.equal((await n.status(reviewId)).evidenceComplete,false);
+ const upgraded=await h.tick(run.id,{...cap,nativeSubagents:true,maxParallelSubagents:4});
+ assert.equal(upgraded.status,'READY_FOR_HOST_NATIVE_DISPATCH');
+ assert.equal(upgraded.next.length,4);
+ assert.notEqual(upgraded.reviewId,reviewId);
+ assert.equal(upgraded.approved,false);
+ assert.equal((await n.status(reviewId)).soloEvidenceComplete,true);
+}));
