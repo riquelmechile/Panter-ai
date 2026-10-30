@@ -98,12 +98,10 @@ test('4R fanout is atomic, durable, idempotent and has exactly four lens results
   assert.equal((await m.inbox('gpt-a')).messages.filter(x=>x.kind==='RESULT').length,4);
 }));
 
-test('Judgment Day starts precisely two blind judges on distinct hosts and never auto-fixes',()=>withMesh(async m=>{
+test('Judgment Day starts two blind judges in one host; RDD requires distinct signed runs',()=>withMesh(async m=>{
   for(const host of ['grok','claude'] as const)await m.setProfile('gpt-a',{host,actorId:`actor-${host}`,modelRequest:'host',effortRequest:'max',roles:['reviewer']},0);
   for(const id of ['jd-judge-a','jd-judge-b'])await m.bindSpecialist('gpt-a',{agentId:id,host:'grok',modelRequest:'host',effortRequest:'max',skillIds:['judgment-day']},0);
   const request={missionId:'jd-m',kind:'judgment-day' as const,objective:'Assess exact patch independently',candidateSha:SHA,idempotencyKey:'judgment-day-1'};
-  await assert.rejects(m.startReview('gpt-a',request),/independent hosts/);
-  await m.bindSpecialist('gpt-a',{agentId:'jd-judge-b',host:'claude',modelRequest:'host',effortRequest:'max',skillIds:['judgment-day']},1);
   const review=await m.startReview('gpt-a',request);
   assert.equal(review.workIds.length,2);
   const state=await m.reviewStatus('gpt-a',review.id);
