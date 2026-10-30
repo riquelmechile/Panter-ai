@@ -15,7 +15,7 @@ Runbook de **canary privado**, sin Docker/Podman, proxy, túnel, reglas de firew
 | 4c | `/mcp` sin credenciales 401; token del operador **por TCP** 401 |
 | 4d | `data/` `0700`, socket `0600`; por socket token válido 200 (`tools/list` incluye `panter_oauth_clients` y `panter_oauth_client_revoke`), token erróneo 401 |
 | 4e | flujo OAuth completo (DCR → PKCE S256 → consentimiento con clave de operador → código → token): `/mcp` 200; tras reiniciar, el token sigue válido; `panter_oauth_client_revoke` revoca el grant y el mismo token pasa a 401, cliente `revoked: true` |
-| 4f | `kill -9` al proceso de Panter: `Restart=on-failure` lo levanta en ~1 s, socket recuperado |
+| 4f | `kill -9` al proceso de Panter: `Restart=on-failure` lo levanta en ~1 s y el socket se recupera (unidad instalada sin `RestartSec`, o sea con el valor por defecto de 100 ms; ver nota sobre la unidad) |
 | Backup | `tar.gz` de `data/` en `0600` con digest SHA-256 (solo en el informe privado) |
 | Restauración | instancia temporal en otro puerto de loopback con datos y socket propios: `/health` 200, cliente revocado sigue revocado y el token sigue en 401; instancia cancelada y temporales borrados |
 | Rollback | `stop` libera el puerto; `start` vuelve a `/health` 200 |
@@ -23,11 +23,13 @@ Runbook de **canary privado**, sin Docker/Podman, proxy, túnel, reglas de firew
 
 **Arranque automático:** `host.system.service enable` se ejecutó con autorización explícita del responsable. La unidad queda `enabled` en `default.target` del manager de usuario, que tiene *linger*. El arranque tras un reinicio real del host **todavía no se ha probado**.
 
-**Límites efectivos:** `systemctl --user status` muestra `Tasks: 11 (limit: 128)` y `Memory: 26.7M (max: 1.0G)`, así que el manager de usuario tiene delegados los controladores `pids` y `memory` y ambos límites se aplican. Si en otro host el `status` no muestra `limit`/`max`, los límites se están ignorando y hay que detenerse.
+**Límites efectivos:** `systemctl --user status` muestra `Tasks: 11 (limit: 128)` y `Memory: 26.7M (max: 1.0G)`, así que el manager de usuario tiene delegados los controladores `pids` y `memory` y ambos límites se aplican. Si en otro host el `status` no muestra `limit`/`max`, los límites se están ignorando y hay que detenerse. Evidencia directa en el cgroup de la unidad: `memory.max=1073741824` y `pids.max=128`, con los controladores `cpu memory pids` delegados al manager de usuario.
+
+**Unidad validada frente a la del repositorio:** el canary corre con la unidad instalada antes de la revisión, sin `RestartSec` ni `StartLimit*`. `deploy/systemd/panter-ai.service` agrega `RestartSec=2` y un límite de 5 reinicios en 60 s. Con esa unidad, la recuperación de 4f tarda unos 2 s. Para adoptarla en el host hay que reemplazar el archivo y hacer `daemon-reload` de forma manual y controlada por un humano (pendiente), y después repetir 4f.
 
 Nota operativa: al probar con `curl`, pasar los Bearer con `-H @archivo` (archivo `0600`, borrado al terminar), nunca en la línea de comandos, porque los argumentos son visibles para otros procesos del mismo usuario.
 
-La autorización de operaciones es acotada al canary y debe reevaluarse si cambia el SHA o el alcance. Para nuevos intentos, el operador debe verificar que la unidad sigue inactiva y los puertos de pruebas siguen libres.
+La autorización de operaciones es acotada al canary y debe reevaluarse si cambia el SHA o el alcance. Para una reinstalación desde cero, el operador debe detener y deshabilitar antes la unidad existente y verificar que los puertos de pruebas siguen libres.
 
 ## Por qué nativo y no Compose
 
@@ -62,7 +64,12 @@ Crear los directorios privados con permisos `0700`. El lanzador es ejecutable y 
 
 ## Servicio de usuario
 
-Copiar y adaptar `deploy/systemd/panter-ai.service` como unidad de usuario, **antes del primer arranque**, y crear `bin/run` con `exec /usr/bin/node <home del usuario de servicio>/panter-ai/current/dist/server.js` usando ruta absoluta real. `run` debe tener permiso `0700`.
+Copiar y adaptar `deploy/systemd/panter-ai.service` como unidad de usuario, **antes del primer arranque**, y crear `bin/run` usando la ruta absoluta real, con permiso `0700`. **La primera línea tiene que ser el shebang**: systemd ejecuta el archivo con `execve`, y sin shebang falla con `Exec format error` (203/EXEC).
+
+```sh
+#!/bin/sh
+exec /usr/bin/node <home del usuario de servicio>/panter-ai/current/dist/server.js
+```
 
 Con `host.system.service` iniciar **solo** `panter-ai.service`, validar las pruebas 4a–4f y, **solo con autorización explícita del responsable**, habilitarlo (`enable`) para el arranque automático. Verificar en `status` que aparecen `limit: 128` y `max: 1.0G`. Los límites `MemoryMax=1G` y `TasksMax=128` son obligatorios en este canary. Si la unidad no arranca o alguno de ellos falla, detenerse: no editar a ciegas la unidad, pues el host no proporciona `daemon-reload`. No utilizar `systemctl` a través de shell genérico ni tocar otro servicio.
 
