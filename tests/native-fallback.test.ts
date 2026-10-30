@@ -103,3 +103,21 @@ test('Durable GPT-A ODD run resumes after restart, but self execution cannot app
     await assert.rejects(reopened.closeFlow(flow.id,2),/independent verification/);
   } finally {await rm(dir,{recursive:true,force:true})}
 });
+
+test('GPT-A native-subagent capacity preference is durable and cannot be set on worker profiles',async()=>{
+  const {mkdtemp,rm}=await import('node:fs/promises');
+  const {join}=await import('node:path');
+  const {tmpdir}=await import('node:os');
+  const {MeshEngine}=await import('../src/core/mesh.js');
+  const dir=await mkdtemp(join(tmpdir(),'panter-native-preferences-'));
+  try{
+    const mesh=await MeshEngine.open(dir);
+    const owner={host:'gpt-a' as const,actorId:'actor-gpt-a',modelRequest:'host',effortRequest:'high',roles:['orchestrator' as const],preferNativeSubagents:true,maxRequestedNativeWorkers:4};
+    const saved=await mesh.setProfile('gpt-a',owner,0);
+    assert.equal(saved.maxRequestedNativeWorkers,4);
+    const reopened=await MeshEngine.open(dir);
+    assert.equal((await reopened.profiles())[0]?.preferNativeSubagents,true);
+    await assert.rejects(mesh.setProfile('gpt-a',{...owner,host:'claude',roles:['reviewer']},0),/leader-only/);
+    await assert.rejects(mesh.setProfile('gpt-a',{...owner,maxRequestedNativeWorkers:40},1),/ceiling/);
+  }finally{await rm(dir,{recursive:true,force:true})}
+});
