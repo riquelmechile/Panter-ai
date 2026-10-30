@@ -99,6 +99,17 @@ try {
   assert.equal(revoke.status, 200);
   const unauthorized = await request('/mcp', { method: 'POST', headers: { authorization: `Bearer ${bCredentials.access_token}`, 'content-type': 'application/json' }, body: '{}' });
   assert.equal(unauthorized.status, 401);
+  const list=await operator.callTool({name:'panter_oauth_clients',arguments:{}});
+  assert.ok(!list.isError,JSON.stringify(list.content));
+  assert.ok(unpack(list).some(x=>x.clientId===aCredentials.client));
+  const forbiddenList=await a.callTool({name:'panter_oauth_clients',arguments:{}});
+  assert.ok(forbiddenList.isError,'AI clients cannot inspect OAuth connection administration');
+  const adminRevoked=await operator.callTool({name:'panter_oauth_client_revoke',arguments:{clientId:aCredentials.client}});
+  assert.ok(!adminRevoked.isError,JSON.stringify(adminRevoked.content));
+  const revokedAccess=await request('/mcp',{method:'POST',headers:{
+    authorization:`Bearer ${aCredentials.access_token}`,'content-type':'application/json'
+  },body:'{}'});
+  assert.equal(revokedAccess.status,401,'Operator revocation must invalidate live access immediately');
   await listening.close();
   console.log('PASS embedded DCR -> PKCE -> human consent -> loopback operator grant / GPT-A denied -> subscriptions/listen -> actor-bound A2A -> revoke 401');
 } finally {

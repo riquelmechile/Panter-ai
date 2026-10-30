@@ -433,6 +433,16 @@ const handler = createMcpHandler(() => {
   // There is no agent picker in this surface; GPT-A supplies observations, not selections.
   const harnessRuntimeSchema=z.object({nativeSubagents:z.boolean(),maxParallelSubagents:z.number().int().min(0).max(32),
     toolsAvailable:z.boolean(),peerStates:z.partialRecord(z.enum(HOSTS),z.enum(['CONNECTED','UNAVAILABLE','UNKNOWN'])).optional()});
+  if(embedded){
+    server.registerTool('panter_oauth_clients',{
+      description:'Admin-only: list OAuth embedded client registrations and approved hosts without exposing any credentials.',
+      inputSchema:z.object({}),annotations:{readOnlyHint:true}
+    },async()=>execute(async()=>{requireAdmin();return embedded.listClients()}));
+    server.registerTool('panter_oauth_client_revoke',{
+      description:'Admin-only: permanently revoke all active OAuth embedded grants, tokens, codes and pending consent requests for one client ID.',
+      inputSchema:z.object({clientId:z.string().regex(/^pc_[A-Za-z0-9_-]{24,64}$/)})
+    },async x=>execute(async()=>{requireAdmin();return {revokedGrants:await embedded.revokeClient(x.clientId)}));
+  }
   server.registerTool('panter_harness_write_grant',{
     description:'Admin-only explicit bounded write authorization for a particular project/objective; GPT-A cannot issue its own permission.',
     inputSchema:z.object({project:bounded(100),objective:bounded(6000),allowedPaths:z.array(bounded(256)).min(1).max(16),ttlSeconds:z.number().int().min(60).max(86400)})

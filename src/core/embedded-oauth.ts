@@ -275,11 +275,23 @@ export class EmbeddedOAuth {
     }
     throw new Error('Unsupported grant_type');
   }
+  /** Only expose this through the authenticated operator MCP, never over public OAuth. */
+  listClients(){
+    return this.read(d=>d.clients.map(c=>{
+      const grants=d.grants.filter(g=>g.clientId===c.id);
+      return {clientId:c.id,name:c.name,createdAt:c.createdAt,redirectUris:c.redirectUris,
+        approvedHosts:[...new Set(grants.filter(g=>!g.revoked).map(g=>g.host))],
+        revoked:grants.length>0&&grants.every(g=>g.revoked)};
+    }));
+  }
   async revokeClient(clientId: string) {
+    check(/^pc_[A-Za-z0-9_-]{24,64}$/.test(clientId),'Invalid client identifier');
     return this.change(d => {
       const grants = d.grants.filter(g => g.clientId === clientId);
       for (const g of grants) g.revoked = true;
       for (const row of d.tokens) if (row.clientId === clientId) row.revoked = true;
+      d.codes=d.codes.filter(c=>c.clientId!==clientId);
+      d.pending=d.pending.filter(p=>p.clientId!==clientId);
       return grants.length;
     });
   }
