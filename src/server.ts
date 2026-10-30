@@ -538,7 +538,7 @@ const handler = createMcpHandler(() => {
     inputSchema:z.object({reviewId:z.uuid(),slotId:z.uuid()}),annotations:{readOnlyHint:true}
   },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.packet(x.reviewId,x.slotId)}));
   server.registerTool('panter_native_review_batch',{
-    description:'GPT-A gets all ready 4R or blind Judgment Day native child packets in one call, with a host-observed parallel limit. The MCP does not launch children or route to remote peers.',
+    description:'Automatically selects native subagent 4R/Judgment Day packets when supported. With zero native slots, returns exactly one sequential GPT-A SOLO 4R lens at a time; use panter_native_review_submit_solo. Solo reports are never independent or RDD-approved. Judgment Day requires real separate judges.',
     inputSchema:z.object({reviewId:z.uuid(),observedNativeParallelism:z.number().int().min(0).max(32)}),annotations:{readOnlyHint:true}
   },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.batch(x.reviewId,x.observedNativeParallelism)}));
   server.registerTool('panter_native_review_submit',{
@@ -556,7 +556,7 @@ const handler = createMcpHandler(() => {
         claim:bounded(2000),proofRefs:z.array(bounded(600)).min(1).max(12)})).max(80)})})
   },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.submitSolo(x.reviewId,x.slotId,x.report)}));
   server.registerTool('panter_native_review_progress',{
-    description:'Recover native 4R/JD slots, independent host-reported receipts and severe findings. Never marks review officially approved.',
+    description:'Recover native 4R/JD and GPT-A solo four-lens progress, severe findings and explicit unverified/independent status. Never marks review officially approved.',
     inputSchema:z.object({reviewId:z.uuid()}),annotations:{readOnlyHint:true}
   },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.status(x.reviewId)}));
   server.registerTool('panter_native_review_capabilities',{
