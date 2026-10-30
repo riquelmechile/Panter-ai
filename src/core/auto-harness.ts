@@ -28,7 +28,7 @@ export type HarnessMode='AUTO'|'GPT_A_ONLY';
 export type HarnessPhase='DISCOVER'|'DESIGN'|'IMPLEMENT'|'VERIFY'|'REVIEW'|'JUDGMENT';
 export type HarnessStep={id:string;phase:HarnessPhase;agentId:GentleAgentId|null;status:'PENDING'|'ISSUED'|'COMPLETE';
   execution?:'GPT_A_INLINE'|'GPT_A_NATIVE'|'REMOTE_A2A';remoteWorkId?:string;
-  result?:{summary:string;evidence:string[];runId?:string;digest:string};};
+  result?:{summary:string;evidence:string[];runId?:string;digest:string;verificationMode?:'SELF_UNVERIFIED'|'HOST_REPORTED_UNVERIFIED'};};
 export type HarnessRun={id:string;project:string;githubRepository?:string;githubPrNumber?:number;githubExpectedBase?:string;objective:string;key:string;inputDigest:string;permission:'READ_ONLY'|'WRITE_APPROVED';
   mode:HarnessMode; paths:string[]; risk:'LOW'|'HIGH'; reviewTier?:'passive'|'medium'|'high'; reason:string[]; candidateSha:string|null;
   reviewKind:'4r'|null; reviewId:string|null; reviewTransport:'NATIVE'|'REMOTE'|null;
@@ -282,10 +282,15 @@ export class AutomaticHarness {
       }
       if(step.phase==='VERIFY'){
         ensure(payload.candidateSha===r.candidateSha&&!!r.candidateSha,'Verifier must report exact candidate SHA');
-        ensure(!!payload.runId&&payload.runId!=='gpt-a'&&payload.runId!==r.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId&&payload.runId!==r.correctionRunId&&!(r.units??[]).some(u=>u.runId===payload.runId),
-          'Independent verifier run ID required');
+        if(step.execution==='GPT_A_INLINE'){
+          ensure(payload.runId==='gpt-a','Solo verifier must identify GPT-A itself; no fabricated independent run ID');
+        }else{
+          ensure(!!payload.runId&&payload.runId!=='gpt-a'&&payload.runId!==r.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId&&payload.runId!==r.correctionRunId&&!(r.units??[]).some(u=>u.runId===payload.runId),
+            'Independent verifier run ID required');
+        }
       }
-      step.status='COMPLETE';step.result={summary:payload.summary,evidence:payload.evidence,runId:payload.runId,digest};
+      step.status='COMPLETE';step.result={summary:payload.summary,evidence:payload.evidence,runId:payload.runId,digest,
+        verificationMode:step.phase==='VERIFY'?(step.execution==='GPT_A_INLINE'?'SELF_UNVERIFIED':'HOST_REPORTED_UNVERIFIED'):undefined};
       r.revision++;return r;
     });
   }
@@ -312,6 +317,10 @@ export class AutomaticHarness {
             const review=run.steps.find(step=>step.phase==='REVIEW');
             if(!review||review.status!=='COMPLETE')return;
             review.status='PENDING';run.reviewId=null;run.reviewTransport=null;
+            const verify=run.steps.find(step=>step.phase==='VERIFY');
+            if(verify?.result?.verificationMode==='SELF_UNVERIFIED'){
+              verify.status='PENDING';verify.result=undefined;verify.execution=undefined;verify.remoteWorkId=undefined;
+            }
             run.reviewAttempt=(run.reviewAttempt??0)+1;run.revision++;
           });
           return this.tick(runId,runtime);
@@ -322,6 +331,7 @@ export class AutomaticHarness {
       if(record.risk==='HIGH'&&nativeVerdict?.state!=='ACKNOWLEDGED'){
         const solo=record.reviewTransport==='NATIVE'&&record.reviewId?await this.native.status(record.reviewId):null;
         if(solo?.soloEvidenceComplete)return {...common,status:'SOLO_4R_COMPLETED_UNVERIFIED',reviewId:record.reviewId??undefined,review:solo,
+          verificationMode:record.steps.find(s=>s.phase==='VERIFY')?.result?.verificationMode??null,
           rdd:nativeVerdict,next:[],approved:false,
           instruction:'GPT-A completed all four self-review lenses. These are not independent: a new signed native 4R is still required for RDD approval and merge.'};
         return {...common,status:'AWAITING_PANTER_RDD_AUTHORITY',rdd:nativeVerdict,next:[]};
@@ -528,7 +538,7 @@ export class AutomaticHarness {
     const objective=phase.phase==='DISCOVER'?`Explore the repository for: ${brief}. Return exact permitted edit surfaces, risks and path:line evidence. Do not write.`:
       phase.phase==='DESIGN'?`Plan the smallest authorized change for: ${brief}. Preserve exact specification, acceptance checks and ODD task IDs. Confirm scoped edit surfaces: ${record.paths.join(', ')||'unknown; do not write yet'}.`:
       phase.phase==='IMPLEMENT'?`Implement the authorized scoped change: ${brief}. Allowed surfaces: ${record.paths.join(', ')}. Test first when applicable; return the exact commit SHA for high-risk review.`:
-      `Verify the exact frozen candidate ${record.candidateSha} against: ${brief}. Independently reproduce checks, read-only; report run identity and evidence.`;
+      `Verify the exact frozen candidate ${record.candidateSha} against: ${brief}. If the host supplies an actual verifier, report its independent run ID. Otherwise perform a GPT-A self-check inline, report runId=gpt-a, and label evidence SELF_UNVERIFIED.`;
     const packetObjective=objective.length>5800?objective.slice(0,5700)+' [Retrieve complete objective and paths from panter_harness_status.]':objective;
     if(phase.phase==='DESIGN'){
       await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;if(st.status==='PENDING'){st.status='ISSUED';r.revision++;}});
