@@ -167,3 +167,25 @@ test('automatic final tick checks target GitHub PR evidence without manual agent
     assert.equal(result.approved,false);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test('can bind a later observed PR to an existing GitHub run without changing repository or restart',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'panter-github-later-'));
+ const mock=(async()=>({ok:false,status:404,text:async()=>'{}'} as Response)) as typeof fetch;
+ try{
+  const m=await MeshEngine.open(dir),n=await NativeSubagentReview.open(dir);
+  const g=new GitHubDeliveryGate({allowedRepositories:['example/project'],requiredChecks:['ci']},mock);
+  const h=await AutomaticHarness.open(dir,m,n,g);
+  const run=await h.start({project:'website',githubRepository:'example/project',objective:'Fix copy',idempotencyKey:'before-pr',writesAuthorized:true,changeSurfaces:['src/copy.ts']});
+  const task=await h.tick(run.id,solo);
+  const finished=await h.report(run.id,task.phaseId!,{summary:'Edited and tested',evidence:['test output'],candidateSha:sha});
+  assert.equal((await h.tick(run.id,solo)).status,'AWAITING_GITHUB_PR_EVIDENCE');
+  const bound=await h.bindGithub(run.id,{repository:'example/project',prNumber:123,expectedBase:'main'},finished.revision);
+  assert.equal(bound.githubPrNumber,123);
+  const retry=await h.bindGithub(run.id,{repository:'example/project',prNumber:123,expectedBase:'main'},finished.revision);
+  assert.equal(retry.revision,bound.revision);
+  await assert.rejects(h.bindGithub(run.id,{repository:'other/project',prNumber:123},bound.revision),/destination not allowed/);
+  await assert.rejects(h.bindGithub(run.id,{repository:'example/project',prNumber:124},bound.revision),/binding conflict/);
+  const next=await h.tick(run.id,solo);
+  assert.equal(next.status,'GITHUB_GATE_BLOCKED');assert.equal((next.github as {state:string}).state,'PENDING');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
