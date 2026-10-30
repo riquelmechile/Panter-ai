@@ -171,3 +171,5 @@ test('signed review must cover exact report content, not just the declared run i
  const verdict=await rdd.assess(tx.id);
  assert.equal(verdict.record.state,'NEEDS_RUNNER_ATTESTATION');assert.equal(verdict.approved,false);
 }));
+
+test('RDD forwards operator-approved single-PR strategy for oversized bootstrap',()=>setup(async({native,rdd})=>{const v=await input(native);const tx=await rdd.begin({...v.begin,deliveryStrategy:'single-pr'});await reportAll(native,v.review);const x=await rdd.assess(tx.id);assert.equal(x.github?.state,'REVIEWABLE');assert.equal(x.approved,true);},gate({additions:750})));
