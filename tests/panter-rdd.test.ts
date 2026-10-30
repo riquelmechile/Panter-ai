@@ -223,3 +223,18 @@ test('automatic harness includes parallel unit authors when rejecting signed sel
  assert.ok(r.implementerRunIds?.includes('other-builder-child'));
  assert.ok(r.implementerRunIds?.includes('parent-integration'));
 }));
+
+test('four GPT-A solo self-review lenses cannot be converted into independent RDD approval',()=>setup(async({native,rdd})=>{
+ const review=await input(native);
+ const tx=await rdd.begin(review.begin);
+ for(const slot of review.review.slots){
+  await native.submitSolo(review.review.reviewId,slot.slotId,{agentId:slot.agentId,
+   candidateSha:sha,packetDigest:slot.packetDigest,
+   evidence:['GPT-A inspected the source with this lens'],findings:[]});
+ }
+ const result=await rdd.assess(tx.id);
+ assert.equal(result.approved,false);
+ assert.equal(result.record.state,'NEEDS_REVIEW_EVIDENCE');
+ assert.equal((await native.status(review.review.reviewId)).soloEvidenceComplete,true);
+ await assert.rejects(rdd.acknowledge(tx.id,result.record.revision),/Cannot acknowledge/);
+}));
