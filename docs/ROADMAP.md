@@ -67,3 +67,12 @@
 - [ ] Connect a **supported** native Gentle AI review runtime to a protected Oracle Git worktree and complete real consent, capture, correction, final acknowledgement and release checks. Read-only bridge is not full RDD lifecycle.
 - [ ] Validate real GPT-A native agents and concurrency reports in ChatGPT. A model-selected profile is not evidence that workers were spawned.
 - [ ] Durable multi-replica grants, verified CI/Git evidence and host wake acceptance.
+
+## v0.11 native-subagent review handoffs
+- [x] Persist frozen 4R or two blind Judgment Day slots, each with a versioned MCP skill packet and candidate SHA.
+- [x] Batch outstanding work for genuine host-owned parallel native children; no remote peer required.
+- [x] Collect independently reported child runs with distinct IDs, bounded structured findings and SHA-bound immutable receipts.
+- [x] Reject report tampering, stale packets, conflicting retries and fabricated server approval; recover across restarts.
+- [ ] Integrate actual ChatGPT host-native child launch and verify independent execution evidence and throughput.
+- [ ] Wire full official Gentle AI Go RDD v2 consent/transition/fix/validation/acknowledgement on a trusted Git runner; current bridge is read-only.
+- [ ] Add multi-process transactional storage and isolate correction worktrees before production.

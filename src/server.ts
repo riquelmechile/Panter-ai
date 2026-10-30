@@ -16,6 +16,7 @@ import { AgentEngine, AGENT_ROLES, routeFlow } from './core/agents.js';
 import { gentleCatalog, readAgent, readSkill, readOrchestratorSection, GENTLE_ORCHESTRATOR_SECTIONS, GENTLE_AGENTS, GENTLE_SKILLS, REVIEW_4R, JUDGMENT_DAY } from './core/gentle-catalog.js';
 import { planHostNative, nativePacket, nativeOddInstructions } from './core/native-fallback.js';
 import { NativeReviewBridge, assessMeshReview } from './core/native-review.js';
+import { NativeSubagentReview } from './core/native-review-workflow.js';
 
 const port = Number(process.env.PANTER_PORT ?? '8080');
 const bind = process.env.PANTER_BIND_HOST ?? '127.0.0.1';
@@ -56,6 +57,7 @@ async function execute<T>(work: () => Promise<T>) {
 const store = await PanterStore.open(dataDir);
 const agents = await AgentEngine.open(dataDir, store);
 const mesh = await MeshEngine.open(dataDir);
+const nativeSubagentReview = await NativeSubagentReview.open(dataDir);
 const nativeReview = await NativeReviewBridge.open({enabled:process.env.PANTER_NATIVE_REVIEW_ENABLED==='1',binary:process.env.PANTER_GENTLE_AI_BIN??'gentle-ai',repositoryRoot:process.env.PANTER_NATIVE_REVIEW_WORKTREE??''});
 const engramEnabled = process.env.PANTER_ENGRAM_ENABLED === '1';
 const memory = engramEnabled ? await openEngramBridge(dataDir, process.env.PANTER_ENGRAM_COMMAND ?? 'engram') : null;
@@ -71,9 +73,9 @@ const missionStatus = z.enum(['DRAFT', 'READY', 'RUNNING', 'VERIFYING', 'DONE', 
 const bounded = (max = 2048) => z.string().trim().min(1).max(max);
 
 const handler = createMcpHandler(() => {
-  const server = new McpServer({ name: 'panter-ai', version: '0.9.0' }, {
+  const server = new McpServer({ name: 'panter-ai', version: '0.11.0' }, {
     capabilities: { resources: { subscribe: true } },
-    instructions: 'Panter-ai is a remote MCP engineering workspace. Reasoning, model choice and native subagents belong to the connected AI host. The model and effort policy returned by panter_host_policy is only REQUESTED, never proof. For meaningful work use panter_flow_route to choose inline versus coordinated execution, then create a durable flow only when useful. The parent session coordinates, and focused native host agents perform scoped exploration, implementation, verification and review. Use panter_agent_packet to obtain bounded context; never imply an agent was launched merely because its task was enqueued. Worker completions are reported evidence, not trusted verification. The server runs no model inference; a separately enabled read-only Gentle AI review CLI bridge may query a fixed operator worktree. GPT-A owns orchestration. If the user explicitly requests GPT-A-only work, NEVER delegate to remote peers, even if connected. GPT-A MUST request maximum native model/effort, fastest host-supported native worker processing and highest observed safe parallelism while retaining quality. When host capacity is lower, report the missing capability without claiming full compliance. If remote peers are unavailable or unknown, GPT-A must CONTINUE ODD using panter_native_mission_create, panter_native_flow_start, panter_native_phase_enqueue/claim/complete and panter_native_plan/native_packet, or native subagents only when its host actually offers them. Never require a remote binding to carry out local steps. The five hosts are optional capacity, not a prerequisite. At first setup, ask the user to assign the desired host and model for each Gentle Shell specialist and open panter_agent_studio; store each specialist binding separately. Resolve only the selected MCP-hosted skills and dispatch using panter_specialist_delegate. Use panter_odd_route for risk-based ODD decisions, panter_review_start for durable 4R/Judgment Day fanout, and panter_mesh_inbox for results. Never invent host wake, native subagents, or independent self-review. A completed model review is not a native RDD approval. Use panter_review_evidence and panter_native_review_status for proof when a trusted native runner exists; fail closed when unavailable. Do not claim a test, review, wake or execution succeeded without external evidence.'
+    instructions: 'Panter-ai is a remote MCP engineering workspace. Reasoning, model choice and native subagents belong to the connected AI host. The model and effort policy returned by panter_host_policy is only REQUESTED, never proof. For meaningful work use panter_flow_route to choose inline versus coordinated execution, then create a durable flow only when useful. The parent session coordinates, and focused native host agents perform scoped exploration, implementation, verification and review. Use panter_agent_packet to obtain bounded context; never imply an agent was launched merely because its task was enqueued. Worker completions are reported evidence, not trusted verification. The server runs no model inference; a separately enabled read-only Gentle AI review CLI bridge may query a fixed operator worktree. GPT-A owns orchestration. If the user explicitly requests GPT-A-only work, NEVER delegate to remote peers, even if connected. GPT-A MUST request maximum native model/effort, fastest host-supported native worker processing and highest observed safe parallelism while retaining quality. When host capacity is lower, report the missing capability without claiming full compliance. If remote peers are unavailable or unknown, GPT-A must CONTINUE ODD using panter_native_mission_create, panter_native_flow_start, panter_native_phase_enqueue/claim/complete and panter_native_plan/native_packet, or native subagents only when its host actually offers them. Never require a remote binding to carry out local steps. The five hosts are optional capacity, not a prerequisite. At first setup, ask the user to assign the desired host and model for each Gentle Shell specialist and open panter_agent_studio; store each specialist binding separately. Resolve only the selected MCP-hosted skills and dispatch using panter_specialist_delegate. Use panter_odd_route for risk-based ODD decisions, panter_review_start for durable 4R/Judgment Day fanout, and panter_mesh_inbox for results. Never invent host wake, native subagents, or independent self-review. A completed model review is not a native RDD approval. In GPT_A_ONLY mode use panter_native_review_create, panter_native_review_batch, panter_native_review_packet, panter_native_review_submit and panter_native_review_progress for 4R or blind Judgment Day subagent slots. Each slot requires a distinct host-native subagent execution and exact candidate/packet digest; do not report native subagents started without observing the host action. A host-reported run ID is not verified independence or official RDD authority. Use panter_review_evidence and panter_native_review_status for proof when a trusted native runner exists; fail closed when unavailable. Do not claim a test, review, wake or execution succeeded without external evidence.'
   });
 
   // Preserve Zod schema inference for legacy admin tools while enforcing
@@ -394,6 +396,29 @@ const handler = createMcpHandler(() => {
   server.registerTool('panter_review_evidence',{
     description:'Check exact-SHA reviewer reports and terminal receipts for one 4R / Judgment Day session. Never grants native review approval.',inputSchema:z.object({reviewId:z.uuid()}),annotations:{readOnlyHint:true}
   },async ({reviewId})=>execute(async()=>{requireLeader();const state=await mesh.reviewStatus(hostPrincipal(),reviewId);return assessMeshReview({candidateSha:state.review.candidateSha,kind:state.review.kind,work:state.work})}));
+  // GPT-A-owned subagent review. All four 4R lenses (or two blind JD judges)
+  // are prepared as separate frozen packets. GPT-A asks its host to launch
+  // native subagents in parallel; the MCP does not start model inference.
+  server.registerTool('panter_native_review_create',{
+    description:'GPT-A prepares four independent 4R slots or two blind Judgment Day slots, with versioned MCP skills and frozen candidate SHA. Works in GPT_A_ONLY without any remote workers.',
+    inputSchema:z.object({missionId:bounded(120),kind:z.enum(['4r','judgment-day']),objective:bounded(6000),candidateSha:z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/),idempotencyKey:bounded(160)})
+  },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.create(x)}));
+  server.registerTool('panter_native_review_packet',{
+    description:'Retrieve exactly one frozen reviewer/skill packet. Blind Judge A/B never see each other outputs; no model is started by the MCP.',
+    inputSchema:z.object({reviewId:z.uuid(),slotId:z.uuid()}),annotations:{readOnlyHint:true}
+  },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.packet(x.reviewId,x.slotId)}));
+  server.registerTool('panter_native_review_batch',{
+    description:'GPT-A gets all ready 4R or blind Judgment Day native child packets in one call, with a host-observed parallel limit. The MCP does not launch children or route to remote peers.',
+    inputSchema:z.object({reviewId:z.uuid(),observedNativeParallelism:z.number().int().min(0).max(32)}),annotations:{readOnlyHint:true}
+  },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.batch(x.reviewId,x.observedNativeParallelism)}));
+  server.registerTool('panter_native_review_submit',{
+    description:'Record one host-reported native subagent run and structured SHA/packet-bound evidence. Immutable and idempotent; cannot grant RDD approval.',
+    inputSchema:z.object({reviewId:z.uuid(),slotId:z.uuid(),report:z.object({agentId:bounded(100),candidateSha:z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/),packetDigest:z.string().regex(/^[0-9a-f]{64}$/),subagentRunId:bounded(160),evidence:z.array(bounded(1000)).min(1).max(40),findings:z.array(z.object({id:bounded(100),location:bounded(400),severity:z.enum(['BLOCKER','CRITICAL','WARNING','SUGGESTION']),claim:bounded(2000),proofRefs:z.array(bounded(600)).min(1).max(12)})).max(80)})})
+  },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.submit(x.reviewId,x.slotId,x.report)}));
+  server.registerTool('panter_native_review_progress',{
+    description:'Recover native 4R/JD slots, independent host-reported receipts and severe findings. Never marks review officially approved.',
+    inputSchema:z.object({reviewId:z.uuid()}),annotations:{readOnlyHint:true}
+  },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.status(x.reviewId)}));
   server.registerTool('panter_native_review_capabilities',{
     description:'Read-only capabilities query of the official Gentle AI RDD binary in an operator-configured local Git worktree. Not available by default.',inputSchema:z.object({}),annotations:{readOnlyHint:true}
   },async()=>execute(async()=>{requireLeader();return nativeReview.capabilities()}));
@@ -450,7 +475,7 @@ const nodeHandler = toNodeHandler(handler);
 const http = createServer(async (req, res) => {
   if (req.url === '/health' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-    res.end(JSON.stringify({ status: 'ok', name: 'panter-ai', version: '0.9.0' }));
+    res.end(JSON.stringify({ status: 'ok', name: 'panter-ai', version: '0.11.0' }));
     return;
   }
   if (oauth && req.method === 'GET' && (req.url === '/.well-known/oauth-protected-resource' || req.url === '/.well-known/oauth-protected-resource/mcp')) {
