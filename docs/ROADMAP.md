@@ -55,3 +55,15 @@
 - [ ] Security review and OAuth profile conformance audit before production/public exposure.
 - [ ] Prove OAuth/consent and `subscriptions/listen` in the five real connected apps; **MCP listening is not automatically a host wake guarantee**.
 - [ ] Durable multi-process SQL implementation, operator dashboard for revoking connections, and per-mission grants.
+
+
+## v0.9: GPT-A without workforce and native RDD preflight
+
+- [x] GPT-A ODD fallback plan without remote host credentials, native-subagent selection only when the host reports actual support, and inline sequential fallback.
+- [x] Inline/native-agent packets read specialist definitions and skills directly from the MCP without a remote binding.
+- [x] Reject overlapping parallel writer scopes, unsigned model approvals and incorrect candidate SHA reports.
+- [x] Optional operator-pinned read-only bridge to official Gentle AI Go review-integration/v2 (capabilities, assess, status).
+- [x] Fail closed when the native reviewer, host tools or remote peers are unavailable.
+- [ ] Connect a **supported** native Gentle AI review runtime to a protected Oracle Git worktree and complete real consent, capture, correction, final acknowledgement and release checks. Read-only bridge is not full RDD lifecycle.
+- [ ] Validate real GPT-A native agents and concurrency reports in ChatGPT. A model-selected profile is not evidence that workers were spawned.
+- [ ] Durable multi-replica grants, verified CI/Git evidence and host wake acceptance.
