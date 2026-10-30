@@ -22,18 +22,18 @@ jobs:
       - run: npm run smoke:oauth
       - run: npm run smoke:embedded
   arm64-image:
-    runs-on: ubuntu-latest
-    # QEMU arm64 builds normally finish in ~2 min; a hung buildx step
-    # previously blocked the PR for 30+ min. Fail fast and re-run instead.
-    timeout-minutes: 25
+    # Native GitHub-hosted ARM64 runner (free for public repositories), the
+    # same architecture as the Oracle Ampere VM. QEMU emulation on x86 hung
+    # repeatedly in the buildx step, so no emulation is used here.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
+      - name: Confirm native ARM64 runner
+        run: test "$(uname -m)" = "aarch64"
       - uses: docker/setup-buildx-action@v3
       - name: Build Oracle ARM64 image without publishing
-        timeout-minutes: 15
+        timeout-minutes: 10
         run: docker buildx build --platform linux/arm64 --load -t panter-ai:arm64-ci .
       - name: Verify actual ARM64 Panter OAuth HTTP startup and unauthorized MCP
         run: |
