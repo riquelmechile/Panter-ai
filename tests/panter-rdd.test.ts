@@ -3,12 +3,17 @@ import assert from 'node:assert/strict';
 import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {generateKeyPairSync,sign} from 'node:crypto';
+import {attestedMessage} from '../src/core/review-attestation.js';
 import {PanterRdd} from '../src/core/panter-rdd.js';
 import {NativeSubagentReview} from '../src/core/native-review-workflow.js';
 import {MeshEngine} from '../src/core/mesh.js';
 import {GitHubDeliveryGate} from '../src/core/github-delivery.js';
 
 const sha='a'.repeat(40),newSha='b'.repeat(40),repo='example/project';
+const keys=generateKeyPairSync('ed25519');
+const publicKey=keys.publicKey.export({type:'spki',format:'pem'}).toString();
+const runnerKeys={trusted:publicKey};
 function gate(breaks:{head?:string;ci?:string;labels?:string[]}={}){
  const pr={state:'open',draft:true,head:{sha:breaks.head??sha,ref:'feat/rdd',repo:{full_name:repo}},base:{ref:'main'},
    body:'Refs #22',labels:(breaks.labels??['type:feature']).map(name=>({name})),additions:50,deletions:20,commits:1};
@@ -21,7 +26,7 @@ function gate(breaks:{head?:string;ci?:string;labels?:string[]}={}){
 }
 async function setup(fn:(s:{native:NativeSubagentReview;mesh:MeshEngine;rdd:PanterRdd;dir:string})=>Promise<void>, g=gate()){
  const dir=await mkdtemp(join(tmpdir(),'panter-rdd-'));
- try{const native=await NativeSubagentReview.open(dir),mesh=await MeshEngine.open(dir),rdd=await PanterRdd.open(dir,native,mesh,g);
+ try{const native=await NativeSubagentReview.open(dir),mesh=await MeshEngine.open(dir),rdd=await PanterRdd.open(dir,native,mesh,g,runnerKeys);
   await fn({native,mesh,rdd,dir});}finally{await rm(dir,{recursive:true,force:true});}
 }
 async function input(native:NativeSubagentReview, shaValue=sha, suffix='base'){
@@ -31,9 +36,11 @@ async function input(native:NativeSubagentReview, shaValue=sha, suffix='base'){
 async function reportAll(native:NativeSubagentReview,review:Awaited<ReturnType<NativeSubagentReview['create']>>,withSevere=false){
  for(let i=0;i<review.slots.length;i++){
   const slot=review.slots[i]!;
-  await native.submit(review.reviewId,slot.slotId,{agentId:slot.agentId,candidateSha:review.candidateSha,packetDigest:slot.packetDigest,
+  const report={agentId:slot.agentId,candidateSha:review.candidateSha,packetDigest:slot.packetDigest,
    subagentRunId:`independent-child-${i}`,evidence:[`Inspected frozen candidate ${review.candidateSha} and reviewed source paths`],
-   findings:withSevere&&i===0?[{id:'RISK-1',location:'src/security.ts:1',severity:'CRITICAL',claim:'Authorization bypass',proofRefs:['changed-hunk:src/security.ts:1']}]:[]});
+   findings:withSevere&&i===0?[{id:'RISK-1',location:'src/security.ts:1',severity:'CRITICAL' as const,claim:'Authorization bypass',proofRefs:['changed-hunk:src/security.ts:1']}]:[]};
+  const signature=sign(null,attestedMessage({reviewId:review.reviewId,slotId:slot.slotId,...report}),keys.privateKey).toString('base64url');
+  await native.submit(review.reviewId,slot.slotId,{...report,attestation:{keyId:'trusted',signature}});
  }
 }
 test('self-hosted RDD never approves before distinct review receipts exist',()=>setup(async({native,rdd})=>{
@@ -46,10 +53,10 @@ test('clean independent native reports + verified exact SHA Github checks approv
  await reportAll(native,v.review);
  const result=await rdd.assess(tx.id);assert.equal(result.approved,true);
  assert.equal(result.record.state,'APPROVED_PENDING_ACK');assert.equal(result.github?.state,'REVIEWABLE');
- assert.equal(result.assurance,'GITHUB_CHECKS_VERIFIED__REVIEW_RUNS_HOST_REPORTED');
+ assert.equal(result.assurance,'GITHUB_CHECKS_VERIFIED__RUNNER_SIGNED');
  const acknowledged=await rdd.acknowledge(tx.id,result.record.revision);
  assert.equal(acknowledged.state,'ACKNOWLEDGED');
- const again=await PanterRdd.open(dir,native,mesh,gate());
+ const again=await PanterRdd.open(dir,native,mesh,gate(),runnerKeys);
  assert.equal((await again.assess(tx.id)).record.state,'ACKNOWLEDGED');
 }));
 test('critical finding requires correction rather than model approval',()=>setup(async({native,rdd})=>{
@@ -116,4 +123,51 @@ test('automatic GPT-A-only harness drives native 4R into self-hosted RDD acknowl
  assert.equal(current?.state,'ACKNOWLEDGED');
  assert.equal((await harness.get(run.id))?.steps.at(-1)?.status,'COMPLETE');
  assert.equal(outcome.approved,false); // no automatic merge/deploy privilege
+}));
+
+test('clean unsigned model reports never gain review authority despite passing GitHub CI',()=>setup(async({native,rdd})=>{
+ const v=await input(native);const tx=await rdd.begin(v.begin);
+ for(let i=0;i<v.review.slots.length;i++){
+  const slot=v.review.slots[i]!;
+  await native.submit(v.review.reviewId,slot.slotId,{agentId:slot.agentId,candidateSha:sha,packetDigest:slot.packetDigest,
+    subagentRunId:`model-declared-${i}`,evidence:['Read candidate'],findings:[]});
+ }
+ const verdict=await rdd.assess(tx.id);
+ assert.equal(verdict.approved,false);assert.equal(verdict.record.state,'NEEDS_RUNNER_ATTESTATION');
+ await assert.rejects(rdd.acknowledge(tx.id,verdict.record.revision),/Cannot acknowledge/);
+}));
+
+test('explicit Judgment Day runs after approved 4R, as a separate blind additional audit',()=>setup(async({native,mesh,rdd,dir})=>{
+ const {AutomaticHarness}=await import('../src/core/auto-harness.js');
+ const h=await AutomaticHarness.open(dir,mesh,native,gate(),undefined,rdd);
+ const run=await h.start({project:'app',githubRepository:repo,githubPrNumber:12,objective:'Fix critical security',idempotencyKey:'with-jd',
+   writesAuthorized:true,changeSurfaces:['src/auth.ts'],coordinationMode:'GPT_A_ONLY',judgmentDayRequested:true});
+ const capacity={nativeSubagents:true,maxParallelSubagents:4,toolsAvailable:true};
+ let step=await h.tick(run.id,capacity);await h.report(run.id,step.phaseId!,{summary:'Designed',evidence:['Plan']});
+ step=await h.tick(run.id,capacity);await h.report(run.id,step.phaseId!,{summary:'Implemented',evidence:['Tests'],candidateSha:sha,runId:'builder-1'});
+ step=await h.tick(run.id,capacity);await h.report(run.id,step.phaseId!,{summary:'Verified independently',evidence:['Build'],candidateSha:sha,runId:'verifier-1'});
+ step=await h.tick(run.id,capacity);await reportAll(native,{reviewId:step.reviewId!,candidateSha:sha,
+   slots:(await native.status(step.reviewId!)).slots} as Awaited<ReturnType<NativeSubagentReview['create']>>);
+ step=await h.tick(run.id,capacity);
+ assert.equal(step.status,'READY_FOR_HOST_NATIVE_DISPATCH');
+ assert.deepEqual(step.next.map(x=>x.agentId),['jd-judge-a','jd-judge-b']);
+ assert.notEqual(step.reviewId,(await h.get(run.id))?.reviewId);
+ const j=await native.status(step.reviewId!);await reportAll(native,{reviewId:j.reviewId,candidateSha:j.candidateSha,
+   slots:j.slots} as Awaited<ReturnType<NativeSubagentReview['create']>>);
+ const last=await h.tick(run.id,capacity);
+ assert.equal(last.status,'PANTER_RDD_REVIEWED_NO_DELIVERY_AUTHORITY');
+ assert.ok((await h.get(run.id))?.steps.every(x=>x.status==='COMPLETE'));
+}));
+
+test('signed review must cover exact report content, not just the declared run identity',()=>setup(async({native,rdd})=>{
+ const v=await input(native);const tx=await rdd.begin(v.begin);
+ for(let i=0;i<v.review.slots.length;i++){
+  const slot=v.review.slots[i]!;
+  const report={agentId:slot.agentId,candidateSha:sha,packetDigest:slot.packetDigest,
+    subagentRunId:`signed-child-${i}`,evidence:['Observed valid state'],findings:[]};
+  const signature=sign(null,attestedMessage({reviewId:v.review.reviewId,slotId:slot.slotId,...report}),keys.privateKey).toString('base64url');
+  await native.submit(v.review.reviewId,slot.slotId,{...report,evidence:['Forged different evidence'],attestation:{keyId:'trusted',signature}});
+ }
+ const verdict=await rdd.assess(tx.id);
+ assert.equal(verdict.record.state,'NEEDS_RUNNER_ATTESTATION');assert.equal(verdict.approved,false);
 }));

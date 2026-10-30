@@ -9,31 +9,34 @@ import type { NativeSubagentReview } from './native-review-workflow.js';
 import type { MeshEngine } from './mesh.js';
 import { assessMeshReview } from './native-review.js';
 import type { GitHubDeliveryGate, GitHubDecision } from './github-delivery.js';
+import type { LocalGitVerifier, LocalGitDecision } from './local-git-verifier.js';
+import { verifyRunnerSignature } from './review-attestation.js';
 
 const validSha = /^[0-9a-f]{40}$/;
 const validRepo = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const digest = (v:unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 function demand(v:unknown,m:string):asserts v { if(!v)throw new Error(m); }
-export type PanterRddState = 'COLLECTING'|'NEEDS_CORRECTION'|'NEEDS_REVIEW_EVIDENCE'|'NEEDS_GITHUB_PROOF'|'APPROVED_PENDING_ACK'|'ACKNOWLEDGED'|'SUPERSEDED';
+export type PanterRddState = 'COLLECTING'|'NEEDS_CORRECTION'|'NEEDS_REVIEW_EVIDENCE'|'NEEDS_GITHUB_PROOF'|'NEEDS_RUNNER_ATTESTATION'|'APPROVED_PENDING_ACK'|'ACKNOWLEDGED'|'SUPERSEDED';
 export type RddSource = 'NATIVE' | 'REMOTE';
 export type PanterRddRecord = {
   id:string; missionId:string; reviewId:string; source:RddSource; candidateSha:string; kind:'4r'|'judgment-day';
-  implementerRunId?:string; repository?:string; prNumber?:number; expectedBase?:string;
+  implementerRunId?:string; repository?:string; prNumber?:number; expectedBase?:string; localProject?:string; deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main';
   state:PanterRddState; evidenceDigest:string|null; githubEvidenceDigest:string|null;
   revision:number; createdAt:string; updatedAt:string; acknowledgedAt:string|null; supersededBy:string|null;
 };
 type Store={version:1;reviews:PanterRddRecord[]};
 type Begin={missionId:string;reviewId:string;source:RddSource;candidateSha:string;kind:'4r'|'judgment-day';
-  implementerRunId?:string; repository?:string;prNumber?:number;expectedBase?:string};
+  implementerRunId?:string; repository?:string;prNumber?:number;expectedBase?:string;localProject?:string;deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main'};
 
 export class PanterRdd {
   private data:Store={version:1,reviews:[]};
   private serial:Promise<unknown>=Promise.resolve();
   private constructor(private readonly file:string,private readonly native:NativeSubagentReview,
-    private readonly mesh:MeshEngine,private readonly github:GitHubDeliveryGate|null){}
-  static async open(dir:string,native:NativeSubagentReview,mesh:MeshEngine,github:GitHubDeliveryGate|null=null){
+    private readonly mesh:MeshEngine,private readonly github:GitHubDeliveryGate|null,
+    private readonly runnerKeys:Readonly<Record<string,string>>,private readonly localGit:LocalGitVerifier|null){}
+  static async open(dir:string,native:NativeSubagentReview,mesh:MeshEngine,github:GitHubDeliveryGate|null=null,runnerKeys:Readonly<Record<string,string>>={},localGit:LocalGitVerifier|null=null){
     await mkdir(resolve(dir),{recursive:true,mode:0o700});
-    const a=new PanterRdd(join(resolve(dir),'panter-rdd.json'),native,mesh,github);
+    const a=new PanterRdd(join(resolve(dir),'panter-rdd.json'),native,mesh,github,runnerKeys,localGit);
     try{
       const d:unknown=JSON.parse(await readFile(a.file,'utf8'));
       demand(d&&typeof d==='object'&&'version' in d&&d.version===1&&'reviews' in d&&Array.isArray(d.reviews),'Invalid Panter-RDD ledger');
@@ -82,10 +85,12 @@ export class PanterRdd {
         demand(!original.repository||original.repository===i.repository,'RDD repository binding conflict');
         demand(!original.prNumber||original.prNumber===i.prNumber,'RDD PR binding conflict');
         demand(!original.expectedBase||original.expectedBase===i.expectedBase,'RDD base binding conflict');
+        demand(!original.deliveryStrategy||original.deliveryStrategy===i.deliveryStrategy,'RDD delivery strategy conflict');
+        demand(!original.localProject||original.localProject===i.localProject,'RDD local project binding conflict');
         // The harness may attach an authorized PR after the reviewers finished.
         // Metadata binding can only progress empty -> fixed; evidence/ack resets.
-        if((!original.repository&&i.repository)||(!original.prNumber&&i.prNumber)||(!original.expectedBase&&i.expectedBase)){
-          original.repository=i.repository;original.prNumber=i.prNumber;original.expectedBase=i.expectedBase;
+        if((!original.repository&&i.repository)||(!original.prNumber&&i.prNumber)||(!original.expectedBase&&i.expectedBase)||(!original.deliveryStrategy&&i.deliveryStrategy)||(!original.localProject&&i.localProject)){
+          original.repository=i.repository;original.prNumber=i.prNumber;original.expectedBase=i.expectedBase;original.deliveryStrategy=i.deliveryStrategy;original.localProject=i.localProject;
           original.state='COLLECTING';original.evidenceDigest=null;original.githubEvidenceDigest=null;
           original.acknowledgedAt=null;original.revision++;original.updatedAt=new Date().toISOString();
         }
@@ -103,7 +108,7 @@ export class PanterRdd {
   async assess(id:string){
     const current=await this.get(id);demand(current,'Unknown Panter-RDD transaction');
     if(current.state==='SUPERSEDED')return {record:current,reason:'A new candidate superseded this review',approved:false};
-    let severe=0,complete=false,independence=false,receipts:string[]=[];
+    let severe=0,complete=false,independence=false,runnerAttested=false,receipts:string[]=[];
     if(current.source==='NATIVE'){
       const r=await this.native.status(current.reviewId);
       demand(r.candidateSha===current.candidateSha&&r.missionId===current.missionId&&r.kind===current.kind,'Native review target changed');
@@ -111,6 +116,9 @@ export class PanterRdd {
       complete=r.evidenceComplete&&slots.every(s=>s.state==='REPORTED'&&/^[0-9a-f]{64}$/.test(s.receiptDigest??''));
       const runs=slots.map(s=>s.subagentRunId).filter((v):v is string=>typeof v==='string');
       independence=complete&&runs.length===slots.length&&new Set(runs).size===runs.length&&runs.every(v=>v!==current.implementerRunId&&v!=='gpt-a');
+      runnerAttested=independence&&slots.every(slot=>verifyRunnerSignature({reviewId:current.reviewId,slotId:slot.slotId,agentId:slot.agentId,
+        candidateSha:current.candidateSha,packetDigest:slot.packetDigest,subagentRunId:slot.subagentRunId!,
+        evidence:slot.evidence,findings:slot.findings},slot.attestation??undefined,this.runnerKeys));
       severe=r.severeFindings.length;
       receipts=slots.map(s=>s.receiptDigest??'');
     }else{
@@ -121,17 +129,24 @@ export class PanterRdd {
       receipts=r.work.map(w=>w.receiptDigest??'');
       // Host identities are authenticated by MCP, but model execution itself is not independently attested.
       independence=complete&&new Set(r.work.map(w=>w.host)).size===r.work.length&&r.work.every(w=>w.host!=='gpt-a');
+      // An authenticated MCP client is NOT a cryptographic attestment of a reviewer execution.
+      runnerAttested=false;
       severe=0; // Any unparsed/missing findings are not a clean result: they fail closed at the evidence gate below.
       if(complete)for(const w of r.work){try{const data=JSON.parse(w.result??'');if(Array.isArray(data.findings))severe+=data.findings.filter((f:{severity?:string})=>f.severity==='CRITICAL'||f.severity==='BLOCKER').length;else complete=false;}catch{complete=false;}}
     }
     const evidenceHash=complete&&independence?digest({id:current.reviewId,sha:current.candidateSha,receipts}):null;
     let github:GitHubDecision|null=null;
-    if(complete&&independence&&severe===0&&current.repository&&current.prNumber&&this.github){
-      github=await this.github.inspect({repository:current.repository,prNumber:current.prNumber,expectedSha:current.candidateSha,expectedBase:current.expectedBase});
+    let local:LocalGitDecision|null=null;
+    if(complete&&independence&&runnerAttested&&severe===0&&current.repository&&current.prNumber&&this.github){
+      github=await this.github.inspect({repository:current.repository,prNumber:current.prNumber,expectedSha:current.candidateSha,expectedBase:current.expectedBase,deliveryStrategy:current.deliveryStrategy});
     }
-    const state:PanterRddState=!complete||!independence?'NEEDS_REVIEW_EVIDENCE':severe?'NEEDS_CORRECTION':
-      github?.state==='REVIEWABLE'?'APPROVED_PENDING_ACK':'NEEDS_GITHUB_PROOF';
-    const githubHash=github?.state==='REVIEWABLE'?digest({sha:github.headSha,checks:github.satisfied,pr:current.prNumber}):null;
+    if(complete&&independence&&runnerAttested&&severe===0&&!current.prNumber&&current.localProject&&this.localGit)
+      local=await this.localGit.inspect(current.localProject,current.candidateSha);
+    const hasTrustedProof=github?.state==='REVIEWABLE'||local?.state==='REVIEWABLE';
+    const state:PanterRddState=!complete||!independence?'NEEDS_REVIEW_EVIDENCE':severe?'NEEDS_CORRECTION':!runnerAttested?'NEEDS_RUNNER_ATTESTATION':
+      hasTrustedProof?'APPROVED_PENDING_ACK':'NEEDS_GITHUB_PROOF';
+    const githubHash=hasTrustedProof?digest(github?.state==='REVIEWABLE'?{sha:github.headSha,checks:github.satisfied,pr:current.prNumber}:
+      {sha:local!.checkedHead,checks:local!.checkDigests,project:current.localProject}):null;
     const record=await this.write(d=>{
       const r=d.reviews.find(x=>x.id===id);demand(r,'Unknown Panter-RDD transaction');
       if(r.state==='SUPERSEDED')return r;
@@ -143,9 +158,9 @@ export class PanterRdd {
       return r;
     });
     return {record,approved:record.state==='APPROVED_PENDING_ACK'||record.state==='ACKNOWLEDGED',
-      assurance:'GITHUB_CHECKS_VERIFIED__REVIEW_RUNS_HOST_REPORTED' as const,reviewComplete:complete,
-      distinctReviewerRuns:independence,severeFindings:severe,github,
-      note:'Panter-RDD approval is scoped to this candidate and available evidence. It is not official Gentle AI certification, cryptographic native-child attestation, or GitHub delivery authorization.'};
+      assurance:runnerAttested?'GITHUB_CHECKS_VERIFIED__RUNNER_SIGNED' as const:'REVIEW_RUNS_HOST_REPORTED_ONLY' as const,reviewComplete:complete,
+      distinctReviewerRuns:independence,runnerAttested,severeFindings:severe,github,local,
+      note:'Approval requires verified runner signatures bound to each frozen slot and exact GitHub proof. Runner signatures attest the registered execution host, not a provider model identity; review never authorizes delivery.'};
   }
   /** Burn/ack only after fresh source verification. Acknowledgement is NOT permission to merge. */
   async acknowledge(id:string,expectedRevision:number){
