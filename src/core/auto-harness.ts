@@ -321,7 +321,7 @@ export class AutomaticHarness {
       const nativeVerdict=this.rdd&&record.reviewId?await this.rdd.getForReview(record.reviewId):null;
       if(record.risk==='HIGH'&&nativeVerdict?.state!=='ACKNOWLEDGED'){
         const solo=record.reviewTransport==='NATIVE'&&record.reviewId?await this.native.status(record.reviewId):null;
-        if(solo?.soloEvidenceComplete)return {...common,status:'SOLO_4R_COMPLETED_UNVERIFIED',reviewId:record.reviewId,review:solo,
+        if(solo?.soloEvidenceComplete)return {...common,status:'SOLO_4R_COMPLETED_UNVERIFIED',reviewId:record.reviewId??undefined,review:solo,
           rdd:nativeVerdict,next:[],approved:false,
           instruction:'GPT-A completed all four self-review lenses. These are not independent: a new signed native 4R is still required for RDD approval and merge.'};
         return {...common,status:'AWAITING_PANTER_RDD_AUTHORITY',rdd:nativeVerdict,next:[]};
