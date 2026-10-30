@@ -15,7 +15,7 @@ test('Four independent 4R slots carry frozen centrally hosted skills and request
  assert.deepEqual(result.slots.map(s=>s.agentId),['review-risk','review-readability','review-reliability','review-resilience']);
  assert.equal(result.stage,'AWAITING_SUBAGENT_REPORTS');
  const packet=await engine.packet(result.reviewId,result.slots[0]!.slotId);
- assert.equal(packet.candidateSha,sha);assert.equal(packet.packetDigest,undefined); // response uses `digest`
+ assert.equal(packet.candidateSha,sha);assert.equal(packet.packetDigest,packet.digest);
  assert.equal(packet.digest,result.slots[0]!.packetDigest);
  assert.equal(packet.capacityRequest.reasoning,'max');
  assert.match(packet.instruction,/Specialist definition \(review-risk\)/);
