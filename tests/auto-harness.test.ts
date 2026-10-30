@@ -266,3 +266,5 @@ test('issued local discovery cannot spawn a remote duplicate after peer reconnec
  assert.equal(retry.status,'WAITING_HOST_PHASE_REPORT');
  assert.equal((await m.pending('claude')).length,0);
 }));
+
+test('6000-character accepted objective produces a bounded executable packet',()=>withHarness(async h=>{const run=await h.start({project:'app',objective:'x'.repeat(6000),idempotencyKey:'long',writesAuthorized:true,changeSurfaces:['src/value.ts']});const tick=await h.tick(run.id,solo);assert.equal(tick.status,'GPT_A_INLINE');assert.equal((await h.get(run.id))?.objective.length,6000);}));
