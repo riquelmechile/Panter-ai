@@ -1,0 +1,3 @@
+model = "gpt-6-astra"
+model_reasoning_effort = "max"
+service_tier = "fast"

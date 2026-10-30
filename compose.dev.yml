@@ -1,0 +1,28 @@
+# Developer-only deployment. Binds the host's loopback interface; do not
+# expose directly to the Internet until OAuth and access controls are certified.
+services:
+  panter:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PANTER_PORT: '8080'
+      PANTER_BIND_HOST: 0.0.0.0
+      PANTER_DATA_DIR: /data
+      # Container needs external bind, so NEVER run dev-static inside this Compose.
+      PANTER_AUTH_MODE: embedded
+      PANTER_ALLOWED_HOSTS: ${PANTER_ALLOWED_HOSTS:-127.0.0.1,localhost}
+    ports:
+      - '127.0.0.1:${PANTER_HOST_PORT:-18080}:8080'
+    volumes:
+      - panter_data:/data
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    restart: unless-stopped
+volumes:
+  panter_data:
