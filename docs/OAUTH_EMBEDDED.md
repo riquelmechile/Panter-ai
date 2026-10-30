@@ -38,3 +38,13 @@ PANTER_OAUTH_REDIRECT_URIS=https://chatgpt.com/connector_platform_oauth_redirect
 - `subscriptions/listen` requires negotiated and observed client support; it cannot make a closed ChatGPT session think autonomously.
 
 External signed JWT remains available with `PANTER_AUTH_MODE=external-jwt` as an optional identity-provider integration.
+
+## OAuth operator review and proxy limitations (Claude review)
+
+The `client_name` is **unverified** and redirect callbacks are shared by many clients. Consent displays a prominent warning, exact registration ID and approximate registration age. A valid ChatGPT/Claude callback alone does not authenticate the account initiating authorization. Verify requests using the originating AI app and deny unsolicited consent prompts.
+
+Admin-only `panter_oauth_clients` and `panter_oauth_client_revoke` let the operator enumerate client IDs and revoke all grants/tokens/pending codes without editing on-disk JSON while the process runs. An AI OAuth principal cannot invoke them.
+
+RFC 7009 token revocation for public clients does not require a separate client password: possession of the opaque token is the capability. The endpoint is now throttled, and bogus token revocations do not write JSON repeatedly. This does not remove the need for Cloudflare/nginx edge rate limits.
+
+**Proxy caveat:** Panter's in-process registration/token rate limits use the transport peer IP. Behind a shared trusted proxy, several real clients share that identity. Do not trust arbitrary incoming `X-Forwarded-For` values as an unvalidated identity. Configure per-client IP rate limiting at the edge, stripping unsolicited forwarding headers and protecting `/register`, `/token`, `/revoke` and `/authorize`. **No public deployment until operator access is isolated from the public listener and these edge rules are verified.**

@@ -179,3 +179,28 @@ test('embedded DCR reclaims abandoned clients without deleting consented registr
    assert.notEqual(next,first);
  }finally{Date.now=originalNow;}
 }));
+
+test('unverified consent display labels client provenance and shows registration age',()=>harness(async({request})=>{
+ const result=await request('/register',{method:'POST',headers:{'content-type':'application/json'},
+   body:JSON.stringify({redirect_uris:[callbackA],client_name:'ChatGPT Official & <team>'})});
+ assert.equal(result.status,201);const clientId=(await result.json() as {client_id:string}).client_id;
+ const q=new URLSearchParams({client_id:clientId,redirect_uri:callbackA,response_type:'code',
+   code_challenge:challenge,code_challenge_method:'S256',scope:'mcp',resource,state:'consent-screen'});
+ const first=await request('/authorize?'+q);assert.equal(first.status,302);
+ const cookie=first.headers.get('set-cookie')!.split(';')[0]!;
+ const page=await request(first.headers.get('location')!,{headers:{cookie}});
+ const html=await page.text();
+ assert.match(html,/Cliente NO VERIFICADO/);
+ assert.match(html,/Registrado hace aproximadamente/);
+ assert.match(html,/ChatGPT Official &amp; &lt;team&gt;/);
+ assert.doesNotMatch(html,/ChatGPT Official & <team>/);
+}));
+test('invalid public revocations remain 200 and do not rewrite persisted OAuth ledger',()=>harness(async({request,dir})=>{
+ const clientId=await register(request);
+ const file=join(dir,'oauth.json');
+ const before=await (await import('node:fs/promises')).readFile(file,'utf8');
+ const response=await request('/revoke',post({client_id:clientId,token:'x'.repeat(64)}));
+ assert.equal(response.status,200);
+ const after=await (await import('node:fs/promises')).readFile(file,'utf8');
+ assert.equal(after,before);
+}));

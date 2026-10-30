@@ -323,7 +323,8 @@ export class EmbeddedOAuth {
         const csrf = cookie(req, this.consentCookie);
         check(csrf.length > 30 && eq(hash(csrf), pending.csrfDigest), 'Invalid consent session');
         const options = hosts.map(h => `<option value="${h}">${h.toUpperCase()}</option>`).join('');
-        const html = `<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Panter-ai · Autorizar conexión</title><style>body{font:16px system-ui;max-width:460px;margin:8vh auto;padding:20px;background:#111827;color:white}main{background:#1f2937;border-radius:12px;padding:24px}input,select,button{display:block;width:100%;padding:10px;margin:12px 0;box-sizing:border-box}</style><main><h2>Autorizar conexión a Panter-ai</h2><p>Cliente: ${escapeHtml(client.name)}</p><p>Destino: ${escapeHtml(pending.redirectUri)}</p><form method="post" action="/oauth/consent?sid=${encodeURIComponent(id)}"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><label>Host autorizado<select name="host">${options}</select></label><label>Clave del operador<input name="password" type="password" required autocomplete="off"></label><button name="decision" value="allow">Autorizar</button><button name="decision" value="deny">Denegar</button></form></main></html>`;
+        const ageMinutes=Math.max(0,Math.floor((ts()-client.createdAt)/60));
+        const html = `<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Panter-ai · Autorizar conexión</title><style>body{font:16px system-ui;max-width:460px;margin:8vh auto;padding:20px;background:#111827;color:white}main{background:#1f2937;border-radius:12px;padding:24px}input,select,button{display:block;width:100%;padding:10px;margin:12px 0;box-sizing:border-box}.warning{border:1px solid #f4b400;padding:12px;color:#fff}</style><main><h2>Autorizar conexión a Panter-ai</h2><p class="warning"><strong>Cliente NO VERIFICADO.</strong> El nombre y callback pueden ser declarados por otra persona. Una URL de redirección conocida no demuestra que sea tu sesión de ChatGPT o Claude. Confirma la solicitud desde la aplicación que tú abriste; si no la iniciaste, pulsa Denegar.</p><p>Nombre declarado (no verificado): ${escapeHtml(client.name)}</p><p>Identificador de registro: ${escapeHtml(client.id)}</p><p>Registrado hace aproximadamente ${ageMinutes} minutos</p><p>Destino de redirección: ${escapeHtml(pending.redirectUri)}</p><form method="post" action="/oauth/consent?sid=${encodeURIComponent(id)}"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><label>Host autorizado<select name="host">${options}</select></label><label>Clave del operador<input name="password" type="password" required autocomplete="off"></label><button name="decision" value="allow">Autorizar</button><button name="decision" value="deny">Denegar</button></form></main></html>`;
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'" }); res.end(html);
       } catch { reply(res, 400, { error: 'invalid_request' }); }
       return true;
@@ -349,10 +350,17 @@ export class EmbeddedOAuth {
     }
     if (path === '/revoke' && req.method === 'POST') {
       try {
+        // RFC 7009 allows unauthenticated public clients to revoke a token they
+        // possess. The opaque token is the capability; invalid values remain 200.
+        // Rate-limit the endpoint and avoid rewriting the full ledger for misses.
+        this.throttled('revoke:global',500);
         const input = await body(req); const clientId = field(input, 'client_id'); const token = field(input, 'token');
-        await this.change(d => {
-          const found = d.tokens.find(t => t.digest === hash(token) && t.clientId === clientId);
-          if (found) for (const row of d.tokens) if (row.familyId === found.familyId) row.revoked = true;
+        check(/^pc_[A-Za-z0-9_-]{24,64}$/.test(clientId)&&token.length>=32&&token.length<=200,'Invalid revocation request');
+        const digest=hash(token);
+        const matchingFamily=await this.read(d=>d.tokens.find(t=>t.digest===digest&&t.clientId===clientId&&!t.revoked)?.familyId??null);
+        if(matchingFamily)await this.change(d=>{
+          const found=d.tokens.find(t=>t.digest===digest&&t.clientId===clientId&&!t.revoked);
+          if(found)for(const row of d.tokens)if(row.familyId===found.familyId)row.revoked=true;
         });
         reply(res, 200, {});
       } catch { reply(res, 400, { error: 'invalid_request' }); }
