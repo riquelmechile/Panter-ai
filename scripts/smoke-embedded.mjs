@@ -51,7 +51,7 @@ async function connect(credentials) {
 const unpack = result => JSON.parse(result.content.find(x => x.type === 'text').text);
 let rpcId=100;
 async function operatorCall(name,args={}){
-  const body=JSON.stringify({jsonrpc:'2.0',id:rpcId++,method:'tools/call',params:{name,arguments:args}});
+  const body=JSON.stringify({jsonrpc:'2.0',id:rpcId++,method:'tools/call',params:{name,arguments:args,_meta:{}}});
   const result=await new Promise((ok,fail)=>{
     const req=unixRequest({socketPath,path:'/mcp',method:'POST',
       headers:{authorization:`Bearer ${operatorSecret}`,'content-type':'application/json',
