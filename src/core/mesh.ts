@@ -244,6 +244,9 @@ export class MeshEngine {
   pending(caller: Host) { return this.read(d => d.works.filter(w => w.target === caller && w.state === 'QUEUED').map(w => ({ workId: w.id, missionId: w.missionId, role: w.role, createdAt: w.createdAt }))); }
   async claim(caller: Host, workId: string, leaseSeconds = 300) {
     check(leaseSeconds >= 30 && leaseSeconds <= 3600, 'Invalid lease');
+    const offered=await this.read(d=>d.works.find(w=>w.id===workId&&w.target===caller)??null);
+    if(offered?.role==='implementer'&&this.writeGuard)
+      await this.writeGuard(offered.missionId,offered.specialist?.allowedEditSurfaces??[]);
     return this.write(d => {
       const w = d.works.find(w => w.id === workId && w.target === caller);
       check(w, 'Work not found');
