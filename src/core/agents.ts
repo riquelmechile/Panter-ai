@@ -162,6 +162,7 @@ export class AgentEngine {
       const flow = state.flows.find(f => f.id === input.flowId);
       requireThat(flow && flow.state === 'OPEN', 'Flow is not open');
       requireThat(input.role !== 'builder' || flow.signals.writesAuthorized, 'Implementation has not been authorized');
+      requireThat(input.role !== 'builder' || !flow.candidateSha, 'Candidate frozen: a new builder requires a fresh boundary');
       const duplicate = state.tasks.find(t => t.flowId === input.flowId && t.idempotencyKey === input.idempotencyKey);
       if (duplicate) {
         const original = [duplicate.role, duplicate.target, duplicate.objective, duplicate.workspace,
