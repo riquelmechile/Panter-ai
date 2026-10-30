@@ -67,7 +67,7 @@ const bounded = (max = 2048) => z.string().trim().min(1).max(max);
 const handler = createMcpHandler(() => {
   const server = new McpServer({ name: 'panter-ai', version: '0.7.0' }, {
     capabilities: { resources: { subscribe: true } },
-    instructions: 'Panter-ai is a remote MCP engineering workspace. Reasoning, model choice and native subagents belong to the connected AI host. The model and effort policy returned by panter_host_policy is only REQUESTED, never proof. For meaningful work use panter_flow_route to choose inline versus coordinated execution, then create a durable flow only when useful. The parent session coordinates, and focused native host agents perform scoped exploration, implementation, verification and review. Use panter_agent_packet to obtain bounded context; never imply an agent was launched merely because its task was enqueued. Worker completions are reported evidence, not trusted verification. The server runs no model inference or shell. Do not claim a test, review, wake or execution succeeded without external evidence.'
+    instructions: 'Panter-ai is a remote MCP engineering workspace. Reasoning, model choice and native subagents belong to the connected AI host. The model and effort policy returned by panter_host_policy is only REQUESTED, never proof. For meaningful work use panter_flow_route to choose inline versus coordinated execution, then create a durable flow only when useful. The parent session coordinates, and focused native host agents perform scoped exploration, implementation, verification and review. Use panter_agent_packet to obtain bounded context; never imply an agent was launched merely because its task was enqueued. Worker completions are reported evidence, not trusted verification. The server runs no model inference or shell. GPT-A owns orchestration. At first setup, ask the user to assign the desired host and model for each Gentle Shell specialist and open panter_agent_studio; store each specialist binding separately. Resolve only the selected MCP-hosted skills and dispatch using panter_specialist_delegate. Use panter_odd_route for risk-based ODD decisions, panter_review_start for durable 4R/Judgment Day fanout, and panter_mesh_inbox for results. Never invent host wake or native Pi functionality. Do not claim a test, review, wake or execution succeeded without external evidence.'
   });
 
   // Preserve Zod schema inference for legacy admin tools while enforcing
@@ -267,6 +267,20 @@ const handler = createMcpHandler(() => {
     description:'GPT-A dispatches a centrally versioned agent + assigned skills as a frozen A2A task to its configured host; result returns to GPT-A inbox.',
     inputSchema:z.object({missionId:bounded(120),agentId:z.enum(GENTLE_AGENTS.map(a=>a.id) as [string,...string[]]),objective:bounded(6000),idempotencyKey:bounded(160),candidateSha:z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/).optional(),allowedEditSurfaces:z.array(z.string().min(1).max(256)).max(16).optional()})
   },async input=>execute(()=>mesh.delegateBoundSpecialist(hostPrincipal(),input)));
+
+  server.registerTool('panter_odd_route',{
+    description:'GPT-A applies the Gentle Shell ODD small/inline vs exploratory/coordinated and risk-based verification rules; planning-only.',
+    inputSchema:z.object({requirementsClear:z.boolean(),resumableFromDiff:z.boolean(),risk:z.enum(['low','high']),unknownCodeArea:z.boolean(),independentWorkUnits:z.number().int().min(0).max(32),writesAuthorized:z.boolean()}),
+    annotations:{readOnlyHint:true}
+  },async input=>execute(async()=>{requireLeader();return routeFlow(input)}));
+  server.registerTool('panter_review_start',{
+    description:'GPT-A atomically delegates 4R four independent lenses or exactly two blind Judgment Day judges to their configured hosts using one frozen candidate SHA. No automatic approval or fix.',
+    inputSchema:z.object({missionId:bounded(120),kind:z.enum(['4r','judgment-day']),objective:bounded(6000),candidateSha:z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/),idempotencyKey:bounded(160)})
+  },async input=>execute(()=>mesh.startReview(hostPrincipal(),input)));
+  server.registerTool('panter_review_status',{
+    description:'Read durable 4R / Judgment Day receipts for a review session. When complete, GPT-A must independently assess outputs; this is not native provider approval.',
+    inputSchema:z.object({reviewId:z.uuid()}),annotations:{readOnlyHint:true}
+  },async ({reviewId})=>execute(()=>mesh.reviewStatus(hostPrincipal(),reviewId)));
   server.registerTool('panter_review_blueprints',{
     description:'Return native 4R and Judgment Day workflow blueprints. Requires a frozen SHA; planned tasks are not executed by this read.',
     inputSchema:z.object({candidateSha:z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/),kind:z.enum(['4r','judgment-day'])}),annotations:{readOnlyHint:true}
