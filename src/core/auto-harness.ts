@@ -33,7 +33,7 @@ export type HarnessRun={id:string;project:string;githubRepository?:string;github
   mode:HarnessMode; paths:string[]; risk:'LOW'|'HIGH'; reviewTier?:'passive'|'medium'|'high'; reason:string[]; candidateSha:string|null;
   reviewKind:'4r'|null; reviewId:string|null; reviewTransport:'NATIVE'|'REMOTE'|null;
   judgmentRequested?:boolean; judgmentId?:string|null; writeGrantId?:string;
-  correctionAttempts?:number; correctionRunId?:string; correctionRunIds?:string[]; previousReviewId?:string|null; deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main';
+  correctionAttempts?:number; correctionRunId?:string; correctionRunIds?:string[]; previousReviewId?:string|null; reviewAttempt?:number; deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main';
   units?:Array<{id:string;objective:string;paths:string[];state:'PENDING'|'REPORTED';runId?:string;summary?:string;evidence?:string[]}>;
   steps:HarnessStep[]; createdAt:string;revision:number;};
 type WriteGrant={id:string;project:string;objectiveDigest:string;allowedPaths:string[];expiresAt:number;boundRunId:string|null};
@@ -303,9 +303,29 @@ export class AutomaticHarness {
         requestedParallelism:Math.min(runtime.nativeSubagents?runtime.maxParallelSubagents:0,policy.plannerCeiling),
         capacityVerified:false},modelWorkersStartedByServer:0,approved:false};
     if(!phase){
+      // A solo 4R is a real four-lens inspection, but not independent authority.
+      // Redo it with new frozen slots when native children become available.
+      if(record.reviewTransport==='NATIVE'&&record.reviewId&&runtime.nativeSubagents&&runtime.maxParallelSubagents>0){
+        const previous=await this.native.status(record.reviewId);
+        if(previous.soloEvidenceComplete){
+          await this.write(state=>{const run=state.runs.find(r=>r.id===runId)!;
+            const review=run.steps.find(step=>step.phase==='REVIEW');
+            if(!review||review.status!=='COMPLETE')return;
+            review.status='PENDING';run.reviewId=null;run.reviewTransport=null;
+            run.reviewAttempt=(run.reviewAttempt??0)+1;run.revision++;
+          });
+          return this.tick(runId,runtime);
+        }
+      }
       const repository=record.githubRepository??(githubProject.test(record.project)?record.project:null);
       const nativeVerdict=this.rdd&&record.reviewId?await this.rdd.getForReview(record.reviewId):null;
-      if(record.risk==='HIGH'&&nativeVerdict?.state!=='ACKNOWLEDGED')return {...common,status:'AWAITING_PANTER_RDD_AUTHORITY',rdd:nativeVerdict,next:[]};
+      if(record.risk==='HIGH'&&nativeVerdict?.state!=='ACKNOWLEDGED'){
+        const solo=record.reviewTransport==='NATIVE'&&record.reviewId?await this.native.status(record.reviewId):null;
+        if(solo?.soloEvidenceComplete)return {...common,status:'SOLO_4R_COMPLETED_UNVERIFIED',reviewId:record.reviewId,review:solo,
+          rdd:nativeVerdict,next:[],approved:false,
+          instruction:'GPT-A completed all four self-review lenses. These are not independent: a new signed native 4R is still required for RDD approval and merge.'};
+        return {...common,status:'AWAITING_PANTER_RDD_AUTHORITY',rdd:nativeVerdict,next:[]};
+      }
       const judgmentVerdict=this.rdd&&record.judgmentId?await this.rdd.getForReview(record.judgmentId):null;
       if(record.judgmentRequested&&judgmentVerdict?.state!=='ACKNOWLEDGED')return {...common,status:'AWAITING_JUDGMENT_RDD_AUTHORITY',rdd:judgmentVerdict,next:[]};
       if(!repository)return {...common,status:record.risk==='HIGH'?'PANTER_RDD_REVIEWED_NO_GITHUB_DELIVERY_AUTHORITY':'REPORTED_COMPLETE_UNVERIFIED',next:[]};
@@ -341,7 +361,7 @@ export class AutomaticHarness {
     if(phase.phase==='REVIEW'||phase.phase==='JUDGMENT'){
       const previous=phase.phase==='REVIEW'?record.reviewId:record.judgmentId;
       if(previous){
-        const nativeStatus=phase.phase==='JUDGMENT'?await this.native.status(previous):null;
+        const nativeStatus=(phase.phase==='JUDGMENT'||record.reviewTransport==='NATIVE')?await this.native.status(previous):null;
         const rddRecord=phase.phase==='REVIEW'&&this.rdd?await this.rdd.getForReview(previous):null;
         const severe=nativeStatus?.severeFindings??[];
         if(severe.length||rddRecord?.state==='NEEDS_CORRECTION'){
@@ -402,20 +422,32 @@ export class AutomaticHarness {
           return a&&runtime.peerStates?.[a.host]==='CONNECTED';
         });
         if(remoteReady){
-          const remote=await this.mesh.startReview('gpt-a',{missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:review:${record.candidateSha}`});
+          const remote=await this.mesh.startReview('gpt-a',{missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:review:${record.candidateSha}:${record.reviewAttempt??0}`});
           await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(!r.reviewId){r.reviewId=remote.id;r.reviewTransport='REMOTE';r.revision++;}});
         }else{
-          const native=await this.native.create({missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:review:${record.candidateSha}`});
+          const native=await this.native.create({missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:review:${record.candidateSha}:${record.reviewAttempt??0}`});
           await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(!r.reviewId){r.reviewId=native.reviewId;r.reviewTransport='NATIVE';r.revision++;}});
         }
       }
       const now=await this.get(runId);ensure(now?.reviewId&&now.reviewTransport,'Review session not initialized');
       if(now.reviewTransport==='NATIVE'){
         const review=await this.native.status(now.reviewId);
+        if(review.soloEvidenceComplete){
+          if(review.severeFindings.length)return {...common,status:'SOLO_4R_FINDINGS_NEED_CORRECTION',
+            phaseId:phase.id,reviewId:now.reviewId,review,next:[],approved:false};
+          await this.write(state=>{const run=state.runs.find(r=>r.id===runId)!;
+            const item=run.steps.find(step=>step.id===phase.id)!;
+            if(item.status!=='COMPLETE'){item.status='COMPLETE';run.revision++;}
+          });
+          return this.tick(runId,runtime);
+        }
         if(review.stage==='AWAITING_SUBAGENT_REPORTS'){
           const batch=await this.native.batch(now.reviewId,runtime.nativeSubagents?runtime.maxParallelSubagents:0);
           return {...common,status:batch.dispatch,phaseId:phase.id,reviewId:now.reviewId,next:batch.packets,concurrentSlots:batch.concurrentSlots,
-            instruction:'GPT-A: automatically dispatch the supplied separate native subagent packets in parallel when supported. No per-task agent selection or model-provider API.'};
+            reviewMode:batch.reviewMode,approved:false,
+            instruction:batch.reviewMode==='GPT_A_SOLO_UNVERIFIED'?
+              'GPT-A: run this one 4R lens inline and submit via panter_native_review_submit_solo, then request the next lens. Do not claim independent review or approval.':
+              'GPT-A: automatically dispatch real native child packets in parallel when supported. No remote peers or model-provider APIs are required.'};
         }
         if(this.rdd){
           const tx=await this.rdd.begin({missionId:now.id,reviewId:now.reviewId,source:'NATIVE',
