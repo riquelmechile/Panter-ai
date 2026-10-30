@@ -545,6 +545,16 @@ const handler = createMcpHandler(() => {
     description:'Record one host-reported native subagent run and structured SHA/packet-bound evidence. Immutable and idempotent; cannot grant RDD approval.',
     inputSchema:z.object({reviewId:z.uuid(),slotId:z.uuid(),report:z.object({agentId:bounded(100),candidateSha:z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/),packetDigest:z.string().regex(/^[0-9a-f]{64}$/),subagentRunId:bounded(160),evidence:z.array(bounded(1000)).min(1).max(40),findings:z.array(z.object({id:bounded(100),location:bounded(400),severity:z.enum(['BLOCKER','CRITICAL','WARNING','SUGGESTION']),claim:bounded(2000),proofRefs:z.array(bounded(600)).min(1).max(12)})).max(80),attestation:z.object({keyId:bounded(80),signature:bounded(160)}).optional()})})
   },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.submit(x.reviewId,x.slotId,x.report)}));
+  server.registerTool('panter_native_review_submit_solo',{
+    description:'Record one GPT-A self-reviewed 4R lens when native subagents are unavailable. Explicitly UNVERIFIED: never independently attested or Panter-RDD-approved.',
+    inputSchema:z.object({reviewId:z.uuid(),slotId:z.uuid(),report:z.object({
+      agentId:bounded(100),candidateSha:z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/),
+      packetDigest:z.string().regex(/^[a-f0-9]{64}$/),
+      evidence:z.array(bounded(1000)).min(1).max(40),
+      findings:z.array(z.object({id:bounded(100),location:bounded(400),
+        severity:z.enum(['BLOCKER','CRITICAL','WARNING','SUGGESTION']),
+        claim:bounded(2000),proofRefs:z.array(bounded(600)).min(1).max(12)})).max(80)})})
+  },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.submitSolo(x.reviewId,x.slotId,x.report)}));
   server.registerTool('panter_native_review_progress',{
     description:'Recover native 4R/JD slots, independent host-reported receipts and severe findings. Never marks review officially approved.',
     inputSchema:z.object({reviewId:z.uuid()}),annotations:{readOnlyHint:true}
