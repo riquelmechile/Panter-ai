@@ -14,9 +14,9 @@ const sha='a'.repeat(40),newSha='b'.repeat(40),repo='example/project';
 const keys=generateKeyPairSync('ed25519');
 const publicKey=keys.publicKey.export({type:'spki',format:'pem'}).toString();
 const runnerKeys={trusted:publicKey};
-function gate(breaks:{head?:string;ci?:string;labels?:string[]}={}){
+function gate(breaks:{head?:string;ci?:string;labels?:string[];additions?:number}={}){
  const pr={state:'open',draft:false,head:{sha:breaks.head??sha,ref:'feat/rdd',repo:{full_name:repo}},base:{ref:'main'},
-   body:'Refs #22',labels:(breaks.labels??['type:feature']).map(name=>({name})),additions:50,deletions:20,commits:1};
+   body:'Refs #22',labels:(breaks.labels??['type:feature']).map(name=>({name})),additions:breaks.additions??50,deletions:20,commits:1};
  const m:Record<string,unknown>={'':{default_branch:'main'},'pulls/12':pr,'issues/22':{labels:[{name:'status:approved'}]},
   'pulls/12/commits?per_page=100':[{commit:{message:'feat: add review controller'}}],
   [`commits/${sha}/check-runs?per_page=100`]:{total_count:1,check_runs:[{name:'test',status:'completed',conclusion:breaks.ci??'success',head_sha:sha}]}};
