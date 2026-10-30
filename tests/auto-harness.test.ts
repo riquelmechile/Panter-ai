@@ -253,3 +253,5 @@ test('bounded correction requires a new SHA and resets independent verification 
  t=await h.tick(run.id,solo);assert.notEqual(t.reviewId,old?.reviewId);
  await assert.rejects(h.recordCorrection(run.id,{candidateSha:'b'.repeat(40),runId:'corrector-2',evidence:['bad']},(await h.get(run.id))!.revision),/fresh SHA/);
 }));
+
+test('changing Judgment Day intent invalidates start idempotency',()=>withHarness(async h=>{const i={project:'app',objective:'Change copy',idempotencyKey:'jd-digest',writesAuthorized:true,changeSurfaces:['src/copy.ts']};await h.start(i);await assert.rejects(h.start({...i,judgmentDayRequested:true}),/idempotency conflict/); }));
