@@ -21,7 +21,9 @@ Runbook de **canary privado**, sin Docker/Podman, proxy, túnel, reglas de firew
 | Rollback | `stop` libera el puerto; `start` vuelve a `/health` 200 |
 | Foto final | procesos y PID de los servicios preexistentes intactos, hashes de configuración del proxy idénticos; único listener nuevo el del canary |
 
-**Pendiente del responsable:** `host.system.service enable` (arranque automático tras reiniciar la VM) no se ejecutó: requiere autorización explícita. Mientras tanto, el canary corre pero no sobrevive a un reinicio del host.
+**Arranque automático:** `host.system.service enable` se ejecutó con autorización explícita del responsable. La unidad queda `enabled` en `default.target` del manager de usuario, que tiene *linger*. El arranque tras un reinicio real del host **todavía no se ha probado**.
+
+**Límites efectivos:** `systemctl --user status` muestra `Tasks: 11 (limit: 128)` y `Memory: 26.7M (max: 1.0G)`, así que el manager de usuario tiene delegados los controladores `pids` y `memory` y ambos límites se aplican. Si en otro host el `status` no muestra `limit`/`max`, los límites se están ignorando y hay que detenerse.
 
 Nota operativa: al probar con `curl`, pasar los Bearer con `-H @archivo` (archivo `0600`, borrado al terminar), nunca en la línea de comandos, porque los argumentos son visibles para otros procesos del mismo usuario.
 
@@ -62,7 +64,7 @@ Crear los directorios privados con permisos `0700`. El lanzador es ejecutable y 
 
 Copiar y adaptar `deploy/systemd/panter-ai.service` como unidad de usuario, **antes del primer arranque**, y crear `bin/run` con `exec /usr/bin/node <home del usuario de servicio>/panter-ai/current/dist/server.js` usando ruta absoluta real. `run` debe tener permiso `0700`.
 
-Con `host.system.service` habilitar y luego iniciar **solo** `panter-ai.service`. Los límites `MemoryMax=1G` y `TasksMax=128` son obligatorios en este canary. Si la unidad no arranca o alguno de ellos falla, detenerse: no editar a ciegas la unidad, pues el host no proporciona `daemon-reload`. No utilizar `systemctl` a través de shell genérico ni tocar otro servicio.
+Con `host.system.service` iniciar **solo** `panter-ai.service`, validar las pruebas 4a–4f y, **solo con autorización explícita del responsable**, habilitarlo (`enable`) para el arranque automático. Verificar en `status` que aparecen `limit: 128` y `max: 1.0G`. Los límites `MemoryMax=1G` y `TasksMax=128` son obligatorios en este canary. Si la unidad no arranca o alguno de ellos falla, detenerse: no editar a ciegas la unidad, pues el host no proporciona `daemon-reload`. No utilizar `systemctl` a través de shell genérico ni tocar otro servicio.
 
 ## Pruebas obligatorias, con evidencia mínima
 
@@ -87,7 +89,7 @@ Los mensajes MCP deben usar el formato de protocolo y cabeceras adecuados. Nunca
 
 ## Rollback y reversión
 
-Para desactivar sin afectar otros servicios: `host.system.service stop` seguido de `disable` (con `CONFIRM_DESTRUCTIVE` cuando corresponda), comprobar que el listener desapareció; `enable` y `start` para recuperar y confirmar salud.
+Para detener sin afectar otros servicios: `host.system.service stop` (con `CONFIRM_DESTRUCTIVE`), comprobar que el listener desapareció; `start` para recuperar y confirmar salud. Esto es lo validado. Para desactivar también el arranque automático, agregar `disable` (también con `CONFIRM_DESTRUCTIVE`), y para volver a activarlo `enable`, que requiere autorización explícita del responsable.
 
 Para regresar de release: respaldar los datos antes del cambio; detener Panter; apuntar el symlink `current` a un release anterior **ya validado**, reiniciar y verificar los endpoints. Si el estado no es compatible, restaurar el backup correspondiente con el servicio detenido y verificar nuevamente. El lanzador estable evita editar la unidad al cambiar `current`.
 
@@ -103,6 +105,10 @@ Repetir exactamente las mismas mediciones de procesos, listeners y hashes de con
 - Configurar un dominio y TLS, y únicamente entonces un proxy nginx o túnel con `X-Panter-Client-IP` verificado y `PANTER_TRUSTED_PROXY_CIDRS` restringido a los proxies reales. No reutilizar la configuración privada en una ruta pública.
 - Verificar OAuth real extremo a extremo con ChatGPT y Claude, política de redirects, cookies, CSRF, revocación y límites de tráfico.
 - Habilitar Engram solo con **su propio directorio de datos** y permisos apropiados, previa auditoría.
+- Definir y probar la **rotación** de `PANTER_CONSENT_PASSWORD` y `PANTER_OPERATOR_TOKEN`: generar, reiniciar, verificar que el valor anterior da 401 y cuidar los grants existentes.
+- Llevar los backups **fuera del host o cifrados**, con una prueba de restauración periódica.
+- Reemplazar la URL pública ficticia por la real, reverificar `PANTER_ALLOWED_HOSTS` y definir `PANTER_ALLOWED_ORIGINS` si algún cliente de navegador va a enviar `Origin`.
+- Revisar el journal del servicio y confirmar que no aparecen secretos, tokens ni cuerpos de consentimiento.
 - Exigir evidencias de CI, revisión independiente de SHA exacto, snapshot final, restauración y rollback antes de proponer exposición. La aprobación del issue y la decisión de merge corresponden al responsable.
 
-La preparación documental no constituye validación operativa ni autorización de publicación.
+Este canary está validado **solo como servicio privado en loopback**. No constituye validación para exposición pública ni autoriza publicar.
