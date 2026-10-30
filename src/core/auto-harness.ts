@@ -351,6 +351,16 @@ export class AutomaticHarness {
       }
       if(status.severeFindings.length)return {...common,status:'JUDGMENT_FINDINGS_NEED_CORRECTION',phaseId:phase.id,
         reviewId:latest.judgmentId,review:status,next:[]};
+      if(!this.rdd)return {...common,status:'AWAITING_JUDGMENT_RDD_AUTHORITY',phaseId:phase.id,reviewId:latest.judgmentId,next:[]};
+      const tx=await this.rdd.begin({missionId:latest.id,reviewId:latest.judgmentId,source:'NATIVE',
+        candidateSha:latest.candidateSha!,kind:'judgment-day',localProject:latest.project,
+        repository:latest.githubRepository??(githubProject.test(latest.project)?latest.project:undefined),
+        prNumber:latest.githubPrNumber,expectedBase:latest.githubExpectedBase,deliveryStrategy:latest.deliveryStrategy,
+        implementerRunId:latest.correctionRunId??latest.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId});
+      const verdict=await this.rdd.assess(tx.id);
+      if(verdict.record.state==='APPROVED_PENDING_ACK')await this.rdd.acknowledge(tx.id,verdict.record.revision);
+      if(!['APPROVED_PENDING_ACK','ACKNOWLEDGED'].includes(verdict.record.state))
+        return {...common,status:verdict.record.state,phaseId:phase.id,reviewId:latest.judgmentId,panterRdd:verdict,next:[]};
       await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;
         if(st.status!=='COMPLETE'){st.status='COMPLETE';r.revision++;}});
       return this.tick(runId,runtime);
