@@ -193,6 +193,8 @@ export class NativeSubagentReview {
         requireValid(slot.receiptDigest===digest,'Conflicting immutable native review report');
         return {receiptDigest:digest,idempotent:true,status:this.publicStatus(r)};
       }
+      requireValid(slot.state==='AWAITING_SUBAGENT'&&!r.slots.some(s=>s.state==='REPORTED_SOLO'),
+        'Cannot promote or mix GPT-A solo self-review into independently attested native review');
       requireValid(!r.slots.some(s=>s.id!==slotId&&s.subagentRunId===report.subagentRunId),'Native subagent run ID reused across independent reviewers');
       slot.state='REPORTED';slot.report=report;slot.receiptDigest=digest;slot.subagentRunId=report.subagentRunId;
       slot.completedAt=new Date().toISOString();r.revision++;
