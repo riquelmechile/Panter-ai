@@ -17,7 +17,7 @@ export type NativeReviewFinding = { id: string; location: string; severity: 'BLO
 export type NativeReviewReport = { agentId: string; candidateSha: string; packetDigest: string; subagentRunId: string; evidence: string[]; findings: NativeReviewFinding[]; attestation?: RunnerAttestation };
 export type NativeReviewSlot = {
   id: string; agentId: string; candidateSha: string; packetDigest: string; assetDigests: Record<string,string>;
-  state: 'AWAITING_SUBAGENT'|'REPORTED'; receiptDigest: string|null; subagentRunId: string|null;
+  state: 'AWAITING_SUBAGENT'|'REPORTED'|'REPORTED_SOLO'; receiptDigest: string|null; subagentRunId: string|null;
   report: NativeReviewReport|null; createdAt: string; completedAt: string|null;
 };
 export type NativeReviewRecord = {
@@ -81,17 +81,19 @@ export class NativeSubagentReview {
     });
   }
   private publicStatus(r:NativeReviewRecord){
-    const missing=r.slots.filter(s=>s.state!=='REPORTED').map(s=>s.agentId);
+    const missing=r.slots.filter(s=>s.state==='AWAITING_SUBAGENT').map(s=>s.agentId);
     const all=r.slots.every(s=>s.state==='REPORTED');
+    const soloComplete=r.kind==='4r'&&r.slots.every(s=>s.state==='REPORTED_SOLO');
     const findings=r.slots.flatMap(s=>s.report?.findings??[]);
     const severe=findings.filter(f=>f.severity==='CRITICAL'||f.severity==='BLOCKER');
     const runIds=r.slots.map(s=>s.subagentRunId).filter(Boolean);
     return {reviewId:r.id,missionId:r.missionId,kind:r.kind,candidateSha:r.candidateSha,revision:r.revision,
       slots:r.slots.map(s=>({slotId:s.id,agentId:s.agentId,packetDigest:s.packetDigest,state:s.state,subagentRunId:s.subagentRunId,receiptDigest:s.receiptDigest,attestation:s.report?.attestation??null,evidence:s.report?.evidence??[],findings:s.report?.findings??[]})),
       missing,findings,severeFindings:severe,reportedSubagentRuns:runIds,
-      stage:!all?'AWAITING_SUBAGENT_REPORTS':severe.length?'FINDINGS_REQUIRE_TRIAGE':'READY_FOR_RDD_CONTROLLER',
-      evidenceComplete:all,independentNativeRunsAttested:false,approved:false,nativeRddAuthority:false,
-      next:!all?'Launch remaining native subagents with their slot packets; submit each separate report.':
+      stage:soloComplete?'SOLO_4R_COMPLETED_UNVERIFIED':!all?'AWAITING_SUBAGENT_REPORTS':severe.length?'FINDINGS_REQUIRE_TRIAGE':'READY_FOR_RDD_CONTROLLER',
+      evidenceComplete:all,soloEvidenceComplete:soloComplete,reviewMode:soloComplete?'GPT_A_SOLO_UNVERIFIED':all?'HOST_NATIVE_SUBAGENTS':'IN_PROGRESS',
+      independentNativeRunsAttested:false,approved:false,nativeRddAuthority:false,
+      next:soloComplete?'GPT-A finished four self-review lenses. No independent verification, RDD approval or merge permission.':!all?'Launch native subagents or perform four explicitly unverified solo lenses sequentially.':
         severe.length?'Review severe findings, authorize and freeze any corrections, then initiate fresh SHA-bound review.':
         'Check exact candidate and subagent run provenance with official Gentle AI RDD or independent trusted Git/CI evidence before approving.'};
   }
@@ -117,16 +119,59 @@ export class NativeSubagentReview {
     requireValid(Number.isInteger(observedNativeParallelism)&&observedNativeParallelism>=0&&observedNativeParallelism<=32,'Invalid observed native parallelism');
     const status=await this.status(reviewId);
     const available=status.slots.filter(s=>s.state==='AWAITING_SUBAGENT');
-    const packets=await Promise.all(available.map(s=>this.packet(reviewId,s.slotId)));
+    const alreadySolo=status.slots.some(s=>s.state==='REPORTED_SOLO');
+    const alreadyNative=status.slots.some(s=>s.state==='REPORTED');
+    const solo=status.kind==='4r'&&(alreadySolo||(observedNativeParallelism===0&&!alreadyNative));
+    const selected=solo?available.slice(0,1):observedNativeParallelism>0?available:[];
+    const originalPackets=await Promise.all(selected.map(s=>this.packet(reviewId,s.slotId)));
+    const packets=solo?originalPackets.map(p=>({...p,execution:'GPT_A_SOLO_LENS_REQUESTED' as const,
+      independenceRequirement:'GPT-A itself reviews this lens; it is not an independent subagent, no independent attestation and no RDD approval.',
+      returnContract:'Inspect one lens of this exact candidate, then submit agentId/candidateSha/packetDigest/evidence/findings with panter_native_review_submit_solo. Do not invent a child run ID.'})):originalPackets;
     const capacity=hostRequest('chatgpt');
     return {reviewId,kind:status.kind,candidateSha:status.candidateSha,
-      dispatch:observedNativeParallelism>0?'READY_FOR_HOST_NATIVE_DISPATCH':'HOST_NATIVE_SUBAGENTS_UNAVAILABLE',
-      concurrentSlots:Math.min(observedNativeParallelism,available.length),
-      remainingSlots:available.length,requestedModel:capacity.model,requestedReasoning:capacity.reasoningEffort,
-      requestedWorkerSpeed:capacity.worker.preferredProcessing,
-      packets,
-      requirements:'GPT-A must launch one new child per slot, send only that child own packet, collect structured results, and submit each receipt. Launch separate parallel children only up to host observed capacity. Never silently use GPT-A parent as an independent reviewer. No model API calls and no remote peers are required.',
+      dispatch:solo?'READY_FOR_GPT_A_SOLO_4R':observedNativeParallelism>0?'READY_FOR_HOST_NATIVE_DISPATCH':'HOST_NATIVE_SUBAGENTS_UNAVAILABLE',
+      reviewMode:solo?'GPT_A_SOLO_UNVERIFIED':'HOST_NATIVE_SUBAGENTS',
+      concurrentSlots:solo?(selected.length?1:0):Math.min(observedNativeParallelism,selected.length),
+      remainingSlots:available.length,requestedNativeParallelism:observedNativeParallelism,
+      requestedModel:capacity.model,requestedReasoning:capacity.reasoningEffort,
+      requestedWorkerSpeed:capacity.worker.preferredProcessing,packets,
+      requirements:solo?'GPT-A runs one self-review lens at a time, recording the evidence. Self-review is not independent and cannot pass Panter-RDD.':
+      'Launch actual separate host-native children; never fabricate subagent execution or attestations.',
       modelsStartedByMcp:0,approved:false};
+  }
+  /** Explicit GPT-A solo 4R evidence, never a native-subagent report. */
+  submitSolo(reviewId:string,slotId:string,report:Omit<NativeReviewReport,'subagentRunId'|'attestation'>){
+    requireValid(report!==null&&typeof report==='object','Invalid solo report');
+    requireValid(Array.isArray(report.evidence)&&report.evidence.length>0&&report.evidence.length<=40&&
+      report.evidence.every(x=>typeof x==='string'&&x.trim()&&x.length<=1000),'Concrete solo evidence required');
+    requireValid(Array.isArray(report.findings)&&report.findings.length<=80,'Invalid findings');
+    for(const f of report.findings){
+      requireValid(f&&typeof f.id==='string'&&/^[A-Za-z0-9._:-]{1,100}$/.test(f.id),'Invalid finding ID');
+      requireValid(typeof f.location==='string'&&f.location.length>0&&f.location.length<=400,'Invalid finding location');
+      requireValid(severity.has(f.severity)&&typeof f.claim==='string'&&f.claim.trim().length>0&&f.claim.length<=2000,'Invalid finding');
+      requireValid(Array.isArray(f.proofRefs)&&f.proofRefs.length>0&&f.proofRefs.length<=12&&
+        f.proofRefs.every(p=>typeof p==='string'&&p.length>0&&p.length<=600),'Finding proof references required');
+    }
+    return this.write(d=>{
+      const review=d.reviews.find(r=>r.id===reviewId);requireValid(review,'Review not found');
+      requireValid(review.kind==='4r','Judgment Day requires separate blind judges');
+      const slot=review.slots.find(s=>s.id===slotId);requireValid(slot,'Review slot not found');
+      requireValid(report.agentId===slot.agentId&&report.candidateSha===review.candidateSha&&
+        report.packetDigest===slot.packetDigest,'Solo report does not match frozen SHA and reviewer slot');
+      const stored:NativeReviewReport={...report,subagentRunId:'gpt-a'};
+      const receipt=blake(JSON.stringify({reviewId,slotId,solo:true,report:stored}));
+      if(slot.state==='REPORTED_SOLO'){
+        requireValid(slot.receiptDigest===receipt,'Conflicting immutable solo report');
+        return {receiptDigest:receipt,idempotent:true,status:this.publicStatus(review)};
+      }
+      requireValid(slot.state==='AWAITING_SUBAGENT'&&!review.slots.some(s=>s.state==='REPORTED'),
+        'Solo and native reviewer reports cannot be mixed');
+      requireValid(review.slots.find(s=>s.state==='AWAITING_SUBAGENT')?.id===slotId,
+        'GPT-A solo 4R requires sequential lens reporting');
+      slot.state='REPORTED_SOLO';slot.report=stored;slot.receiptDigest=receipt;
+      slot.subagentRunId=null;slot.completedAt=new Date().toISOString();review.revision++;
+      return {receiptDigest:receipt,idempotent:false,status:this.publicStatus(review)};
+    });
   }
   submit(reviewId:string,slotId:string,report:NativeReviewReport){
     requireValid(report!==null&&typeof report==='object','Invalid native review report');
