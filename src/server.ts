@@ -395,7 +395,7 @@ const handler = createMcpHandler(() => {
     description:'GPT-A records a durable scout/designer/builder phase for inline or genuine native-subagent execution; never self-registers as an independent reviewer.',
     inputSchema:z.object({flowId:z.uuid(),role:z.enum(['scout','designer','builder']),objective:bounded(10000),
       scopes:z.array(bounded(256)).max(32).default([]),workspace:bounded(100).default('default'),dependsOn:z.array(z.uuid()).max(32).default([]),idempotencyKey:bounded(160)})
-  },async x=>execute(async()=>{requireLeader();return agents.addTask({...x,target:'gpt-a'})}));
+  },async x=>execute(async()=>{requireLeader();if(x.role==='builder')throw new Error('Legacy native builders require the operator-granted automatic harness');return agents.addTask({...x,target:'gpt-a'})}));
   server.registerTool('panter_native_phase_claim',{
     description:'GPT-A claims the next dependency-ready native phase. This is a durable lease, NOT proof of model invocation.',
     inputSchema:z.object({leaseSeconds:z.number().int().min(30).max(3600).default(300)})
