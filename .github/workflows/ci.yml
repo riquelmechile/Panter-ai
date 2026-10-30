@@ -12,12 +12,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install --no-audit --no-fund
-      # Temporary bootstrap capture: emit the resolved npm lockfile in safe
-      # base64 chunks so it can be committed and then this step removed.
-      - name: Capture resolved lockfile
-        run: |
-          node -e "const fs=require('node:fs'); const b=fs.readFileSync('package-lock.json').toString('base64'); for(let i=0;i<b.length;i+=1500)console.log('PANTER_LOCK_CHUNK:'+b.slice(i,i+1500))"
+      - run: npm ci --no-audit --no-fund
       - run: npm run check
       - run: npm run build
       - run: npm test

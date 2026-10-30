@@ -15,7 +15,7 @@
 2. Inspect all active review threads and issue #3. The historical Codex findings must be resolved individually only after verifying their code paths and regressions; do not treat comments as proof.
 3. Review specifically: OAuth embedded/external and admin loopback identities; A2A writer grants and idempotent overlap; lease expiry; all candidate author IDs excluded from 4R; native/solo/Judgment Day separation; SHA binding and runner signatures; GitHub single-PR authorization; Engram persistence; Docker/Oracle isolation; OAuth/DCR cleanup.
 4. From a trusted clean checkout of the exact branch SHA, run `npm run check`, `npm run build`, `npm test`, `npm run smoke:http`, `npm run smoke:oauth`, `npm run smoke:embedded`. Report the observed pass counts and compiler version. Tests demonstrate logic, not production host execution.
-5. Explicitly inspect package/dependency reproducibility. As of preparation, no `package-lock.json` is committed and CI/Docker use `npm install`. Generate/review a real lockfile from the registry using Node 22, switch to `npm ci`, and rerun checks before calling the build reproducible. Never invent a lockfile.
+5. Review the committed `package-lock.json` generated from a clean GitHub Actions npm install on Node 22. CI and Docker must use `npm ci` and verify the exact lock hash. A moving Docker base tag and vulnerability/supply-chain review remain independent release checks. Never invent a lockfile.
 6. Post review findings linked to the reviewed SHA; request changes on blockers. For a clean review, Claude may submit review APPROVE through its connected GitHub identity, subject to GitHub's author/branch rules and reviewer independence.
 
 ## Conditional merge gate

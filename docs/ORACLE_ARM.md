@@ -51,7 +51,7 @@ A browser AI app on the public Internet **cannot** connect to a loopback-only MC
 In a local checkout with an npm registry connection:
 
 ```sh
-npm install --no-audit --no-fund
+npm ci --no-audit --no-fund
 npm run check
 npm test
 npm run build

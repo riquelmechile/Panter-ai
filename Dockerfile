@@ -1,7 +1,7 @@
 FROM node:22-alpine AS build
 WORKDIR /app
-COPY package.json ./
-RUN npm install --no-audit --no-fund
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
 COPY tsconfig*.json ./
 COPY src ./src
 COPY scripts ./scripts
@@ -10,8 +10,8 @@ RUN npm run build
 
 FROM node:22-alpine
 WORKDIR /app
-COPY package.json ./
-RUN apk add --no-cache git && npm install --omit=dev --no-audit --no-fund \
+COPY package.json package-lock.json ./
+RUN apk add --no-cache git && npm ci --omit=dev --no-audit --no-fund \
     && mkdir -p /data && chown -R node:node /data
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/vendor ./vendor
