@@ -152,7 +152,7 @@ export class PanterRdd {
     let github:GitHubDecision|null=null;
     let local:LocalGitDecision|null=null;
     if(complete&&independence&&runnerAttested&&severe===0&&current.repository&&current.prNumber&&this.github){
-      github=await this.github.inspect({repository:current.repository,prNumber:current.prNumber,expectedSha:current.candidateSha,expectedBase:current.expectedBase,deliveryStrategy:current.deliveryStrategy});
+      github=await this.github.inspect({repository:current.repository,prNumber:current.prNumber,expectedSha:current.candidateSha,expectedBase:current.expectedBase,deliveryStrategy:current.deliveryStrategy,parentAuthorizedSinglePr:current.deliveryStrategy==='single-pr'});
     }
     if(complete&&independence&&runnerAttested&&severe===0&&!current.prNumber&&current.localProject&&this.localGit)
       local=await this.localGit.inspect(current.localProject,current.candidateSha);
