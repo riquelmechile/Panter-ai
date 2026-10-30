@@ -376,7 +376,12 @@ const handler = createMcpHandler(() => {
     inputSchema:z.object({flowId:z.uuid(),expectedRevision:z.number().int().positive()})
   },async x=>execute(async()=>{requireLeader();return agents.closeFlow(x.flowId,x.expectedRevision)}));
 
-  server.registerTool('panter_native_plan',{
+  server.registerTool('panter_native_mode_set',{
+    description:'GPT-A persists user choice AUTO or GPT_A_ONLY. Solo mode refuses remote delegation while requesting maximum native model, effort, speed and parallelism.',
+    inputSchema:z.object({coordinationMode:z.enum(['AUTO','GPT_A_ONLY']),expectedRevision:z.number().int().nonnegative()})
+  },async x=>execute(async()=>{requireLeader();return mesh.setCoordinationMode('gpt-a',x.coordinationMode,x.expectedRevision)}));
+
+  server.registerTool('panter_native_plan',{ 
     description:'GPT-A requests maximum model/effort, fast native subagents and maximum safe parallelism even when working alone. GPT_A_ONLY forbids remote delegation regardless of peer availability. Reports capability gaps; does not launch models.',
     inputSchema:z.object({signals:z.object({requirementsClear:z.boolean(),resumableFromDiff:z.boolean(),risk:z.enum(['low','high']),unknownCodeArea:z.boolean(),independentWorkUnits:z.number().int().min(0).max(32),writesAuthorized:z.boolean()}), assignments:z.array(nativeAssignmentSchema).min(1).max(32),peerStates:z.partialRecord(z.enum(HOSTS),z.enum(['CONNECTED','UNAVAILABLE','UNKNOWN'])).optional(),coordinationMode:z.enum(['AUTO','GPT_A_ONLY']).optional(),capabilities:z.object({nativeSubagents:z.boolean(),maxParallelSubagents:z.number().int().min(0).max(32),toolsAvailable:z.boolean(),observedModel:z.string().max(120).optional(),observedReasoningEffort:z.string().max(32).optional(),observedWorkerProcessing:z.string().max(32).optional()})}),annotations:{readOnlyHint:true}
   },async x=>execute(async()=>{requireLeader();const owner=(await mesh.profiles()).find(p=>p.host==='gpt-a');const requested=owner?.maxRequestedNativeWorkers??32;const enabled=owner?.preferNativeSubagents!==false;return planHostNative({signals:x.signals,assignments:x.assignments,bindings:await mesh.specialistBindings(),peerStates:x.peerStates??{},coordinationMode:x.coordinationMode??owner?.coordinationMode??'AUTO',requestedNativeWorkers:enabled?requested:0,capabilities:{...x.capabilities,nativeSubagents:x.capabilities.nativeSubagents&&enabled,evidence:'HOST_REPORTED_UNVERIFIED'}})}));
