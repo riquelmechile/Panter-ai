@@ -190,7 +190,9 @@ export class GitHubDeliveryGate {
           REVIEWER_IS_AUTHOR:`Independent reviewer ${evidence.login} authored this PR or one of its commits; review is not independent`,
           UNAVAILABLE:evidence.unavailableReason==='COMMIT_HISTORY_UNREADABLE'
             ? 'Independent reviewer evidence unavailable: commit history unreadable; authorship cannot be verified'
-            : 'Independent reviewer evidence unavailable: review list unreadable or exceeds 10 pages',
+            : evidence.unavailableReason==='REVIEWS_UNREADABLE_OR_OVER_LIMIT'
+              ? `Independent reviewer evidence unavailable: review list unreadable or reached the ${MAX_REVIEW_PAGES}-page safety limit`
+              : 'Independent reviewer evidence unavailable',
           APPROVED_EXACT_SHA:'Independent review does not match the frozen candidate SHA',
         }[evidence.state]);
       }

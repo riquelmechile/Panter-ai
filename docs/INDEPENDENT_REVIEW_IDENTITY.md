@@ -70,7 +70,7 @@ Objetivo antes de declarar producción:
 
 ## Rotación y revocación
 
-- **Revocar:** en la cuenta revisora, *Settings → Applications → Authorized OAuth Apps → GitHub CLI → Revoke*; en Oracle, `gh auth logout -h github.com`.
+- **Revocar:** en la cuenta revisora, *Settings → Applications → Authorized OAuth Apps → GitHub CLI → Revoke*; en el host del operador, `gh auth logout -h github.com`.
 - **Volver a conectar:** `gh auth login --hostname github.com --git-protocol https --web` en el usuario que corresponda, e ingresar el código en `github.com/login/device` **con la sesión de la cuenta revisora** (no con la principal).
 - **Tokens classic:** no se usan. Si se generó alguno, se borra en *Settings → Developer settings → Personal access tokens*.
 - **Verificar:** `gh auth status` debe mostrar `sebastianriquelme95-max` y `git config --global --get-regexp credential` debe estar vacío.
