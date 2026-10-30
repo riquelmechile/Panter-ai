@@ -216,3 +216,23 @@ test('trusted proxy preserves separate OAuth registration quotas and fails close
  assert.equal((await call()).status,400,'Missing sanitized client address fails closed');
  assert.equal((await call('198.51.100.5, 198.51.100.4')).status,400,'Ambiguous client IP fails closed');
 },req=>new ClientAddressPolicy('127.0.0.1/32').identify(req)));
+
+test('one IP cannot consume the 100 global consent slots or lock out a second IP',()=>harness(async({request,dir})=>{
+ const client=await register(request);
+ const query=new URLSearchParams({client_id:client,redirect_uri:callbackA,response_type:'code',
+   code_challenge:challenge,code_challenge_method:'S256',scope:'mcp',resource,state:'pending-flood'});
+ const call=(source:string)=>request('/authorize?'+query,{headers:{'x-panter-client-ip':source}});
+ for(let i=0;i<45;i++)assert.equal((await call('198.51.100.20')).status,302);
+ const data=JSON.parse(await (await import('node:fs/promises')).readFile(join(dir,'oauth.json'),'utf8'));
+ assert.ok(data.pending.length<=5,'Only five pending consents can belong to the same IP/client');
+ assert.equal((await call('198.51.100.21')).status,302,'Another IP must retain consent access');
+},req=>new ClientAddressPolicy('127.0.0.1/32').identify(req)));
+test('rate-map saturation never clears live quota entries',()=>harness(async({oauth})=>{
+ const internals=oauth as unknown as {throttled:(key:string,limit:number)=>void;
+  rate:Map<string,{count:number;since:number}>};
+ internals.throttled('revoke:global',2);internals.throttled('revoke:global',2);
+ for(let i=0;i<4095;i++)internals.throttled('source:'+i,1);
+ assert.equal(internals.rate.size,4096);
+ assert.throws(()=>internals.throttled('extra-source',1),/saturated/);
+ assert.throws(()=>internals.throttled('revoke:global',2),/Rate limited/);
+}));

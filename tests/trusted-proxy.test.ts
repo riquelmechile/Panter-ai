@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ClientAddressPolicy } from '../src/core/trusted-proxy.js';
+import { ClientAddressPolicy, rateLimitIdentity } from '../src/core/trusted-proxy.js';
 import type { IncomingMessage } from 'node:http';
 
 function req(peer:string,forwarded?:string,xff?:string):IncomingMessage {
@@ -28,3 +28,13 @@ test('reject dangerous and malformed trust configuration rather than trusting ev
     assert.throws(()=>new ClientAddressPolicy(config),/Invalid/);
   }
 });
+
+test('IPv6 privacy addresses in one /64 share exactly one rate identity',()=>{
+ const first=rateLimitIdentity('2001:db8:abcd:42::1');
+ const second=rateLimitIdentity('2001:0db8:abcd:0042::3c');
+ const other=rateLimitIdentity('2001:db8:abcd:43::1');
+ assert.equal(first,second);
+ assert.notEqual(first,other);
+ assert.notEqual(rateLimitIdentity('198.51.100.2'),rateLimitIdentity('198.51.100.3'));
+});
+
