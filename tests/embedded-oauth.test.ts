@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server } from 'node:http';
 import { EmbeddedOAuth } from '../src/core/embedded-oauth.js';
+import { ClientAddressPolicy } from '../src/core/trusted-proxy.js';
 
 const issuer = 'https://panter.example.org';
 const resource = issuer + '/mcp';
@@ -14,11 +15,11 @@ const callbackB = 'https://claude.ai/api/mcp/auth_callback';
 const secret = 'owner-approval-password-32chars-very-private';
 const verifier = 'a'.repeat(64);
 const challenge = createHash('sha256').update(verifier).digest('base64url');
-async function harness(run: (h: { base: string; oauth: EmbeddedOAuth; dir: string; request: (p: string, init?: RequestInit) => Promise<Response> }) => Promise<void>) {
+async function harness(run: (h: { base: string; oauth: EmbeddedOAuth; dir: string; request: (p: string, init?: RequestInit) => Promise<Response> }) => Promise<void>, clientIdentity?: (req:import('node:http').IncomingMessage)=>string) {
   const dir = await mkdtemp(join(tmpdir(), 'panter-embedded-oauth-'));
   let server: Server | undefined;
   try {
-    const oauth = await EmbeddedOAuth.open({ dir, resource, redirectUris: [callbackA, callbackB], password: secret });
+    const oauth = await EmbeddedOAuth.open({ dir, resource, redirectUris: [callbackA, callbackB], password: secret, clientIdentity });
     server = createServer(async (req, res) => { if (!await oauth.handle(req, res)) { res.statusCode = 404; res.end(); } });
     await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve));
     const address = server.address(); assert.ok(address && typeof address !== 'string');
@@ -204,3 +205,14 @@ test('invalid public revocations remain 200 and do not rewrite persisted OAuth l
  const after=await (await import('node:fs/promises')).readFile(file,'utf8');
  assert.equal(after,before);
 }));
+
+test('trusted proxy preserves separate OAuth registration quotas and fails closed on missing client IP',()=>harness(async({request})=>{
+ const body=JSON.stringify({redirect_uris:[callbackA],client_name:'registered client'});
+ const call=(ip?:string)=>request('/register',{method:'POST',headers:{
+  'content-type':'application/json',...(ip?{'x-panter-client-ip':ip}:{})},body});
+ for(let i=0;i<20;i++)assert.equal((await call('198.51.100.4')).status,201);
+ assert.equal((await call('198.51.100.4')).status,400,'One public client must not exceed its quota');
+ assert.equal((await call('198.51.100.5')).status,201,'Another client behind same proxy keeps a distinct quota');
+ assert.equal((await call()).status,400,'Missing sanitized client address fails closed');
+ assert.equal((await call('198.51.100.5, 198.51.100.4')).status,400,'Ambiguous client IP fails closed');
+},req=>new ClientAddressPolicy('127.0.0.1/32').identify(req)));

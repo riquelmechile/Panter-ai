@@ -1,0 +1,45 @@
+# SECURITY TEMPLATE ONLY: review real ingress chain and TLS before enabling.
+# Place limit_req_zone directives in the Nginx 'http' context, not 'server'.
+limit_req_zone $binary_remote_addr zone=panter_register:10m rate=2r/m;
+limit_req_zone $binary_remote_addr zone=panter_token:10m rate=2r/s;
+limit_req_zone $binary_remote_addr zone=panter_revoke:10m rate=1r/s;
+# Real client IP MUST be established by a trusted edge before this file runs.
+# When behind Cloudflare Tunnel, $remote_addr is otherwise just the tunnel's IP.
+# Configure real_ip_header and set_real_ip_from ONLY for verified upstreams
+# using current official Cloudflare ranges or an authenticated local tunnel.
+# DO NOT forward a user-supplied CF-Connecting-IP or X-Forwarded-For blindly.
+server {
+  listen 127.0.0.1:18443 ssl;
+  server_name panter.example.org;
+  ssl_certificate /etc/ssl/panter/fullchain.pem;
+  ssl_certificate_key /etc/ssl/panter/privkey.pem;
+  limit_req_status 429;
+  location = /register {
+    limit_req zone=panter_register burst=5 nodelay;
+    include snippets/panter_proxy_headers.conf;
+    proxy_pass http://127.0.0.1:18080;
+  }
+  location = /token {
+    limit_req zone=panter_token burst=15 nodelay;
+    include snippets/panter_proxy_headers.conf;
+    proxy_pass http://127.0.0.1:18080;
+  }
+  location = /revoke {
+    limit_req zone=panter_revoke burst=10 nodelay;
+    include snippets/panter_proxy_headers.conf;
+    proxy_pass http://127.0.0.1:18080;
+  }
+  location / {
+    include snippets/panter_proxy_headers.conf;
+    proxy_pass http://127.0.0.1:18080;
+  }
+}
+# Required contents of snippets/panter_proxy_headers.conf:
+# proxy_http_version 1.1;
+# proxy_set_header Host panter.example.org;
+# proxy_set_header X-Panter-Client-IP $remote_addr; # overwrite, NEVER forward caller's
+# proxy_set_header X-Forwarded-For "";            # strip untrusted caller chain
+# proxy_set_header X-Forwarded-Host "";
+# proxy_set_header Connection "";
+# proxy_buffering off;
+# Never configure a proxy_pass target for the operator Unix socket.

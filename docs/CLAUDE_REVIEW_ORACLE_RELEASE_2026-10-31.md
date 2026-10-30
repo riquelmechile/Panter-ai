@@ -58,3 +58,7 @@ After private canary: confirm exact domain/subdomain selected by the operator, H
 ## Handoff / outcome report
 
 Record: reviewed SHA; Claude reviewer identity and actual GitHub review URL; unresolved issue/thread count; exact CI check URLs and results; RDD independence signature status; approved merged SHA if applicable; Oracle machine and project name (not its secrets); canary `/health` and OAuth statuses; data backup location or reference; rollback test; remaining blockers. If any gate fails, **stop before merge/deploy and report the evidence**, rather than silently overriding it.
+
+## Follow-up for Claude: proxy rate limits and owner-only Unix socket
+
+Verify `src/core/trusted-proxy.ts`, `src/core/embedded-oauth.ts`, `src/server.ts`, `tests/trusted-proxy.test.ts`, `tests/embedded-oauth.test.ts`, `scripts/smoke-embedded.mjs` on the **latest head SHA**, not the older `62695dc6`. The dedicated operator listener must be an owner-only Unix socket, require a distinct token, and share **no TCP admin route**, including spoofed Host or other forwarded headers. Inspect Unix socket filesystem ownership/mode and bootstrap failure on an occupied path. Check real-client quota isolation and that untrusted headers cannot spoof IP. A green code test does not configure nginx/Cloudflare. Confirm the trusted ingress proxy actually overwrites the header from a verifiable client source, edges enforce quotas, and the public port never proxies the socket. Request another SHA-bound independent Claude review before merge.
