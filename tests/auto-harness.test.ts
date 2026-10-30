@@ -268,3 +268,39 @@ test('issued local discovery cannot spawn a remote duplicate after peer reconnec
 }));
 
 test('6000-character accepted objective produces a bounded executable packet',()=>withHarness(async h=>{const run=await h.start({project:'app',objective:'x'.repeat(6000),idempotencyKey:'long',writesAuthorized:true,changeSurfaces:['src/value.ts']});const tick=await h.tick(run.id,solo);assert.equal(tick.status,'GPT_A_INLINE');assert.equal((await h.get(run.id))?.objective.length,6000);}));
+
+test('expired operator grant blocks local implementation packets without launching a writer',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'panter-expired-'));
+ const savedNow=Date.now;
+ try{
+  const mesh=await MeshEngine.open(dir),native=await NativeSubagentReview.open(dir);
+  const secure=await AutomaticHarness.open(dir,mesh,native,undefined,undefined,undefined,true);
+  const objective='Update copy safely';
+  const grant=await secure.grantWrite({project:'app',objective,allowedPaths:['src/copy.ts'],ttlSeconds:60});
+  const run=await secure.start({project:'app',objective,idempotencyKey:'expires',writesAuthorized:true,writeGrantId:grant.grantId,changeSurfaces:['src/copy.ts']});
+  Date.now=()=>grant.expiresAt+1;
+  const blocked=await secure.tick(run.id,solo);
+  assert.equal(blocked.status,'BLOCKED_WRITE_GRANT_EXPIRED');
+  assert.equal(blocked.next.length,0);
+  assert.equal((await secure.get(run.id))?.steps[0]?.status,'PENDING');
+ }finally{Date.now=savedNow;await rm(dir,{recursive:true,force:true});}
+});
+test('expired grant also blocks implementation-unit creation and later corrective writes',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'panter-grant-phases-'));
+ const savedNow=Date.now;
+ try{
+  const mesh=await MeshEngine.open(dir),native=await NativeSubagentReview.open(dir);
+  const secure=await AutomaticHarness.open(dir,mesh,native,undefined,undefined,undefined,true);
+  const objective='Repair authentication safely';
+  const grant=await secure.grantWrite({project:'app',objective,allowedPaths:['src/auth'],ttlSeconds:60});
+  const run=await secure.start({project:'app',objective,idempotencyKey:'phase-expiry',writesAuthorized:true,writeGrantId:grant.grantId,
+    changeSurfaces:['src/auth/a.ts','src/auth/b.ts'],observations:{independentWorkUnits:2}});
+  let phase=await secure.tick(run.id,solo);
+  assert.equal(phase.status,'GPT_A_INLINE');
+  await secure.report(run.id,phase.phaseId!,{summary:'Design complete',evidence:['Scoped implementation plan']});
+  const current=await secure.get(run.id);assert.ok(current);
+  Date.now=()=>grant.expiresAt+1;
+  await assert.rejects(secure.defineUnits(run.id,[{objective:'A',paths:['src/auth/a.ts']},{objective:'B',paths:['src/auth/b.ts']}],current.revision),/Active operator grant/);
+  assert.equal((await secure.tick(run.id,solo)).status,'BLOCKED_WRITE_GRANT_EXPIRED');
+ }finally{Date.now=savedNow;await rm(dir,{recursive:true,force:true});}
+});
