@@ -304,3 +304,29 @@ test('expired grant also blocks implementation-unit creation and later correctiv
   assert.equal((await secure.tick(run.id,solo)).status,'BLOCKED_WRITE_GRANT_EXPIRED');
  }finally{Date.now=savedNow;await rm(dir,{recursive:true,force:true});}
 });
+
+test('expired operator grant rejects a fresh-SHA correction without changing the candidate',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'panter-expired-correction-'));
+ const originalNow=Date.now;
+ try{
+  const mesh=await MeshEngine.open(dir),native=await NativeSubagentReview.open(dir);
+  const secure=await AutomaticHarness.open(dir,mesh,native,undefined,undefined,undefined,true);
+  const objective='Repair token authentication';
+  const grant=await secure.grantWrite({project:'app',objective,allowedPaths:['src/auth'],ttlSeconds:60});
+  const run=await secure.start({project:'app',objective,idempotencyKey:'correct-expired',writesAuthorized:true,
+    writeGrantId:grant.grantId,changeSurfaces:['src/auth/login.ts']});
+  let step=await secure.tick(run.id,solo);
+  await secure.report(run.id,step.phaseId!,{summary:'Designed',evidence:['Design checks']});
+  step=await secure.tick(run.id,solo);
+  await secure.report(run.id,step.phaseId!,{summary:'Implemented',evidence:['Git commit'],candidateSha:sha,runId:'builder-run-1'});
+  step=await secure.tick(run.id,solo);
+  await secure.report(run.id,step.phaseId!,{summary:'Verified',evidence:['Independent tests'],candidateSha:sha,runId:'verifier-run-1'});
+  await secure.tick(run.id,solo);
+  const before=await secure.get(run.id);assert.ok(before);
+  Date.now=()=>grant.expiresAt+1;
+  await assert.rejects(secure.recordCorrection(run.id,{candidateSha:'b'.repeat(40),runId:'corrector-run-1',evidence:['Fix tested']},before.revision),/Active operator grant/);
+  const after=await secure.get(run.id);
+  assert.equal(after?.candidateSha,sha);
+  assert.equal(after?.correctionAttempts,0);
+ }finally{Date.now=originalNow;await rm(dir,{recursive:true,force:true});}
+});
