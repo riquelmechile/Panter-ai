@@ -35,6 +35,9 @@ export type HarnessInput={project:string;objective:string;idempotencyKey:string;
   changeSurfaces?:string[];coordinationMode?:HarnessMode;judgmentDayRequested?:boolean;
   /** Facts supplied by the host, not agent selections. Missing facts are handled conservatively. */
   observations?:{requirementsClear?:boolean;resumableFromDiff?:boolean;independentWorkUnits?:number;unknownCodeArea?:boolean};};
+export type HarnessTickResult={runId:string;mode:HarnessMode;risk:'LOW'|'HIGH';reason:string[];
+  status:string;next:Array<{agentId?:string|null;workId?:string;phase?:HarnessPhase;[key:string]:unknown}>;
+  phaseId?:string;workId?:string;reviewId?:string;concurrentSlots?:number;[key:string]:unknown};
 export type HarnessRuntime={nativeSubagents:boolean;maxParallelSubagents:number;toolsAvailable:boolean;
   peerStates?:Partial<Record<Host,'CONNECTED'|'UNAVAILABLE'|'UNKNOWN'>>};
 
@@ -49,7 +52,7 @@ export function chooseHarness(input:HarnessInput){
   if(o.independentWorkUnits!==undefined)ensure(Number.isInteger(o.independentWorkUnits)&&o.independentWorkUnits>=0&&o.independentWorkUnits<=32,'Invalid unit count');
   const reasons:string[]=[];
   const unknown=o.unknownCodeArea===true||(!paths.length&&input.writesAuthorized);
-  const risk=input.writesAuthorized&&(input.judgmentDayRequested===true||unknown||o.requirementsClear===false||o.resumableFromDiff===false||
+  const risk:'LOW'|'HIGH'=input.writesAuthorized&&(input.judgmentDayRequested===true||unknown||o.requirementsClear===false||o.resumableFromDiff===false||
     paths.some(p=>risky.test(p))||riskyGoal.test(input.objective))?'HIGH':'LOW';
   if(unknown)reasons.push('Code surfaces unknown: run read-only discovery before any edit');
   if(paths.some(p=>risky.test(p))||riskyGoal.test(input.objective))reasons.push('Security, data, delivery, or other high-impact surface');
@@ -60,7 +63,7 @@ export function chooseHarness(input:HarnessInput){
     [...(unknown||o.requirementsClear===false?['DISCOVER'] as HarnessPhase[]:[]),'DESIGN','IMPLEMENT',
       ...(risk==='HIGH'?['VERIFY','REVIEW'] as HarnessPhase[]:[])];
   // Judgment Day is an explicitly requested special workflow, never silently automatic.
-  const reviewKind=input.writesAuthorized&&risk==='HIGH'?(input.judgmentDayRequested?'judgment-day':'4r'):null;
+  const reviewKind:'4r'|'judgment-day'|null=input.writesAuthorized&&risk==='HIGH'?(input.judgmentDayRequested?'judgment-day':'4r'):null;
   return {paths,risk,reasons,phases,reviewKind,mode:input.coordinationMode??'AUTO'};
 }
 
@@ -133,7 +136,7 @@ export class AutomaticHarness {
       r.revision++;return r;
     });
   }
-  async tick(runId:string,runtime:HarnessRuntime){
+  async tick(runId:string,runtime:HarnessRuntime):Promise<HarnessTickResult>{
     ensure(Number.isInteger(runtime.maxParallelSubagents)&&runtime.maxParallelSubagents>=0&&runtime.maxParallelSubagents<=32,'Invalid host native capacity');
     const record=await this.get(runId);ensure(record,'Harness not found');
     const phase=record.steps.find(s=>s.status!=='COMPLETE');
