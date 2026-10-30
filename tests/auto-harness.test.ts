@@ -255,3 +255,14 @@ test('bounded correction requires a new SHA and resets independent verification 
 }));
 
 test('changing Judgment Day intent invalidates start idempotency',()=>withHarness(async h=>{const i={project:'app',objective:'Change copy',idempotencyKey:'jd-digest',writesAuthorized:true,changeSurfaces:['src/copy.ts']};await h.start(i);await assert.rejects(h.start({...i,judgmentDayRequested:true}),/idempotency conflict/); }));
+
+test('issued local discovery cannot spawn a remote duplicate after peer reconnect',()=>withHarness(async(h,n,m)=>{
+ await m.setProfile('gpt-a',{host:'claude',actorId:'actor-claude',modelRequest:'host-default',effortRequest:'max',roles:['explorer']},0);
+ await m.bindSpecialist('gpt-a',{agentId:'gentle-ai-explore',host:'claude',modelRequest:'host-default',effortRequest:'max',skillIds:['gentle-ai']},0);
+ const run=await h.start({project:'app',objective:'Find unknown bug',idempotencyKey:'restore',writesAuthorized:true});
+ const first=await h.tick(run.id,{...solo,peerStates:{claude:'UNAVAILABLE'}});
+ assert.equal(first.status,'GPT_A_NATIVE');
+ const retry=await h.tick(run.id,{...solo,peerStates:{claude:'CONNECTED'}});
+ assert.equal(retry.status,'WAITING_HOST_PHASE_REPORT');
+ assert.equal((await m.pending('claude')).length,0);
+}));
