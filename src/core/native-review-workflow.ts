@@ -6,6 +6,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { REVIEW_4R, specialistPacket } from './gentle-catalog.js';
 import { hostRequest } from './policy.js';
+import type { RunnerAttestation } from './review-attestation.js';
 
 const shaPattern = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const severity = new Set(['BLOCKER', 'CRITICAL', 'WARNING', 'SUGGESTION']);
@@ -13,7 +14,7 @@ const blake = (s: string) => createHash('sha256').update(s).digest('hex');
 function requireValid(value: unknown, reason: string): asserts value { if (!value) throw new Error(reason); }
 export type ReviewKind = '4r' | 'judgment-day';
 export type NativeReviewFinding = { id: string; location: string; severity: 'BLOCKER'|'CRITICAL'|'WARNING'|'SUGGESTION'; claim: string; proofRefs: string[] };
-export type NativeReviewReport = { agentId: string; candidateSha: string; packetDigest: string; subagentRunId: string; evidence: string[]; findings: NativeReviewFinding[] };
+export type NativeReviewReport = { agentId: string; candidateSha: string; packetDigest: string; subagentRunId: string; evidence: string[]; findings: NativeReviewFinding[]; attestation?: RunnerAttestation };
 export type NativeReviewSlot = {
   id: string; agentId: string; candidateSha: string; packetDigest: string; assetDigests: Record<string,string>;
   state: 'AWAITING_SUBAGENT'|'REPORTED'; receiptDigest: string|null; subagentRunId: string|null;
@@ -65,7 +66,7 @@ export class NativeSubagentReview {
     const policy=hostRequest('chatgpt');
     const agents=coreRoles[input.kind];
     const packets=await Promise.all(agents.map(agentId=>specialistPacket({agentId,objective:input.objective,
-      candidateSha:input.candidateSha,skillIds:input.kind==='judgment-day'?['judgment-day']:[],
+      candidateSha:input.candidateSha,skillIds:input.kind==='judgment-day'?['judgment-day']:['gentle-ai'],
       modelRequest:policy.model,effortRequest:policy.reasoningEffort})));
     return this.write(d=>{
       // Re-check inside serialized transaction: concurrent calls must be idempotent.
@@ -86,7 +87,7 @@ export class NativeSubagentReview {
     const severe=findings.filter(f=>f.severity==='CRITICAL'||f.severity==='BLOCKER');
     const runIds=r.slots.map(s=>s.subagentRunId).filter(Boolean);
     return {reviewId:r.id,missionId:r.missionId,kind:r.kind,candidateSha:r.candidateSha,revision:r.revision,
-      slots:r.slots.map(s=>({slotId:s.id,agentId:s.agentId,packetDigest:s.packetDigest,state:s.state,subagentRunId:s.subagentRunId,receiptDigest:s.receiptDigest})),
+      slots:r.slots.map(s=>({slotId:s.id,agentId:s.agentId,packetDigest:s.packetDigest,state:s.state,subagentRunId:s.subagentRunId,receiptDigest:s.receiptDigest,attestation:s.report?.attestation??null,evidence:s.report?.evidence??[],findings:s.report?.findings??[]})),
       missing,findings,severeFindings:severe,reportedSubagentRuns:runIds,
       stage:!all?'AWAITING_SUBAGENT_REPORTS':severe.length?'FINDINGS_REQUIRE_TRIAGE':'READY_FOR_RDD_CONTROLLER',
       evidenceComplete:all,independentNativeRunsAttested:false,approved:false,nativeRddAuthority:false,
@@ -101,12 +102,12 @@ export class NativeSubagentReview {
     const slot=r.slots.find(x=>x.id===slotId);requireValid(slot,'Review slot not found');
     const policy=hostRequest('chatgpt');
     const packet=await specialistPacket({agentId:slot.agentId,objective:r.objective,candidateSha:r.candidateSha,
-      skillIds:r.kind==='judgment-day'?['judgment-day']:[],modelRequest:policy.model,effortRequest:policy.reasoningEffort});
+      skillIds:r.kind==='judgment-day'?['judgment-day']:['gentle-ai'],modelRequest:policy.model,effortRequest:policy.reasoningEffort});
     requireValid(packet.digest===slot.packetDigest,'Catalog assets changed: frozen packet mismatch');
     return {reviewId:r.id,slotId:slot.id,kind:r.kind,candidateSha:r.candidateSha,
       ...packet,packetDigest:packet.digest,execution:'HOST_NATIVE_SUBAGENT_REQUESTED' as const,
       independenceRequirement:'Launch a new, separate native child context for this exact slot, never share other lens or blind judge reports. Do not let the implementing agent review its own work.',
-      returnContract:'Child returns JSON with agentId, candidateSha, packetDigest, a unique subagentRunId, evidence[], and findings[]. Each finding includes id, location, severity, claim and proofRefs[]. Parent submits this JSON via panter_native_review_submit. Host-reported child identity is not cryptographically attested.',
+      returnContract:'Child returns JSON with agentId, candidateSha, packetDigest, a unique subagentRunId, evidence[], and findings[]. Each finding includes id, location, severity, claim and proofRefs[]. Parent submits this JSON via panter_native_review_submit. For a production Panter-RDD approval, a trusted host runner must attach an Ed25519 attestation of the immutable slot invocation; model-reported child IDs alone are not sufficient.',
       capacityRequest:{model:policy.worker.model,reasoning:policy.worker.reasoningEffort,processing:policy.worker.preferredProcessing},
       launchPerformed:false};
   }
