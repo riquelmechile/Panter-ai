@@ -29,6 +29,9 @@ const bind = process.env.PANTER_BIND_HOST ?? '127.0.0.1';
 const authMode = process.env.PANTER_AUTH_MODE ?? 'dev-static';
 if (!['dev-static', 'external-jwt', 'embedded'].includes(authMode)) throw new Error('Unsupported PANTER_AUTH_MODE');
 const token = process.env.PANTER_TOKEN ?? '';
+// OAuth-mode operator control is separate from AI clients and accepted on loopback only.
+const operatorToken=process.env.PANTER_OPERATOR_TOKEN??'';
+if(operatorToken&&(operatorToken.length<32||operatorToken===token))throw new Error('Invalid PANTER_OPERATOR_TOKEN');
 const dataDir = process.env.PANTER_DATA_DIR ?? '.panter-data';
 const allowedHosts = (process.env.PANTER_ALLOWED_HOSTS ?? '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
 const allowedOrigins = (process.env.PANTER_ALLOWED_ORIGINS ?? '').split(',').map(x => x.trim()).filter(Boolean);
@@ -75,6 +78,8 @@ const rddRunnerKeys:Record<string,string>=rddKeysFile?JSON.parse(await readFile(
 const localGit=process.env.PANTER_RDD_LOCAL_WORKTREES_FILE?await LocalGitVerifier.open(process.env.PANTER_RDD_LOCAL_WORKTREES_FILE):null;
 const panterRdd = await PanterRdd.open(dataDir,nativeSubagentReview,mesh,githubGate,rddRunnerKeys,localGit);
 const harness = await AutomaticHarness.open(dataDir,mesh,nativeSubagentReview,githubGate,nativeReview,panterRdd,true);
+// Legacy/direct A2A writers cannot bypass the operator-issued harness grant.
+mesh.setWriteGuard((missionId,paths)=>harness.authorizeDelegatedWrite(missionId,paths));
 const engramEnabled = process.env.PANTER_ENGRAM_ENABLED === '1';
 const memory = engramEnabled ? await openEngramBridge(dataDir, process.env.PANTER_ENGRAM_COMMAND ?? 'engram') : null;
 const projectMemories=new Map<string,Promise<EngramMemory>>();
@@ -614,7 +619,12 @@ const http = createServer(async (req, res) => {
   }
   if (req.url !== '/mcp') { res.writeHead(404); res.end('Not found'); return; }
   const h = hostname(req.headers.host);
-  if (!h || !(allowedHosts.length ? allowedHosts.includes(h) : ['localhost', '127.0.0.1', '::1'].includes(h))) {
+  const remoteAddr=req.socket.remoteAddress??'';
+  const fromLoopback=['127.0.0.1','::1','::ffff:127.0.0.1'].includes(remoteAddr);
+  const localOperator=!!operatorToken&&authMode!=='dev-static'&&fromLoopback&&['localhost','127.0.0.1','::1'].includes(h)&&
+    !req.headers.origin&&!req.headers['x-forwarded-for']&&!req.headers['x-forwarded-host']&&
+    staticBearerMatch(req.headers.authorization,operatorToken);
+  if (!h || !(localOperator||(allowedHosts.length ? allowedHosts.includes(h) : ['localhost', '127.0.0.1', '::1'].includes(h)))) {
     res.writeHead(403); res.end('Host not allowed'); return;
   }
   if (req.headers.origin && !allowedOrigins.includes(req.headers.origin)) {
@@ -622,7 +632,9 @@ const http = createServer(async (req, res) => {
   }
   const peer=Object.entries(peerTokens).find(([,v])=>staticBearerMatch(req.headers.authorization,v))?.[0];
   let actor: string | undefined;
-  if (embedded) {
+  if (localOperator) {
+    actor='admin';
+  } else if (embedded) {
     try { actor=await embedded.authenticate(req.headers.authorization); } catch { /* invalid credentials */ }
   } else if (oauth) {
     try { actor=oauth.verifyBearer(req.headers.authorization); } catch { /* invalid credentials are indistinguishable */ }
