@@ -77,3 +77,29 @@ test('GPT-A with no tools and no peers reports a blocked capability rather than 
   const p=planHostNative({...base,signals:low,assignments:[task()],capabilities:{...base.capabilities,toolsAvailable:false}});
   assert.equal(p.assignments[0]?.execution,'BLOCKED_TOOLS');
 });
+
+test('Durable GPT-A ODD run resumes after restart, but self execution cannot approve high-risk review', async()=>{
+  const { mkdtemp,rm } = await import('node:fs/promises');
+  const {tmpdir}=await import('node:os');
+  const {join}=await import('node:path');
+  const {AgentEngine}=await import('../src/core/agents.js');
+  const {PanterStore}=await import('../src/core/store.js');
+  const dir=await mkdtemp(join(tmpdir(),'panter-native-flow-'));
+  try {
+    const store=await PanterStore.open(dir);
+    const agents=await AgentEngine.open(dir,store);
+    const mission=await store.createMission('project-x','Fix critical auth');
+    const flow=await agents.createFlow(mission.id,'Preserve this exact requirement: auth must not be bypassed.',high,true);
+    const task=await agents.addTask({flowId:flow.id,role:'builder',target:'gpt-a',objective:'Fix auth',scopes:['src/auth'],idempotencyKey:'one'});
+    const claimed=await agents.claim('gpt-a','gpt-a');
+    assert.equal(claimed?.id,task.id);
+    await agents.report(task.id,'gpt-a',claimed!.leaseGeneration,{summary:'Fix prepared',evidence:['commit '+sha]});
+    await agents.freezeCandidate(flow.id,sha,1);
+    const reopened=await AgentEngine.open(dir,store);
+    const summary=await reopened.summary(flow.id);
+    assert.equal(summary?.flow.spec,'Preserve this exact requirement: auth must not be bypassed.');
+    assert.equal(summary?.flow.candidateSha,sha);
+    assert.equal(summary?.counts.DONE,1);
+    await assert.rejects(reopened.closeFlow(flow.id,2),/independent verification/);
+  } finally {await rm(dir,{recursive:true,force:true})}
+});
