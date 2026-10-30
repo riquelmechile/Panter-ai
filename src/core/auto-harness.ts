@@ -334,7 +334,7 @@ export class AutomaticHarness {
     }
     if(phase.phase==='IMPLEMENT'&&(!record.paths.length||record.permission!=='WRITE_APPROVED'))
       return {...common,status:'BLOCKED_EDIT_SCOPE_OR_AUTHORIZATION',phaseId:phase.id,next:[]};
-    if(phase.phase==='IMPLEMENT'&&phase.status==='PENDING'&&!(await this.activeWriteGrant(runId,record.paths)))
+    if(phase.phase==='IMPLEMENT'&&!(await this.activeWriteGrant(runId,record.paths)))
       return {...common,status:'BLOCKED_WRITE_GRANT_EXPIRED',phaseId:phase.id,next:[],instruction:'Obtain fresh operator authorization before issuing new writer tasks.'};
     if(['VERIFY','REVIEW','JUDGMENT'].includes(phase.phase)&&!record.candidateSha)
       return {...common,status:'BLOCKED_CANDIDATE_SHA',phaseId:phase.id,next:[]};
