@@ -20,13 +20,13 @@ export type PanterRddState = 'COLLECTING'|'NEEDS_CORRECTION'|'NEEDS_REVIEW_EVIDE
 export type RddSource = 'NATIVE' | 'REMOTE';
 export type PanterRddRecord = {
   id:string; missionId:string; reviewId:string; source:RddSource; candidateSha:string; kind:'4r'|'judgment-day';
-  implementerRunId?:string; repository?:string; prNumber?:number; expectedBase?:string; localProject?:string; deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main';
+  implementerRunId?:string; implementerRunIds?:string[]; repository?:string; prNumber?:number; expectedBase?:string; localProject?:string; deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main';
   state:PanterRddState; evidenceDigest:string|null; githubEvidenceDigest:string|null;
   revision:number; createdAt:string; updatedAt:string; acknowledgedAt:string|null; supersededBy:string|null;
 };
 type Store={version:1;reviews:PanterRddRecord[]};
 type Begin={missionId:string;reviewId:string;source:RddSource;candidateSha:string;kind:'4r'|'judgment-day';
-  implementerRunId?:string; repository?:string;prNumber?:number;expectedBase?:string;localProject?:string;deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main'};
+  implementerRunId?:string; implementerRunIds?:string[]; repository?:string;prNumber?:number;expectedBase?:string;localProject?:string;deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main'};
 
 export class PanterRdd {
   private data:Store={version:1,reviews:[]};
@@ -62,6 +62,7 @@ export class PanterRdd {
     demand(i.source==='NATIVE'||i.source==='REMOTE','Unknown RDD review source');
     demand(i.kind==='4r'||i.kind==='judgment-day','Invalid RDD review type');
     demand(!i.implementerRunId||/^[A-Za-z0-9._:-]{8,160}$/.test(i.implementerRunId),'Invalid implementer execution ID');
+    demand(i.implementerRunIds===undefined||(Array.isArray(i.implementerRunIds)&&i.implementerRunIds.length<=64&&i.implementerRunIds.every(id=>typeof id==='string'&&/^[A-Za-z0-9._:-]{8,160}$/.test(id))&&new Set(i.implementerRunIds).size===i.implementerRunIds.length),'Invalid or duplicate implementer identities');
     demand(!i.repository||validRepo.test(i.repository),'Invalid GitHub repository');
     demand(!i.prNumber||(!!i.repository&&Number.isInteger(i.prNumber)&&i.prNumber>0),'GitHub PR requires repository');
     demand(!i.expectedBase||!!i.repository,'GitHub base requires repository');
@@ -70,6 +71,7 @@ export class PanterRdd {
   /** Begin creates authority for an existing review, never from an LLM-provided reviewer verdict. */
   async begin(i:Begin){
     this.validateBegin(i);
+    const allAuthors=[...new Set([i.implementerRunId,...(i.implementerRunIds??[])].filter((id):id is string=>!!id))].sort();
     const source = i.source==='NATIVE'
       ? await this.native.status(i.reviewId)
       : (await this.mesh.reviewStatus('gpt-a',i.reviewId)).review;
@@ -80,8 +82,8 @@ export class PanterRdd {
     return this.write(d=>{
       const original=d.reviews.find(x=>x.missionId===i.missionId&&x.reviewId===i.reviewId);
       if(original){
-        demand(original.source===i.source&&original.candidateSha===i.candidateSha&&original.kind===i.kind&&original.implementerRunId===i.implementerRunId,
-          'Conflicting review registration');
+        demand(original.source===i.source&&original.candidateSha===i.candidateSha&&original.kind===i.kind&&original.implementerRunId===i.implementerRunId&&JSON.stringify(original.implementerRunIds??[])===JSON.stringify(allAuthors),
+          'Conflicting review registration or implementer identities');
         demand(!original.repository||original.repository===i.repository,'RDD repository binding conflict');
         demand(!original.prNumber||original.prNumber===i.prNumber,'RDD PR binding conflict');
         demand(!original.expectedBase||original.expectedBase===i.expectedBase,'RDD base binding conflict');
@@ -97,7 +99,7 @@ export class PanterRdd {
         return original;
       }
       const now=new Date().toISOString();
-      const r:PanterRddRecord={id:randomUUID(),...i,state:'COLLECTING',evidenceDigest:null,githubEvidenceDigest:null,
+      const r:PanterRddRecord={id:randomUUID(),...i,implementerRunIds:allAuthors,state:'COLLECTING',evidenceDigest:null,githubEvidenceDigest:null,
         revision:1,createdAt:now,updatedAt:now,acknowledgedAt:null,supersededBy:null};
       d.reviews.push(r);return r;
     });
@@ -109,13 +111,14 @@ export class PanterRdd {
     const current=await this.get(id);demand(current,'Unknown Panter-RDD transaction');
     if(current.state==='SUPERSEDED')return {record:current,reason:'A new candidate superseded this review',approved:false};
     let severe=0,complete=false,independence=false,runnerAttested=false,receipts:string[]=[];
+    const authorRuns=new Set([current.implementerRunId,...(current.implementerRunIds??[])].filter((id):id is string=>!!id));
     if(current.source==='NATIVE'){
       const r=await this.native.status(current.reviewId);
       demand(r.candidateSha===current.candidateSha&&r.missionId===current.missionId&&r.kind===current.kind,'Native review target changed');
       const slots=r.slots;
       complete=r.evidenceComplete&&slots.every(s=>s.state==='REPORTED'&&/^[0-9a-f]{64}$/.test(s.receiptDigest??''));
       const runs=slots.map(s=>s.subagentRunId).filter((v):v is string=>typeof v==='string');
-      independence=complete&&runs.length===slots.length&&new Set(runs).size===runs.length&&runs.every(v=>v!==current.implementerRunId&&v!=='gpt-a');
+      independence=complete&&runs.length===slots.length&&new Set(runs).size===runs.length&&runs.every(v=>!authorRuns.has(v)&&v!=='gpt-a');
       runnerAttested=independence&&slots.every(slot=>verifyRunnerSignature({reviewId:current.reviewId,slotId:slot.slotId,agentId:slot.agentId,
         candidateSha:current.candidateSha,packetDigest:slot.packetDigest,subagentRunId:slot.subagentRunId!,
         evidence:slot.evidence,findings:slot.findings},slot.attestation??undefined,this.runnerKeys));
@@ -132,7 +135,7 @@ export class PanterRdd {
       const parsed=r.work.map(w=>{try{return JSON.parse(w.result??'') as Record<string,unknown>;}catch{return null;}});
       const ids=parsed.map(d=>d?.subagentRunId).filter((v):v is string=>typeof v==='string');
       independence=complete&&r.work.every(w=>w.host!=='gpt-a')&&ids.length===r.work.length&&
-        new Set(ids).size===ids.length&&ids.every(id=>id!=='gpt-a'&&id!==current.implementerRunId);
+        new Set(ids).size===ids.length&&ids.every(id=>id!=='gpt-a'&&!authorRuns.has(id));
       severe=0;
       if(complete)for(const data of parsed){
         if(data&&Array.isArray(data.findings))severe+=data.findings.filter((f:{severity?:string})=>f.severity==='CRITICAL'||f.severity==='BLOCKER').length;
