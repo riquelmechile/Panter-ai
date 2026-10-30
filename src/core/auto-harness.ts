@@ -33,7 +33,7 @@ export type HarnessRun={id:string;project:string;githubRepository?:string;github
   mode:HarnessMode; paths:string[]; risk:'LOW'|'HIGH'; reviewTier?:'passive'|'medium'|'high'; reason:string[]; candidateSha:string|null;
   reviewKind:'4r'|null; reviewId:string|null; reviewTransport:'NATIVE'|'REMOTE'|null;
   judgmentRequested?:boolean; judgmentId?:string|null; writeGrantId?:string;
-  correctionAttempts?:number; correctionRunId?:string; previousReviewId?:string|null; deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main';
+  correctionAttempts?:number; correctionRunId?:string; correctionRunIds?:string[]; previousReviewId?:string|null; deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main';
   units?:Array<{id:string;objective:string;paths:string[];state:'PENDING'|'REPORTED';runId?:string;summary?:string;evidence?:string[]}>;
   steps:HarnessStep[]; createdAt:string;revision:number;};
 type WriteGrant={id:string;project:string;objectiveDigest:string;allowedPaths:string[];expiresAt:number;boundRunId:string|null};
@@ -145,6 +145,18 @@ export class AutomaticHarness {
     ensure(grant&&grant.boundRunId===id&&grant.expiresAt>Date.now(),'Active operator grant required');
     for(const p of paths)ensure(run.paths.some(q=>p===q||p.startsWith(q+'/'))&&grant.allowedPaths.some(q=>p===q||p.startsWith(q+'/')),'Out-of-scope writer');
   }
+  /** Every author of the frozen candidate is excluded from independent review. */
+  private authorRunIds(run:HarnessRun):string[]{
+    return [...new Set([run.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId,
+      ...(run.units??[]).map(u=>u.runId),...(run.correctionRunIds??[]),run.correctionRunId]
+      .filter((id):id is string=>typeof id==='string'&&id.length>0))].sort();
+  }
+  /** Bound grant checks are repeated at each new write packet, not just mission start. */
+  private async activeWriteGrant(runId:string,paths:string[]):Promise<boolean>{
+    if(!this.requireWriteGrant)return true;
+    try{await this.authorizeDelegatedWrite(runId,paths);return true;}catch{return false;}
+  }
+
   /** Bind a PR discovered/created by an authorized host after work started.
    * This changes only Panter's routing metadata, never the remote repository. */
   async bindGithub(runId:string,input:{repository:string;prNumber:number;expectedBase?:string},expectedRevision:number){
@@ -175,6 +187,7 @@ export class AutomaticHarness {
     ensure(/^[A-Za-z0-9._:-]{8,160}$/.test(payload.runId),'Correction run identity required');
     ensure(Array.isArray(payload.evidence)&&payload.evidence.length>0&&payload.evidence.length<=30&&
       payload.evidence.every(x=>typeof x==='string'&&x.trim()&&x.length<=1000),'Correction evidence required');
+    if(!(await this.activeWriteGrant(runId,(await this.get(runId))?.paths??[])))throw new Error('Active operator grant required for correction');
     return this.write(s=>{const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');
       ensure(r.revision===expectedRevision,'Stale correction revision');
       ensure(r.permission==='WRITE_APPROVED'&&r.paths.length>0,'Correction is not authorized within a scoped writable run');
@@ -186,6 +199,7 @@ export class AutomaticHarness {
       r.previousReviewId=r.reviewId;
       r.candidateSha=payload.candidateSha;r.reviewId=null;r.reviewTransport=null;r.judgmentId=null;
       r.correctionAttempts=(r.correctionAttempts??0)+1;r.correctionRunId=payload.runId;
+      r.correctionRunIds=[...new Set([...(r.correctionRunIds??[]),payload.runId])];
       for(const step of r.steps)if(['VERIFY','REVIEW','JUDGMENT'].includes(step.phase)){
         step.status='PENDING';step.execution=undefined;step.remoteWorkId=undefined;step.result=undefined;
       }
@@ -196,6 +210,7 @@ export class AutomaticHarness {
    * Each unit must have a disjoint and explicitly scoped surface. Separate worktrees
    * and actual child processes are responsibilities of the trusted host runner. */
   async defineUnits(runId:string,units:Array<{objective:string;paths:string[]}>,expectedRevision:number){
+    if(!(await this.activeWriteGrant(runId,(await this.get(runId))?.paths??[])))throw new Error('Active operator grant required for implementation units');
     ensure(units.length>=2&&units.length<=16,'Parallel implementation requires 2-16 units');
     const derived=units.map(u=>{ensure(u.objective.trim().length>0&&u.objective.length<=3000,'Invalid unit objective');
       const paths=[...new Set(u.paths.map(safePath))];ensure(paths.length>0&&paths.length<=12,'Units require scoped paths');
@@ -319,6 +334,8 @@ export class AutomaticHarness {
     }
     if(phase.phase==='IMPLEMENT'&&(!record.paths.length||record.permission!=='WRITE_APPROVED'))
       return {...common,status:'BLOCKED_EDIT_SCOPE_OR_AUTHORIZATION',phaseId:phase.id,next:[]};
+    if(phase.phase==='IMPLEMENT'&&phase.status==='PENDING'&&!(await this.activeWriteGrant(runId,record.paths)))
+      return {...common,status:'BLOCKED_WRITE_GRANT_EXPIRED',phaseId:phase.id,next:[],instruction:'Obtain fresh operator authorization before issuing new writer tasks.'};
     if(['VERIFY','REVIEW','JUDGMENT'].includes(phase.phase)&&!record.candidateSha)
       return {...common,status:'BLOCKED_CANDIDATE_SHA',phaseId:phase.id,next:[]};
     if(phase.phase==='REVIEW'||phase.phase==='JUDGMENT'){
@@ -330,7 +347,7 @@ export class AutomaticHarness {
         if(severe.length||rddRecord?.state==='NEEDS_CORRECTION'){
           const findings=severe.length?severe.map(f=>`${f.id}: ${f.location}: ${f.claim}`):['See Panter-RDD severe findings'];
           if((record.correctionAttempts??0)>=2)return {...common,status:'CORRECTION_BUDGET_EXHAUSTED',phaseId:phase.id,next:[],findings};
-          if(record.permission!=='WRITE_APPROVED')return {...common,status:'CORRECTION_REQUIRES_WRITE_GRANT',phaseId:phase.id,next:[],findings};
+          if(record.permission!=='WRITE_APPROVED'||!(await this.activeWriteGrant(runId,record.paths)))return {...common,status:'CORRECTION_REQUIRES_WRITE_GRANT',phaseId:phase.id,next:[],findings};
           const packet=await specialistPacket({agentId:'gentle-ai-worker',objective:`Fix only the review findings within the existing authorization for ${record.objective}. ${findings.join(' | ')}`,
             skillIds:['gentle-ai','rdd-defect-workflow'],candidateSha:record.candidateSha!,
             allowedEditSurfaces:record.paths,modelRequest:policy.model,effortRequest:policy.reasoningEffort});
@@ -363,7 +380,8 @@ export class AutomaticHarness {
         candidateSha:latest.candidateSha!,kind:'judgment-day',localProject:latest.project,
         repository:latest.githubRepository??(githubProject.test(latest.project)?latest.project:undefined),
         prNumber:latest.githubPrNumber,expectedBase:latest.githubExpectedBase,deliveryStrategy:latest.deliveryStrategy,
-        implementerRunId:latest.correctionRunId??latest.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId});
+        implementerRunId:latest.correctionRunId??latest.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId,
+        implementerRunIds:this.authorRunIds(latest)});
       const verdict=await this.rdd.assess(tx.id);
       if(verdict.record.state==='APPROVED_PENDING_ACK')await this.rdd.acknowledge(tx.id,verdict.record.revision);
       if(!['APPROVED_PENDING_ACK','ACKNOWLEDGED'].includes(verdict.record.state))
@@ -403,7 +421,8 @@ export class AutomaticHarness {
           const tx=await this.rdd.begin({missionId:now.id,reviewId:now.reviewId,source:'NATIVE',
             candidateSha:now.candidateSha!,kind,localProject:now.project,repository:now.githubRepository??(githubProject.test(now.project)?now.project:undefined),
             prNumber:now.githubPrNumber,expectedBase:now.githubExpectedBase,deliveryStrategy:now.deliveryStrategy,
-            implementerRunId:now.correctionRunId??now.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId});
+            implementerRunId:now.correctionRunId??now.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId,
+            implementerRunIds:this.authorRunIds(now)});
           if(now.previousReviewId){const previous=await this.rdd.getForReview(now.previousReviewId);
             if(previous&&previous.state!=='SUPERSEDED'&&previous.state!=='ACKNOWLEDGED')
               await this.rdd.supersede(previous.id,now.reviewId,previous.revision);}
@@ -428,7 +447,8 @@ export class AutomaticHarness {
         const tx=await this.rdd.begin({missionId:now.id,reviewId:now.reviewId,source:'REMOTE',
           candidateSha:now.candidateSha!,kind,localProject:now.project,repository:now.githubRepository??(githubProject.test(now.project)?now.project:undefined),
           prNumber:now.githubPrNumber,expectedBase:now.githubExpectedBase,deliveryStrategy:now.deliveryStrategy,
-          implementerRunId:now.correctionRunId??now.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId});
+          implementerRunId:now.correctionRunId??now.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId,
+          implementerRunIds:this.authorRunIds(now)});
         const verdict=await this.rdd.assess(tx.id);
         if(verdict.record.state==='APPROVED_PENDING_ACK')await this.rdd.acknowledge(tx.id,verdict.record.revision);
         if(['APPROVED_PENDING_ACK','ACKNOWLEDGED'].includes(verdict.record.state)){
