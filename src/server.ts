@@ -12,7 +12,7 @@ import * as z from 'zod/v4';
 import { hostRequest, assessEvidence } from './core/policy.js';
 import { PanterStore } from './core/store.js';
 import { AgentEngine, AGENT_ROLES, routeFlow } from './core/agents.js';
-import { gentleCatalog, readAgent, readSkill, GENTLE_AGENTS, GENTLE_SKILLS, REVIEW_4R, JUDGMENT_DAY } from './core/gentle-catalog.js';
+import { gentleCatalog, readAgent, readSkill, readOrchestratorSection, GENTLE_ORCHESTRATOR_SECTIONS, GENTLE_AGENTS, GENTLE_SKILLS, REVIEW_4R, JUDGMENT_DAY } from './core/gentle-catalog.js';
 
 const port = Number(process.env.PANTER_PORT ?? '8080');
 const bind = process.env.PANTER_BIND_HOST ?? '127.0.0.1';
@@ -246,6 +246,11 @@ const handler = createMcpHandler(() => {
     description:'List all ten Gentle Shell specialist definitions, thirteen MCP-hosted skills, 4R lenses and Judgment Day agents; only GPT-A configures them.',
     inputSchema:z.object({}),annotations:{readOnlyHint:true}
   },async()=>execute(async()=>{requireLeader();return gentleCatalog()}));
+
+  server.registerTool('panter_gentle_orchestrator_read',{
+    description:'GPT-A lazily reads one pinned ODD orchestration section from the upstream Gentle Shell assets; Pi-specific mechanisms are reference only.',
+    inputSchema:z.object({section:z.enum(GENTLE_ORCHESTRATOR_SECTIONS)}),annotations:{readOnlyHint:true}
+  },async ({section})=>execute(async()=>{requireLeader();return readOrchestratorSection(section)}));
   server.registerTool('panter_gentle_agent_read',{
     description:'GPT-A reads one allowlisted, version-pinned upstream agent definition.',
     inputSchema:z.object({id:z.enum(GENTLE_AGENTS.map(a=>a.id) as [string,...string[]])}),annotations:{readOnlyHint:true}
