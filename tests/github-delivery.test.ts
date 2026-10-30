@@ -89,3 +89,28 @@ test('a draft PR cannot be considered review-ready even with passing CI',async()
   assert.equal(result.state,'BLOCKED');
   assert.match(result.blockers.join(' '),/draft/);
 });
+
+test('bootstrap PR #1 accepts 117 commits only with single-PR operator consent and checks every page',async()=>{
+  const items=(count:number)=>Array.from({length:count},(_,i)=>({sha:String(i).padStart(40,'a'),commit:{message:'feat: bootstrap change '+i}}));
+  const entries:Record<string,unknown>={
+    '':{default_branch:'main'},
+    'pulls/1':{...pr,commits:117,body:'Refs #2',head:{...pr.head,repo:{full_name:'riquelmechile/Panter-ai'}}},
+    'issues/2':issue,
+    'pulls/1/commits?per_page=100':items(100),
+    'pulls/1/commits?per_page=100&page=2':items(17),
+    [`commits/${sha}/check-runs?per_page=100`]:checks
+  };
+  const request=(async(url:string|URL|Request)=>{
+    const key=String(url).split('/repos/riquelmechile/Panter-ai/')[1]??'';
+    const payload=entries[key];return {ok:payload!==undefined,status:payload===undefined?404:200,
+      text:async()=>JSON.stringify(payload)} as Response;
+  }) as typeof fetch;
+  const g=new GitHubDeliveryGate({allowedRepositories:['riquelmechile/Panter-ai'],requiredChecks:['test']},request);
+  const input={repository:'riquelmechile/Panter-ai',prNumber:1,expectedSha:sha};
+  assert.equal((await g.inspect(input)).state,'BLOCKED');
+  const approved=await g.inspect({...input,deliveryStrategy:'single-pr',parentAuthorizedSinglePr:true});
+  assert.equal(approved.state,'REVIEWABLE');
+  assert.match(approved.warnings.join(' '),/117 commits checked/);
+  entries['pulls/1/commits?per_page=100&page=2']=items(16);
+  assert.match((await g.inspect({...input,deliveryStrategy:'single-pr',parentAuthorizedSinglePr:true})).blockers.join(' '),/Incomplete/);
+});

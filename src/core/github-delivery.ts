@@ -96,11 +96,21 @@ export class GitHubDeliveryGate {
       const labels=labelNames(prData.labels),types=labels.filter(x=>x.startsWith('type:'));
       if(types.length!==1||!acceptedTypes.has(types[0]!))blocked.push('PR must have exactly one valid type:* label');else ok.push('type_label');
       const commitCount=Number(prData.commits);
-      if(!Number.isInteger(commitCount)||commitCount<1||commitCount>100){
-        blocked.push('PR commit history is missing or over 100 commits; verify every work-unit commit before review');
+      // One-time exception for the owner-approved initial repository bootstrap;
+      // NEVER generalize this to subsequent or unrelated PRs.
+      const initialBootstrap=input.repository.toLowerCase()==='riquelmechile/panter-ai'&&
+        input.prNumber===1&&input.deliveryStrategy==='single-pr'&&
+        input.parentAuthorizedSinglePr===true;
+      if(!Number.isInteger(commitCount)||commitCount<1||commitCount>(initialBootstrap?300:100)){
+        blocked.push('PR commit history exceeds allowed bounds; inspect all work-unit commits');
       }else{
-        const commits=await this.api(input.repository,`pulls/${input.prNumber}/commits?per_page=100`) as any;
-        if(!Array.isArray(commits)||commits.length!==commitCount)blocked.push('Incomplete GitHub commit history');
+        const commits:any[]=[];
+        for(let page=1;page<=Math.ceil(commitCount/100);page++){
+          const pageData=await this.api(input.repository,`pulls/${input.prNumber}/commits?per_page=100${page===1?'':`&page=${page}`}`);
+          if(!Array.isArray(pageData)){blocked.push('Incomplete GitHub paginated commit history');break;}
+          commits.push(...pageData);
+        }
+        if(commits.length!==commitCount)blocked.push('Incomplete GitHub commit history');
         else {
           const invalid=commits.filter((x:any)=>!inspectCommitMessage(String(x.commit?.message??'')));
           const coauthored=commits.filter((x:any)=>/^co-authored-by:/im.test(String(x.commit?.message??'')));
@@ -108,6 +118,8 @@ export class GitHubDeliveryGate {
           if(coauthored.length)blocked.push(`${coauthored.length} commits include disallowed Co-Authored-By trailers`);
           if(!invalid.length&&!coauthored.length)ok.push('work_unit_commit_format');
         }
+        if(commitCount>100&&initialBootstrap)
+          result.warnings.push(`Owner-authorized Panter-ai PR #1 bootstrap: all ${commitCount} commits checked across GitHub pages; not a reusable exception`);
       }
       const body=String(prData.body??''),issue=linkedIssue(body,input.repository);
       result.issueNumber=issue??undefined;
