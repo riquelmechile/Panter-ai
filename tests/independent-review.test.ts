@@ -75,6 +75,8 @@ test('the reviewer cannot be the PR author or author/committer of any commit',as
 test('incomplete commit history fails closed instead of skipping authorship checks',async()=>{
   const r=await gate({'pulls/12':{...pr,commits:2}}).inspect(base);
   assert.equal(r.state,'BLOCKED');assert.equal(r.independentReview?.state,'UNAVAILABLE');
+  assert.equal(r.independentReview?.unavailableReason,'COMMIT_HISTORY_UNREADABLE');
+  assert.match(r.blockers.join(' '),/commit history unreadable/);
 });
 
 test('review pagination is followed and an unreadable review list fails closed',async()=>{
@@ -83,6 +85,36 @@ test('review pagination is followed and an unreadable review list fails closed',
   assert.equal(paged.independentReview?.state,'APPROVED_EXACT_SHA');assert.equal(paged.independentReview?.reviewId,500);
   const broken=await gate({'pulls/12/reviews?per_page=100':undefined}).inspect(base);
   assert.equal(broken.state,'PENDING');
+});
+
+test('a non-array review page fails closed as UNAVAILABLE, not MISSING or APPROVED',async()=>{
+  const r=await gate({'pulls/12/reviews?per_page=100':{reviews:[review('APPROVED')]}}).inspect(base);
+  assert.equal(r.state,'BLOCKED');
+  assert.equal(r.independentReview?.state,'UNAVAILABLE');
+  assert.equal(r.independentReview?.unavailableReason,'REVIEWS_UNREADABLE_OR_OVER_LIMIT');
+  assert.match(r.blockers.join(' '),/review list unreadable or reached the 10-page safety limit/);
+});
+
+test('an approval on the tenth (last allowed) review page is still found',async()=>{
+  const full=Array.from({length:100},(_,i)=>review('COMMENTED',sha,'bot-'+i,i+1));
+  const records:Record<string,unknown>={'pulls/12/reviews?per_page=100':full};
+  for(let page=2;page<=9;page++)records[`pulls/12/reviews?per_page=100&page=${page}`]=full;
+  records['pulls/12/reviews?per_page=100&page=10']=[review('APPROVED',sha,reviewer,9999)];
+  const r=await gate(records).inspect(base);
+  assert.equal(r.independentReview?.state,'APPROVED_EXACT_SHA');
+  assert.equal(r.independentReview?.reviewId,9999);
+  assert.equal(r.state,'REVIEWABLE');
+});
+
+test('more than ten full review pages fails closed instead of treating a partial approval as valid',async()=>{
+  const full=Array.from({length:100},(_,i)=>review('COMMENTED',sha,'bot-'+i,i+1));
+  const records:Record<string,unknown>={'pulls/12/reviews?per_page=100':[review('APPROVED'),...full.slice(1)]};
+  for(let page=2;page<=10;page++)records[`pulls/12/reviews?per_page=100&page=${page}`]=full;
+  const r=await gate(records).inspect(base);
+  assert.equal(r.state,'BLOCKED');
+  assert.equal(r.independentReview?.state,'UNAVAILABLE');
+  assert.equal(r.independentReview?.unavailableReason,'REVIEWS_UNREADABLE_OR_OVER_LIMIT');
+  assert.match(r.blockers.join(' '),/review list unreadable or reached the 10-page safety limit/);
 });
 
 test('without configuration the gate keeps old behavior but warns loudly',async()=>{

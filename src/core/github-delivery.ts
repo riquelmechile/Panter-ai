@@ -16,6 +16,7 @@ export type IndependentReviewEvidence = {
   login: string;
   state: 'APPROVED_EXACT_SHA' | 'MISSING' | 'STALE_SHA' | 'CHANGES_REQUESTED' | 'DISMISSED' | 'REVIEWER_IS_AUTHOR' | 'UNAVAILABLE';
   reviewId?: number; commitId?: string;
+  unavailableReason?: 'COMMIT_HISTORY_UNREADABLE' | 'REVIEWS_UNREADABLE_OR_OVER_LIMIT';
 };
 export type GitHubDecision = {
   state: 'BLOCKED' | 'PENDING' | 'REVIEWABLE';
@@ -187,7 +188,11 @@ export class GitHubDeliveryGate {
           CHANGES_REQUESTED:`Independent reviewer ${evidence.login} requested changes`,
           DISMISSED:`Independent reviewer ${evidence.login} approval was dismissed`,
           REVIEWER_IS_AUTHOR:`Independent reviewer ${evidence.login} authored this PR or one of its commits; review is not independent`,
-          UNAVAILABLE:`Independent reviewer evidence unavailable; commit authorship could not be verified`,
+          UNAVAILABLE:evidence.unavailableReason==='COMMIT_HISTORY_UNREADABLE'
+            ? 'Independent reviewer evidence unavailable: commit history unreadable; authorship cannot be verified'
+            : evidence.unavailableReason==='REVIEWS_UNREADABLE_OR_OVER_LIMIT'
+              ? `Independent reviewer evidence unavailable: review list unreadable or reached the ${MAX_REVIEW_PAGES}-page safety limit`
+              : 'Independent reviewer evidence unavailable',
           APPROVED_EXACT_SHA:'Independent review does not match the frozen candidate SHA',
         }[evidence.state]);
       }
@@ -206,17 +211,17 @@ export class GitHubDeliveryGate {
     const authors=new Set<string>();
     const prAuthor=String(prData?.user?.login??'').toLowerCase();
     if(prAuthor)authors.add(prAuthor);
-    if(!commits)return {login,state:'UNAVAILABLE'};
+    if(!commits)return {login,state:'UNAVAILABLE',unavailableReason:'COMMIT_HISTORY_UNREADABLE'};
     for(const c of commits)for(const who of [c?.author?.login,c?.committer?.login])
       if(typeof who==='string'&&who&&who.toLowerCase()!=='web-flow')authors.add(who.toLowerCase());
     if(authors.has(login))return {login,state:'REVIEWER_IS_AUTHOR'};
     const reviews:any[]=[];
     for(let page=1;page<=MAX_REVIEW_PAGES;page++){
       const pageData=await this.api(repository,`pulls/${prNumber}/reviews?per_page=100${page===1?'':`&page=${page}`}`);
-      if(!Array.isArray(pageData))return {login,state:'UNAVAILABLE'};
+      if(!Array.isArray(pageData))return {login,state:'UNAVAILABLE',unavailableReason:'REVIEWS_UNREADABLE_OR_OVER_LIMIT'};
       reviews.push(...pageData);
       if(pageData.length<100)break;
-      if(page===MAX_REVIEW_PAGES)return {login,state:'UNAVAILABLE'};
+      if(page===MAX_REVIEW_PAGES)return {login,state:'UNAVAILABLE',unavailableReason:'REVIEWS_UNREADABLE_OR_OVER_LIMIT'};
     }
     const decisive=reviews.filter(r=>String(r?.user?.login??'').toLowerCase()===login&&
       ['APPROVED','CHANGES_REQUESTED','DISMISSED'].includes(String(r?.state)));
