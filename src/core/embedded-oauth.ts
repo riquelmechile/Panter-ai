@@ -163,6 +163,7 @@ export class EmbeddedOAuth {
     check(input.response_types === undefined || (Array.isArray(input.response_types) && input.response_types.length === 1 && input.response_types[0] === 'code'), 'Unsupported response type');
     const name = typeof input.client_name === 'string' ? input.client_name.slice(0, 120) : 'MCP client';
     return this.change(d => {
+      d.clients=d.clients.filter(c=>c.createdAt>ts()-86400||d.grants.some(g=>g.clientId===c.id));
       check(d.clients.length < 100, 'Registration capacity reached');
       const client: Client = { id: 'pc_' + secureId(24), name, redirectUris, createdAt: ts() };
       d.clients.push(client);
