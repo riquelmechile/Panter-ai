@@ -127,12 +127,26 @@ export class PanterRdd {
       const a=assessMeshReview({kind:current.kind,candidateSha:current.candidateSha,work:r.work});
       complete=r.stage==='READY_FOR_CONTROLLER'&&a.status==='EVIDENCE_COLLECTED_UNVERIFIED';
       receipts=r.work.map(w=>w.receiptDigest??'');
-      // Host identities are authenticated by MCP, but model execution itself is not independently attested.
-      independence=complete&&new Set(r.work.map(w=>w.host)).size===r.work.length&&r.work.every(w=>w.host!=='gpt-a');
-      // An authenticated MCP client is NOT a cryptographic attestment of a reviewer execution.
-      runnerAttested=false;
-      severe=0; // Any unparsed/missing findings are not a clean result: they fail closed at the evidence gate below.
-      if(complete)for(const w of r.work){try{const data=JSON.parse(w.result??'');if(Array.isArray(data.findings))severe+=data.findings.filter((f:{severity?:string})=>f.severity==='CRITICAL'||f.severity==='BLOCKER').length;else complete=false;}catch{complete=false;}}
+      // Multiple roles may run on one authenticated peer host if a trusted runner
+      // attests genuinely distinct executions. Host names alone prove no independence.
+      const parsed=r.work.map(w=>{try{return JSON.parse(w.result??'') as Record<string,unknown>;}catch{return null;}});
+      const ids=parsed.map(d=>d?.subagentRunId).filter((v):v is string=>typeof v==='string');
+      independence=complete&&r.work.every(w=>w.host!=='gpt-a')&&ids.length===r.work.length&&
+        new Set(ids).size===ids.length&&ids.every(id=>id!=='gpt-a'&&id!==current.implementerRunId);
+      severe=0;
+      if(complete)for(const data of parsed){
+        if(data&&Array.isArray(data.findings))severe+=data.findings.filter((f:{severity?:string})=>f.severity==='CRITICAL'||f.severity==='BLOCKER').length;
+        else complete=false;
+      }
+      runnerAttested=complete&&independence&&r.work.every((w,index)=>{
+        const data=parsed[index];
+        if(!data||data.agentId!==w.agentId||data.packetDigest!==w.packetDigest||data.candidateSha!==current.candidateSha||
+          typeof data.subagentRunId!=='string'||!Array.isArray(data.evidence)||!Array.isArray(data.findings))return false;
+        return verifyRunnerSignature({reviewId:current.reviewId,slotId:w.workId,agentId:w.agentId!,candidateSha:current.candidateSha,
+          packetDigest:w.packetDigest!,subagentRunId:data.subagentRunId,
+          evidence:data.evidence as string[],findings:data.findings},
+          data.attestation as {keyId:string;signature:string}|undefined,this.runnerKeys);
+      });
     }
     const evidenceHash=complete&&independence?digest({id:current.reviewId,sha:current.candidateSha,receipts}):null;
     let github:GitHubDecision|null=null;

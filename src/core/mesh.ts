@@ -233,7 +233,7 @@ export class MeshEngine {
       const terminal=work.every(w=>w!.state==='COMPLETED'||w!.state==='FAILED');
       return {review,stage:terminal?'READY_FOR_CONTROLLER':'AWAITING_REPORTS',
         nativeReviewAuthority:false,
-        work:work.map(w=>({workId:w!.id,agentId:w!.specialist?.agentId,host:w!.target,state:w!.state,receiptDigest:w!.receiptDigest,result:w!.result}))};
+        work:work.map(w=>({workId:w!.id,agentId:w!.specialist?.agentId,packetDigest:w!.specialist?.packetDigest,host:w!.target,state:w!.state,receiptDigest:w!.receiptDigest,result:w!.result}))};
     });
   }
 
