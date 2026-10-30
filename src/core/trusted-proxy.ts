@@ -34,3 +34,19 @@ export class ClientAddressPolicy {
     return normalize(forwarded);
   }
 }
+
+/** Group IPv6 privacy addresses in one /64 quota; IPv4 addresses remain /32. */
+export function rateLimitIdentity(input:string):string{
+  const ip=normalize(input);
+  if(isIP(ip)===4)return 'ipv4:'+ip;
+  const canonical=new URL('http://['+ip+']/').hostname.slice(1,-1).toLowerCase();
+  const sections=canonical.split('::');
+  if(sections.length>2)throw new Error('Invalid IPv6 identity');
+  const left=sections[0]?sections[0].split(':'):[];
+  const right=sections.length===2&&sections[1]?sections[1].split(':'):[];
+  const missing=8-left.length-right.length;
+  if(missing<0)throw new Error('Invalid IPv6 expansion');
+  const groups=sections.length===2?[...left,...Array(missing).fill('0'),...right]:left;
+  if(groups.length!==8)throw new Error('Invalid IPv6 group count');
+  return 'ipv6:/64:'+groups.slice(0,4).map(s=>s.padStart(4,'0')).join(':');
+}

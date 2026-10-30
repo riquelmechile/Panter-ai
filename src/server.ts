@@ -44,7 +44,13 @@ const allowedHosts = (process.env.PANTER_ALLOWED_HOSTS ?? '').split(',').map(x =
 const allowedOrigins = (process.env.PANTER_ALLOWED_ORIGINS ?? '').split(',').map(x => x.trim()).filter(Boolean);
 const loopback = ['127.0.0.1', 'localhost', '::1'].includes(bind);
 if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new Error('Invalid PANTER_PORT');
-if (authMode === 'dev-static' && token.length < 24) throw new Error('PANTER_TOKEN must be at least 24 characters in dev-static mode');
+if (authMode === 'dev-static') {
+  if(token.length<24)throw new Error('PANTER_TOKEN must be at least 24 characters in dev-static mode');
+  if(!loopback)throw new Error('dev-static must bind directly to loopback; use embedded OAuth for containers and proxies');
+  if(process.env.PANTER_PUBLIC_MCP_URL)throw new Error('dev-static cannot advertise a public MCP URL');
+  if(allowedHosts.some(h=>!['127.0.0.1','localhost','::1'].includes(h)))
+    throw new Error('dev-static accepts loopback Host names only');
+}
 if (!loopback && allowedHosts.length === 0) throw new Error('PANTER_ALLOWED_HOSTS is required for public binds');
 
 const oauth = authMode === 'external-jwt' ? await ExternalOAuthVerifier.open({
@@ -688,6 +694,11 @@ const http = createServer(async (req, res) => {
 // BOTH the filesystem ACL and its distinct bearer credential.
 if(adminSocketPath){
   await mkdir(dirname(adminSocketPath),{recursive:true,mode:0o700});
+  const parent=await lstat(dirname(adminSocketPath));
+  if(!parent.isDirectory()||(process.getuid&&parent.uid!==process.getuid())||
+     (parent.mode&0o077)!==0)
+    throw new Error('Operator socket parent directory must be owner-controlled mode 0700');
+
   // Crash recovery: remove only a same-owner STALE socket after a kernel-level
   // connection attempt confirms ECONNREFUSED. Never unlink a live listener.
   try{

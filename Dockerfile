@@ -12,7 +12,7 @@ FROM node:22-alpine
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN apk add --no-cache git && npm ci --omit=dev --no-audit --no-fund \
-    && mkdir -p /data && chown -R node:node /data
+    && mkdir -p /data && chown -R node:node /data && chmod 0700 /data
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/vendor ./vendor
 ENV PANTER_PORT=8080 PANTER_BIND_HOST=0.0.0.0 PANTER_DATA_DIR=/data

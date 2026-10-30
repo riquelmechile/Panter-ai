@@ -7,6 +7,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { isHost, type Host } from './mesh.js';
+import { rateLimitIdentity } from './trusted-proxy.js';
 
 const hosts = ['gpt-a', 'gpt-b', 'grok', 'gemini', 'claude'] as const;
 const MAX_BODY = 12_288;
@@ -76,7 +77,7 @@ function queryRedirect(uri: string, values: Record<string, string>) {
 }
 
 type Client = { id: string; name: string; redirectUris: string[]; createdAt: number };
-type Pending = { id: string; clientId: string; redirectUri: string; challenge: string; state: string; requestedScopes: string[]; csrfDigest: string; expiresAt: number; failures: number };
+type Pending = { id: string; clientId: string; redirectUri: string; challenge: string; state: string; requestedScopes: string[]; csrfDigest: string; expiresAt: number; failures: number; sourceDigest?: string };
 type Grant = { clientId: string; host: Host; redirectUri: string; scopes: string[]; approvedAt: number; revoked: boolean };
 type Code = { digest: string; clientId: string; host: Host; redirectUri: string; challenge: string; scopes: string[]; expiresAt: number; consumed: boolean };
 type Token = { digest: string; familyId: string; clientId: string; host: Host; scopes: string[]; expiresAt: number; kind: 'access' | 'refresh'; revoked: boolean; resource: string };
@@ -150,9 +151,14 @@ export class EmbeddedOAuth {
   }
   private throttled(key: string, limit = 10) {
     const now = ts();
-    if (this.rate.size > 4096) this.rate.clear();
     const row = this.rate.get(key);
-    if (!row || now - row.since > 3600) { this.rate.set(key, { count: 1, since: now }); return; }
+    if (!row || now - row.since > 3600) {
+      if(this.rate.size>=4096){
+        for(const [name,item] of this.rate)if(now-item.since>3600)this.rate.delete(name);
+        check(this.rate.size<4096,'Rate limiter saturated; retry later');
+      }
+      this.rate.set(key,{count:1,since:now});return;
+    }
     check(row.count < limit, 'Rate limited'); row.count++;
   }
   private async register(raw: URLSearchParams | Record<string, unknown>) {
@@ -173,8 +179,8 @@ export class EmbeddedOAuth {
       return { client_id: client.id, client_name: client.name, redirect_uris: client.redirectUris, token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], client_id_issued_at: client.createdAt };
     });
   }
-  private async authorize(query: URLSearchParams) {
-    this.throttled('authorize', 500);
+  private async authorize(query: URLSearchParams, clientIp: string) {
+    const sourceDigest=hash(rateLimitIdentity(clientIp));
     const clientId = query.get('client_id') ?? '';
     const redirectUri = query.get('redirect_uri') ?? '';
     const challenge = query.get('code_challenge') ?? '';
@@ -191,8 +197,20 @@ export class EmbeddedOAuth {
     const id = secureId(28); const csrf = secureId(32);
     await this.change(d => {
       d.pending = d.pending.filter(p => p.expiresAt > ts());
-      check(d.pending.length < 100, 'Too many pending authorizations');
-      d.pending.push({ id, clientId, redirectUri, challenge, state, requestedScopes: scopes, csrfDigest: hash(csrf), expiresAt: ts() + PENDING_TTL, failures: 0 });
+      // An abusive IP/client may hold at most five of the 100 consent slots.
+      // Evict its oldest pending request rather than locking all real clients out.
+      for(const same of [
+        (p:Pending)=>p.sourceDigest===sourceDigest,
+        (p:Pending)=>p.clientId===clientId
+      ]){
+        const matches=d.pending.filter(same);
+        if(matches.length>=5){
+          const oldest=matches[0]!;
+          d.pending=d.pending.filter(p=>p.id!==oldest.id);
+        }
+      }
+      if(d.pending.length>=100)d.pending.shift(); // preserve availability to a new identity
+      d.pending.push({ id, clientId, redirectUri, challenge, state, requestedScopes: scopes, csrfDigest: hash(csrf), expiresAt: ts() + PENDING_TTL, failures: 0,sourceDigest });
     });
     return { id, csrf };
   }
@@ -307,14 +325,14 @@ export class EmbeddedOAuth {
       reply(res, 200, this.authorizationServerMetadata()); return true;
     }
     if (req.method === 'POST' && path === '/register') {
-      try { this.throttled(`register:${this.clientIdentity(req)}`, 20); const registered = await this.register(await body(req)); reply(res, 201, registered); }
+      try { this.throttled(`register:${rateLimitIdentity(this.clientIdentity(req))}`, 20); const registered = await this.register(await body(req)); reply(res, 201, registered); }
       catch (err) { reply(res, 400, { error: 'invalid_client_metadata', error_description: err instanceof Error ? err.message : 'Invalid request' }); }
       return true;
     }
     if (req.method === 'GET' && path === '/authorize') {
       try {
-        this.throttled(`authorize:${this.clientIdentity(req)}`,100);
-        const { id, csrf } = await this.authorize(params(req.url ?? ''));
+        this.throttled(`authorize:${rateLimitIdentity(this.clientIdentity(req))}`,60);
+        const { id, csrf } = await this.authorize(params(req.url ?? ''),this.clientIdentity(req));
         res.setHeader('Set-Cookie', `${this.consentCookie}=${csrf}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=600`);
         redirect(res, `/oauth/consent?sid=${encodeURIComponent(id)}`);
       } catch { reply(res, 400, { error: 'invalid_request' }); }
@@ -348,7 +366,7 @@ export class EmbeddedOAuth {
       return true;
     }
     if (path === '/token' && req.method === 'POST') {
-      try { this.throttled(`token:${this.clientIdentity(req)}`, 100); const result = await this.exchange(await body(req)); reply(res, 'error' in result ? 400 : 200, result); }
+      try { this.throttled(`token:${rateLimitIdentity(this.clientIdentity(req))}`, 100); const result = await this.exchange(await body(req)); reply(res, 'error' in result ? 400 : 200, result); }
       catch { reply(res, 400, { error: 'invalid_grant' }); }
       return true;
     }
@@ -357,7 +375,7 @@ export class EmbeddedOAuth {
         // RFC 7009 allows unauthenticated public clients to revoke a token they
         // possess. The opaque token is the capability; invalid values remain 200.
         // Rate-limit the endpoint and avoid rewriting the full ledger for misses.
-        this.throttled(`revoke:${this.clientIdentity(req)}`,100);
+        this.throttled(`revoke:${rateLimitIdentity(this.clientIdentity(req))}`,100);
         this.throttled('revoke:global',5000);
         const input = await body(req); const clientId = field(input, 'client_id'); const token = field(input, 'token');
         check(/^pc_[A-Za-z0-9_-]{24,64}$/.test(clientId)&&token.length>=32&&token.length<=200,'Invalid revocation request');
