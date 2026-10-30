@@ -1,7 +1,8 @@
 import { ExternalOAuthVerifier, staticBearerMatch } from './core/oauth.js';
 import { EmbeddedOAuth } from './core/embedded-oauth.js';
 import { openEngramBridge } from './core/engram-runtime.js';
-import { readFile, chmod, mkdir, lstat } from 'node:fs/promises';
+import { readFile, chmod, mkdir, lstat, unlink } from 'node:fs/promises';
+import { connect as connectUnix } from 'node:net';
 import { createHash } from 'node:crypto';
 import type { EngramMemory } from './core/engram-memory.js';
 import { resolve, dirname, join } from 'node:path';
@@ -687,11 +688,24 @@ const http = createServer(async (req, res) => {
 // BOTH the filesystem ACL and its distinct bearer credential.
 if(adminSocketPath){
   await mkdir(dirname(adminSocketPath),{recursive:true,mode:0o700});
+  // Crash recovery: remove only a same-owner STALE socket after a kernel-level
+  // connection attempt confirms ECONNREFUSED. Never unlink a live listener.
   try{
-    const existing=await lstat(adminSocketPath);
-    throw new Error(existing.isSocket()?
-      'Operator socket already exists; inspect the owner/process before cleaning a stale socket':
-      'Operator socket path is occupied by a non-socket file');
+    const previous=await lstat(adminSocketPath);
+    if(!previous.isSocket()||(process.getuid&&previous.uid!==process.getuid()))
+      throw new Error('Operator socket path is not a socket owned by this service');
+    await new Promise<void>((ok,fail)=>{
+      const candidate=connectUnix({path:adminSocketPath});
+      candidate.setTimeout(1500,()=>{candidate.destroy();fail(new Error('Operator socket ownership probe timed out'));});
+      candidate.once('connect',()=>{candidate.destroy();fail(new Error('An operator listener is already active'));});
+      candidate.once('error',(e:NodeJS.ErrnoException)=>{
+        if(e.code==='ECONNREFUSED')ok();else fail(e);
+      });
+    });
+    const unchanged=await lstat(adminSocketPath);
+    if(!unchanged.isSocket()||unchanged.ino!==previous.ino||unchanged.dev!==previous.dev)
+      throw new Error('Operator socket changed during stale-file probe');
+    await unlink(adminSocketPath);
   }catch(e){if(!(e instanceof Error&&'code' in e&&e.code==='ENOENT'))throw e;}
   const adminServer=createServer(async(req,res)=>{
     if(req.url!=='/mcp'||!['POST','GET','DELETE'].includes(req.method??'')){
