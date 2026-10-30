@@ -49,6 +49,7 @@ export class GitHubDeliveryGate {
     check(Number.isInteger(this.budget)&&this.budget>=100&&this.budget<=5000,'Invalid review budget');
     this.issueRequired=cfg.issueRequired!==false;
   }
+  allows(repository:string){return this.allowed.has(repository)&&repoPattern.test(repository);}
   private async api(repository:string,endpoint:string):Promise<unknown>{
     const r=await this.fetcher(`https://api.github.com/repos/${repository}/${endpoint}`,{
       headers:{Accept:'application/vnd.github+json', 'X-GitHub-Api-Version':'2022-11-28',

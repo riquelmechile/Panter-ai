@@ -412,6 +412,12 @@ const handler = createMcpHandler(() => {
       runId:z.string().max(160).optional(),candidateSha:z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/).optional(),
       discoveredPaths:z.array(z.string().min(1).max(256)).max(16).optional()}),capabilities:harnessRuntimeSchema})
   },async x=>execute(async()=>{requireLeader();await harness.report(x.runId,x.stepId,x.report);return harness.tick(x.runId,x.capabilities)}));
+  server.registerTool('panter_harness_github_bind',{
+    description:'GPT-A attaches a verified, previously authorized existing/created PR to an automatic ODD run. Metadata only: no GitHub writes, no agent selection, no approval.',
+    inputSchema:z.object({runId:z.uuid(),repository:bounded(120),prNumber:z.number().int().positive(),
+      expectedBase:z.string().max(100).optional(),expectedRevision:z.number().int().positive()})
+  },async x=>execute(async()=>{requireLeader();return harness.bindGithub(x.runId,{repository:x.repository,
+    prNumber:x.prNumber,expectedBase:x.expectedBase},x.expectedRevision)}));
   server.registerTool('panter_harness_github_check',{
     description:'Read-only Gentle Shell GitHub delivery gate: verify target allowlist, branch, exact frozen PR head SHA, approved linked issue, one type label, CI checks and review budget. Never pushes, merges, opens PRs or grants deployment permission.',
     inputSchema:z.object({runId:z.uuid(),prNumber:z.number().int().positive(),expectedBase:z.string().max(100).optional(),

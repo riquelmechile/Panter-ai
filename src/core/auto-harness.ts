@@ -110,6 +110,26 @@ export class AutomaticHarness {
     });
   }
   get(runId:string){return this.read(s=>s.runs.find(r=>r.id===runId)??null);}
+  /** Bind a PR discovered/created by an authorized host after work started.
+   * This changes only Panter's routing metadata, never the remote repository. */
+  async bindGithub(runId:string,input:{repository:string;prNumber:number;expectedBase?:string},expectedRevision:number){
+    ensure(!!this.github&&this.github.allows(input.repository),'GitHub destination not allowed by operator');
+    ensure(Number.isInteger(input.prNumber)&&input.prNumber>0,'Invalid GitHub PR number');
+    ensure(!input.expectedBase||/^[a-zA-Z0-9._/-]{1,100}$/.test(input.expectedBase),'Invalid GitHub PR base');
+    return this.write(s=>{
+      const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');
+      if(r.githubRepository)ensure(r.githubRepository===input.repository,'GitHub repository cannot be changed during a run');
+      if(r.githubPrNumber){
+        ensure(r.githubPrNumber===input.prNumber&&(!r.githubExpectedBase||r.githubExpectedBase===input.expectedBase),'PR binding conflict');
+        return r;
+      }
+      ensure(r.revision===expectedRevision,'Stale harness revision');
+      r.githubRepository=input.repository;r.githubPrNumber=input.prNumber;
+      if(input.expectedBase)r.githubExpectedBase=input.expectedBase;
+      r.revision++;return r;
+    });
+  }
+
   async report(runId:string,stepId:string,payload:{summary:string;evidence:string[];runId?:string;candidateSha?:string;discoveredPaths?:string[]}){
     ensure(payload.summary.trim().length>0&&payload.summary.length<=6000,'Invalid report summary');
     ensure(Array.isArray(payload.evidence)&&payload.evidence.length>0&&payload.evidence.length<=40&&payload.evidence.every(x=>typeof x==='string'&&!!x.trim()&&x.length<=1000),'Concrete evidence required');
