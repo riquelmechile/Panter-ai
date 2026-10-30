@@ -177,3 +177,24 @@ test('Serial GPT-A only mode allows overlapping writer paths without claiming pa
  assert.ok(p.assignments.every(x=>x.execution==='GPT_A_INLINE'));
  assert.equal(p.capacityContract.scheduledNativeWorkers,0);
 });
+
+
+test('A user solo instruction persists, blocks outbound A2A and can return to AUTO',async()=>{
+ const {mkdtemp,rm}=await import('node:fs/promises');
+ const {join}=await import('node:path');
+ const {tmpdir}=await import('node:os');
+ const {MeshEngine}=await import('../src/core/mesh.js');
+ const dir=await mkdtemp(join(tmpdir(),'panter-solo-guard-'));
+ try{
+  const mesh=await MeshEngine.open(dir);
+  const solo=await mesh.setCoordinationMode('gpt-a','GPT_A_ONLY',0);
+  assert.equal(solo.modelRequest,'gpt-6-astra');assert.equal(solo.effortRequest,'max');
+  assert.equal(solo.coordinationMode,'GPT_A_ONLY');
+  await assert.rejects(mesh.delegate('gpt-a',{missionId:'mission',target:'claude',role:'reviewer',instruction:'Review code',idempotencyKey:'abc'}),/GPT_A_ONLY forbids remote delegation/);
+  const restarted=await MeshEngine.open(dir);
+  assert.equal((await restarted.profiles())[0]?.coordinationMode,'GPT_A_ONLY');
+  const auto=await restarted.setCoordinationMode('gpt-a','AUTO',1);
+  assert.equal(auto.coordinationMode,'AUTO');
+  await assert.rejects(restarted.setCoordinationMode('gpt-a','GPT_A_ONLY',1),/Stale/);
+ }finally{await rm(dir,{recursive:true,force:true})}
+});
