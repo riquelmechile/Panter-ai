@@ -273,7 +273,7 @@ export class AutomaticHarness {
     const profile=(await this.mesh.profiles()).find(p=>p.host==='gpt-a');
     // An operator may switch to GPT_A_ONLY mid-mission. Never dispatch fresh
     // remote work after that change, or silently reassign an in-flight write.
-    const effectiveMode=profile?.coordinationMode??record.mode;
+    const effectiveMode:HarnessMode=record.mode==='GPT_A_ONLY'||profile?.coordinationMode==='GPT_A_ONLY'?'GPT_A_ONLY':'AUTO';
     const policy=hostRequest('chatgpt');
     const common={runId:record.id,mode:effectiveMode,risk:record.risk,reason:record.reason,
       capacityRequest:{model:policy.model,reasoning:policy.reasoningEffort,workerProcessing:policy.worker.preferredProcessing,
