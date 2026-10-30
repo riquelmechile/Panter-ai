@@ -19,6 +19,7 @@ import { NativeReviewBridge, assessMeshReview } from './core/native-review.js';
 import { NativeSubagentReview } from './core/native-review-workflow.js';
 import { AutomaticHarness } from './core/auto-harness.js';
 import { GitHubDeliveryGate } from './core/github-delivery.js';
+import { PanterRdd } from './core/panter-rdd.js';
 
 const port = Number(process.env.PANTER_PORT ?? '8080');
 const bind = process.env.PANTER_BIND_HOST ?? '127.0.0.1';
@@ -66,7 +67,8 @@ const githubGate = new GitHubDeliveryGate({
   token:process.env.PANTER_GITHUB_TOKEN||undefined,
 });
 const nativeReview = await NativeReviewBridge.open({enabled:process.env.PANTER_NATIVE_REVIEW_ENABLED==='1',binary:process.env.PANTER_GENTLE_AI_BIN??'gentle-ai',repositoryRoot:process.env.PANTER_NATIVE_REVIEW_WORKTREE??''});
-const harness = await AutomaticHarness.open(dataDir,mesh,nativeSubagentReview,githubGate,nativeReview);
+const panterRdd = await PanterRdd.open(dataDir,nativeSubagentReview,mesh,githubGate);
+const harness = await AutomaticHarness.open(dataDir,mesh,nativeSubagentReview,githubGate,nativeReview,panterRdd);
 const engramEnabled = process.env.PANTER_ENGRAM_ENABLED === '1';
 const memory = engramEnabled ? await openEngramBridge(dataDir, process.env.PANTER_ENGRAM_COMMAND ?? 'engram') : null;
 const principalContext = new AsyncLocalStorage<string>();
@@ -81,9 +83,9 @@ const missionStatus = z.enum(['DRAFT', 'READY', 'RUNNING', 'VERIFYING', 'DONE', 
 const bounded = (max = 2048) => z.string().trim().min(1).max(max);
 
 const handler = createMcpHandler(() => {
-  const server = new McpServer({ name: 'panter-ai', version: '0.13.0' }, {
+  const server = new McpServer({ name: 'panter-ai', version: '0.14.0' }, {
     capabilities: { resources: { subscribe: true } },
-    instructions: 'Panter-ai is a host-operated development harness with NO provider inference. GPT-A is the coordinator. For a new user development request start with panter_harness_start (goal + permitted work and observed facts, NEVER ask the user to pick agents, roles, skills or review lenses). Then call panter_harness_tick and execute the returned phase automatically with host tools or native subagents; call panter_harness_report after observing actual results, and repeat until blocked by actual authorization/evidence or completed. The server automatically selects ODD discovery, planning, scoped implementation, independent verification and 4R by risk; Judgment Day only when explicitly requested. An initial Agent Studio preference may bind model/host but never requires per-task specialist selection. GPT_A_ONLY forbids remote delegation while preserving maximum requested model/effort, fast native worker processing, and maximum safe host-observed parallelism. If no remote peer is connected continue with GPT-A native/inline. The host owns model selection and subagent execution; claims of model, effort, speed or children are REQUESTED, not verified. Do not misstate packet preparation as subagent execution. Evidence and reviewer reports are not official Gentle AI RDD approval. Do not merge or deploy without separately authorized tools and exact-candidate proof.'
+    instructions: 'Panter-ai is a host-operated development harness with NO provider inference. GPT-A is the coordinator. For a new user development request start with panter_harness_start (goal + permitted work and observed facts, NEVER ask the user to pick agents, roles, skills or review lenses). Then call panter_harness_tick and execute the returned phase automatically with host tools or native subagents; call panter_harness_report after observing actual results, and repeat until blocked by actual authorization/evidence or completed. The server automatically selects ODD discovery, planning, scoped implementation, independent verification and 4R by risk; Judgment Day only when explicitly requested. An initial Agent Studio preference may bind model/host but never requires per-task specialist selection. GPT_A_ONLY forbids remote delegation while preserving maximum requested model/effort, fast native worker processing, and maximum safe host-observed parallelism. If no remote peer is connected continue with GPT-A native/inline. The host owns model selection and subagent execution; claims of model, effort, speed or children are REQUESTED, not verified. Do not misstate packet preparation as subagent execution. Panter-RDD is an independently implemented SHA-bound review gate, not the official Gentle AI Go controller; human delivery authorization remains separate. Do not merge or deploy without separately authorized tools and exact-candidate proof.'
 
   });
 
@@ -435,6 +437,18 @@ const handler = createMcpHandler(() => {
       next:gate.state==='REVIEWABLE'?'Evidence is ready for human review, NOT permission to merge/deploy.':
         'Resolve blockers through separately authorized GitHub operations; do not infer delivery permission.'};
   }));
+  server.registerTool('panter_rdd_status',{
+    description:'GPT-A inspects and refreshes the self-hosted Panter-RDD review for a harness run. Reviewer output cannot grant GitHub delivery permission.',
+    inputSchema:z.object({runId:z.uuid()}),annotations:{readOnlyHint:true}
+  },async x=>execute(async()=>{requireLeader();const run=await harness.get(x.runId);
+    if(!run)throw new Error('Harness not found');if(!run.reviewId)return {status:'REVIEW_NOT_STARTED'};
+    const record=await panterRdd.getForReview(run.reviewId);
+    return record?panterRdd.assess(record.id):{status:'REVIEW_NOT_YET_REGISTERED'};
+  }));
+  server.registerTool('panter_rdd_supersede',{
+    description:'Retire a corrected, unacknowledged candidate when an independently registered fresh-SHA review exists. Does not authorize fixes, commits, merges or deployment.',
+    inputSchema:z.object({reviewId:z.uuid(),newReviewId:z.uuid(),expectedRevision:z.number().int().positive()})
+  },async x=>execute(async()=>{requireLeader();return panterRdd.supersede(x.reviewId,x.newReviewId,x.expectedRevision)}));
   server.registerTool('panter_harness_status',{
     description:'Recover exact automatic ODD route, risks, phase status and pending candidate/review gates after a session restart.',
     inputSchema:z.object({runId:z.uuid()}),annotations:{readOnlyHint:true}
@@ -537,7 +551,7 @@ const nodeHandler = toNodeHandler(handler);
 const http = createServer(async (req, res) => {
   if (req.url === '/health' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-    res.end(JSON.stringify({ status: 'ok', name: 'panter-ai', version: '0.13.0' }));
+    res.end(JSON.stringify({ status: 'ok', name: 'panter-ai', version: '0.14.0' }));
     return;
   }
   if (oauth && req.method === 'GET' && (req.url === '/.well-known/oauth-protected-resource' || req.url === '/.well-known/oauth-protected-resource/mcp')) {

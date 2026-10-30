@@ -11,6 +11,7 @@ import { type Host, type MeshEngine } from './mesh.js';
 import { type NativeSubagentReview } from './native-review-workflow.js';
 import { assessMeshReview, type NativeReviewBridge } from './native-review.js';
 import { type GitHubDeliveryGate } from './github-delivery.js';
+import { type PanterRdd } from './panter-rdd.js';
 
 const shaPattern=/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
 const githubProject=/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -75,10 +76,10 @@ export function chooseHarness(input:HarnessInput){
 export class AutomaticHarness {
   private state:State={version:1,runs:[]};
   private pending:Promise<unknown>=Promise.resolve();
-  private constructor(private readonly file:string,private readonly mesh:MeshEngine,private readonly native:NativeSubagentReview,private readonly github?:GitHubDeliveryGate,private readonly officialRdd?:NativeReviewBridge){}
-  static async open(dir:string,mesh:MeshEngine,native:NativeSubagentReview,github?:GitHubDeliveryGate,officialRdd?:NativeReviewBridge){
+  private constructor(private readonly file:string,private readonly mesh:MeshEngine,private readonly native:NativeSubagentReview,private readonly github?:GitHubDeliveryGate,private readonly officialRdd?:NativeReviewBridge,private readonly rdd?:PanterRdd){}
+  static async open(dir:string,mesh:MeshEngine,native:NativeSubagentReview,github?:GitHubDeliveryGate,officialRdd?:NativeReviewBridge,rdd?:PanterRdd){
     await mkdir(resolve(dir),{recursive:true,mode:0o700});
-    const engine=new AutomaticHarness(join(resolve(dir),'harness.json'),mesh,native,github,officialRdd);
+    const engine=new AutomaticHarness(join(resolve(dir),'harness.json'),mesh,native,github,officialRdd,rdd);
     try{const value:unknown=JSON.parse(await readFile(engine.file,'utf8'));
       ensure(!!value&&typeof value==='object'&&'version' in value&&value.version===1&&'runs' in value&&Array.isArray(value.runs),'Invalid harness store');
       engine.state=value as State;
@@ -177,12 +178,14 @@ export class AutomaticHarness {
         capacityVerified:false},modelWorkersStartedByServer:0,approved:false};
     if(!phase){
       const repository=record.githubRepository??(githubProject.test(record.project)?record.project:null);
-      if(!repository)return {...common,status:record.risk==='HIGH'?'AWAITING_RDD_AUTHORITY':'REPORTED_COMPLETE_UNVERIFIED',next:[]};
+      const nativeVerdict=this.rdd&&record.reviewId?await this.rdd.getForReview(record.reviewId):null;
+      if(record.risk==='HIGH'&&nativeVerdict?.state!=='ACKNOWLEDGED')return {...common,status:'AWAITING_PANTER_RDD_AUTHORITY',rdd:nativeVerdict,next:[]};
+      if(!repository)return {...common,status:record.risk==='HIGH'?'PANTER_RDD_REVIEWED_NO_GITHUB_DELIVERY_AUTHORITY':'REPORTED_COMPLETE_UNVERIFIED',next:[]};
       if(!record.githubPrNumber)return {...common,status:'AWAITING_GITHUB_PR_EVIDENCE',next:[],instruction:'GPT-A must identify or obtain permission to create the exact target PR; never push or open a PR without authorization.'};
       if(!record.candidateSha||!(/^[a-f0-9]{40}$/.test(record.candidateSha)))return {...common,status:'BLOCKED_CANDIDATE_SHA',next:[]};
       if(!this.github)return {...common,status:'GITHUB_VERIFICATION_NOT_CONFIGURED',next:[]};
       const github=await this.github.inspect({repository,prNumber:record.githubPrNumber,expectedSha:record.candidateSha,expectedBase:record.githubExpectedBase});
-      return {...common,status:github.state==='REVIEWABLE'?(record.risk==='HIGH'?'AWAITING_RDD_AUTHORITY':'GITHUB_EVIDENCE_READY_NO_DELIVERY_AUTHORITY'):'GITHUB_GATE_BLOCKED',github,next:[],
+      return {...common,status:github.state==='REVIEWABLE'?(record.risk==='HIGH'?'PANTER_RDD_REVIEWED_NO_DELIVERY_AUTHORITY':'GITHUB_EVIDENCE_READY_NO_DELIVERY_AUTHORITY'):'GITHUB_GATE_BLOCKED',github,next:[],
         instruction:'GitHub verification is evidence, not permission for commit, push, merge, release, or deployment.'};
     }
     if(phase.execution==='REMOTE_A2A'&&phase.remoteWorkId){
@@ -232,16 +235,42 @@ export class AutomaticHarness {
           return {...common,status:batch.dispatch,phaseId:phase.id,reviewId:now.reviewId,next:batch.packets,concurrentSlots:batch.concurrentSlots,
             instruction:'GPT-A: automatically dispatch the supplied separate native subagent packets in parallel when supported. No per-task agent selection or model-provider API.'};
         }
-        // When the real Go controller is installed on the operator-pinned
-        // worktree, automatically project its provider-issued next transition.
-        // No client-provided command is executed or treated as approval.
+        if(this.rdd){
+          const tx=await this.rdd.begin({missionId:now.id,reviewId:now.reviewId,source:'NATIVE',
+            candidateSha:now.candidateSha!,kind,repository:now.githubRepository??(githubProject.test(now.project)?now.project:undefined),
+            prNumber:now.githubPrNumber,expectedBase:now.githubExpectedBase,
+            implementerRunId:now.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId});
+          const verdict=await this.rdd.assess(tx.id);
+          if(verdict.record.state==='APPROVED_PENDING_ACK')await this.rdd.acknowledge(tx.id,verdict.record.revision);
+          if(['APPROVED_PENDING_ACK','ACKNOWLEDGED'].includes(verdict.record.state)){
+            await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const item=r.steps.find(x=>x.id===phase.id)!;
+              if(item.status!=='COMPLETE'){item.status='COMPLETE';r.revision++;}});
+            return this.tick(runId,runtime);
+          }
+          return {...common,status:verdict.record.state,phaseId:phase.id,reviewId:now.reviewId,
+            review,panterRdd:verdict,next:[],instruction:'Panter-RDD checks frozen reviewer receipts and GitHub proof. Address blockers or authorize a separate correction; reviewer prose never grants delivery authority.'};
+        }
         const officialRdd=review.severeFindings.length?null:(this.officialRdd?await this.officialRdd.status():null);
         return {...common,status:review.severeFindings.length?'REVIEW_FINDINGS_NEED_CORRECTION':'AWAITING_RDD_AUTHORITY',
-          phaseId:phase.id,reviewId:now.reviewId,review,officialRdd, next:[],
-          instruction:'Panter automatically retrieved the official RDD status if enabled. Follow only its exact provider-issued transition in a supported authorized host runtime; operator consent and Go authority still govern approval. Never mark approved from model reports.'};
+          phaseId:phase.id,reviewId:now.reviewId,review,officialRdd,next:[],
+          instruction:'Panter-RDD not configured; no model report grants approval.'};
       }
       const review=await this.mesh.reviewStatus('gpt-a',now.reviewId);
       const evidence=assessMeshReview({kind:review.review.kind,candidateSha:review.review.candidateSha,work:review.work});
+      if(this.rdd&&review.stage==='READY_FOR_CONTROLLER'){
+        const tx=await this.rdd.begin({missionId:now.id,reviewId:now.reviewId,source:'REMOTE',
+          candidateSha:now.candidateSha!,kind,repository:now.githubRepository??(githubProject.test(now.project)?now.project:undefined),
+          prNumber:now.githubPrNumber,expectedBase:now.githubExpectedBase,
+          implementerRunId:now.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId});
+        const verdict=await this.rdd.assess(tx.id);
+        if(verdict.record.state==='APPROVED_PENDING_ACK')await this.rdd.acknowledge(tx.id,verdict.record.revision);
+        if(['APPROVED_PENDING_ACK','ACKNOWLEDGED'].includes(verdict.record.state)){
+          await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const item=r.steps.find(x=>x.id===phase.id)!;
+            if(item.status!=='COMPLETE'){item.status='COMPLETE';r.revision++;}});
+          return this.tick(runId,runtime);
+        }
+        return {...common,status:verdict.record.state,phaseId:phase.id,reviewId:now.reviewId,review:evidence,panterRdd:verdict,next:[]};
+      }
       return {...common,status:review.stage==='AWAITING_REPORTS'?'WAITING_REMOTE_REVIEW':
         evidence.status==='EVIDENCE_INCOMPLETE'?'REVIEW_EVIDENCE_INCOMPLETE':'AWAITING_RDD_AUTHORITY',
         phaseId:phase.id,reviewId:now.reviewId,review:evidence,next:[]};
