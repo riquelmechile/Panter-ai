@@ -19,6 +19,10 @@ The local planner ceiling is 32, **not** a promise of 32 available agents. Sched
 7. Mutations to production systems or shared source require deliberate authorization; no shell access is provided by this server.
 8. Continue to respect the actual security boundaries of the MCP connection; prompt text is never itself permission.
 
+## Organic harness default (v0.12)
+
+Do not ask the user to choose specialist agents, skills, RDD lenses, or per-task worker counts. For a new engineering objective, GPT-A **must** call `panter_harness_start`, `panter_harness_tick`, run the selected host-native/native-subagent phase, and call `panter_harness_report` to continue. Re-query `tick` after a remote A2A completion or native review receipt. Derive the route from actual scope/risk evidence, never untrusted claims of a model being online. Older `panter_agent_*` and `panter_native_*` tools remain available for diagnostics/backward compatibility, not as required user-facing steps. Human consent is still required for source writes and deployment. See `docs/AUTOMATIC_HARNESS.md`.
+
 ## Agent workflow policy
 
 The primary host is accountable for intent, authorization, orchestration and final synthesis. A queued agent assignment does not start inference or send a wake signal by itself.
