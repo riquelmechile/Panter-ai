@@ -4,7 +4,7 @@ import {GitHubDeliveryGate, inspectBranchName, inspectCommitMessage} from '../sr
 const sha='a'.repeat(40), other='b'.repeat(40);
 const base={repository:'example/project',prNumber:12,expectedSha:sha};
 const project={default_branch:'main'};
-const pr={state:'open',draft:true,head:{sha,ref:'feat/new-login',repo:{full_name:'example/project'}},base:{ref:'main'},body:'Refs #22',labels:[{name:'type:feature'}],additions:120,deletions:20,commits:1};
+const pr={state:'open',draft:false,head:{sha,ref:'feat/new-login',repo:{full_name:'example/project'}},base:{ref:'main'},body:'Refs #22',labels:[{name:'type:feature'}],additions:120,deletions:20,commits:1};
 const issue={labels:[{name:'status:approved'}]};
 const checks={total_count:1,check_runs:[{name:'test',status:'completed',conclusion:'success',head_sha:sha}]};
 function mock(records:Record<string,unknown>):typeof fetch {
@@ -81,4 +81,11 @@ test('multiple successful check-runs of the same job do not falsely fail verific
 test('cross-repository issue mention cannot impersonate an approved target issue',async()=>{
   const r=await gate({'pulls/12':{...pr,body:'Closes unrelated/repository#22'}}).inspect(base);
   assert.equal(r.state,'BLOCKED');assert.match(r.blockers.join(' '),/approved issue/);
+});
+
+
+test('a draft PR cannot be considered review-ready even with passing CI',async()=>{
+  const result=await gate({'pulls/12':{...pr,draft:true}}).inspect(base);
+  assert.equal(result.state,'BLOCKED');
+  assert.match(result.blockers.join(' '),/draft/);
 });
