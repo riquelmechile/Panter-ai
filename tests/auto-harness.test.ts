@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AutomaticHarness, chooseHarness } from '../src/core/auto-harness.js';
+import { GitHubDeliveryGate } from '../src/core/github-delivery.js';
 import { MeshEngine } from '../src/core/mesh.js';
 import { NativeSubagentReview } from '../src/core/native-review-workflow.js';
 const sha='a'.repeat(40);
@@ -126,3 +127,43 @@ test('switching an existing AUTO mission to GPT_A_ONLY prevents new remote dispa
   assert.equal(t.mode,'GPT_A_ONLY');assert.equal(t.status,'GPT_A_NATIVE');
   assert.equal(t.next[0]?.agentId,'gentle-ai-explore');
 }));
+
+test('GitHub project requires exact 40-character candidate before any delivery check',()=>withHarness(async(h)=>{
+  const r=await h.start({project:'my-project',githubRepository:'example/project',objective:'Change a label',idempotencyKey:'gh',writesAuthorized:true,changeSurfaces:['src/label.ts']});
+  const x=await h.tick(r.id,solo);
+  assert.equal(x.status,'GPT_A_INLINE');
+  await assert.rejects(h.report(r.id,x.phaseId!,{summary:'changed',evidence:['tests executed']}),/GitHub\/high-risk/);
+  await h.report(r.id,x.phaseId!,{summary:'changed',evidence:['tests executed'],candidateSha:sha});
+  const next=await h.tick(r.id,solo);
+  assert.equal(next.status,'AWAITING_GITHUB_PR_EVIDENCE');
+  const persisted=await h.get(r.id);assert.equal(persisted?.githubRepository,'example/project');
+}));
+
+
+test('automatic final tick checks target GitHub PR evidence without manual agent or skill selection',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'panter-github-harness-'));
+  const prSha='a'.repeat(40);
+  const resources:Record<string,unknown>={
+    '':{default_branch:'main'},
+    'pulls/4':{state:'open',draft:true,head:{sha:prSha,ref:'feat/feature'},base:{ref:'main'},body:'Refs #7',labels:[{name:'type:feature'}],additions:120,deletions:20,commits:1},
+    'issues/7':{labels:[{name:'status:approved'}]},
+    'pulls/4/commits?per_page=100':[{sha:prSha,commit:{message:'feat: change label'}}],
+    [`commits/${prSha}/check-runs?per_page=100`]:{total_count:1,check_runs:[{name:'ci',status:'completed',conclusion:'success',head_sha:prSha}]}
+  };
+  const fetcher=(async(url:string|URL|Request)=>{
+    const part=String(url).split('/repos/example/project/')[1]??'';
+    const data=resources[part];return {ok:data!==undefined,status:data!==undefined?200:404,text:async()=>JSON.stringify(data)} as Response;
+  }) as typeof fetch;
+  try{
+    const mesh=await MeshEngine.open(dir),native=await NativeSubagentReview.open(dir);
+    const gate=new GitHubDeliveryGate({allowedRepositories:['example/project'],requiredChecks:['ci']},fetcher);
+    const harness=await AutomaticHarness.open(dir,mesh,native,gate);
+    const run=await harness.start({project:'website',githubRepository:'example/project',githubPrNumber:4,githubExpectedBase:'main',objective:'Change label',idempotencyKey:'gh-auto',writesAuthorized:true,changeSurfaces:['src/label.ts']});
+    const tick=await harness.tick(run.id,solo);
+    await harness.report(run.id,tick.phaseId!,{summary:'Changed and tested',evidence:['tests passed'],candidateSha:prSha});
+    const result=await harness.tick(run.id,solo);
+    assert.equal(result.status,'GITHUB_EVIDENCE_READY_NO_DELIVERY_AUTHORITY');
+    assert.equal((result.github as {state:string}).state,'REVIEWABLE');
+    assert.equal(result.approved,false);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
