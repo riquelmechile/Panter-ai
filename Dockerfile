@@ -11,7 +11,7 @@ RUN npm run build
 FROM node:22-alpine
 WORKDIR /app
 COPY package.json ./
-RUN npm install --omit=dev --no-audit --no-fund \
+RUN apk add --no-cache git && npm install --omit=dev --no-audit --no-fund \
     && mkdir -p /data && chown -R node:node /data
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/vendor ./vendor
