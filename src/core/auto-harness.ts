@@ -374,7 +374,8 @@ export class AutomaticHarness {
         const nativeStatus=(phase.phase==='JUDGMENT'||record.reviewTransport==='NATIVE')?await this.native.status(previous):null;
         const rddRecord=phase.phase==='REVIEW'&&this.rdd?await this.rdd.getForReview(previous):null;
         // Finish the four solo lenses before triaging their aggregate findings.
-        const severe=nativeStatus&&(!nativeStatus.soloEvidenceComplete&&nativeStatus.reviewMode==='IN_PROGRESS')?[]:nativeStatus?.severeFindings??[];
+        const partialSolo4R=nativeStatus?.kind==='4r'&&!nativeStatus.soloEvidenceComplete&&nativeStatus.slots.some(s=>s.state==='REPORTED_SOLO');
+        const severe=partialSolo4R?[]:nativeStatus?.severeFindings??[];
         if(severe.length||rddRecord?.state==='NEEDS_CORRECTION'){
           const findings=severe.length?severe.map(f=>`${f.id}: ${f.location}: ${f.claim}`):['See Panter-RDD severe findings'];
           if((record.correctionAttempts??0)>=2)return {...common,status:'CORRECTION_BUDGET_EXHAUSTED',phaseId:phase.id,next:[],findings};
