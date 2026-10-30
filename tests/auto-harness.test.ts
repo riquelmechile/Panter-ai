@@ -29,7 +29,9 @@ test('automatic route requires no agent IDs, risk lens names or skill selection'
 test('explicit Judgment Day selects blind judges, never automatically requested for ordinary work',()=>{
   const base={project:'app',objective:'Repair auth',writesAuthorized:true,changeSurfaces:['src/auth/login.ts'],idempotencyKey:'jd'};
   assert.equal(chooseHarness(base).reviewKind,'4r');
-  assert.equal(chooseHarness({...base,judgmentDayRequested:true}).reviewKind,'judgment-day');
+  const withJudgment=chooseHarness({...base,judgmentDayRequested:true});
+  assert.equal(withJudgment.reviewKind,'4r');
+  assert.deepEqual(withJudgment.phases.slice(-2),['REVIEW','JUDGMENT']);
 });
 
 test('solo ODD runs discover -> design -> implement -> independent verify -> four native reviewers with no manual agent choices',()=>withHarness(async(h,n,m)=>{
@@ -189,3 +191,65 @@ test('can bind a later observed PR to an existing GitHub run without changing re
   assert.equal(next.status,'GITHUB_GATE_BLOCKED');assert.equal((next.github as {state:string}).state,'PENDING');
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test('operator write grant is required on production harness and cannot be reused',()=>withHarness(async (_h,n,m)=>{
+ const {mkdtemp,rm}=await import('node:fs/promises');const {join}=await import('node:path');const {tmpdir}=await import('node:os');
+ const dir=await mkdtemp(join(tmpdir(),'panter-grant-'));
+ try{
+  const secure=await AutomaticHarness.open(dir,m,n,undefined,undefined,undefined,true);
+  const input={project:'example',objective:'Fix login',idempotencyKey:'one',writesAuthorized:true,changeSurfaces:['src/auth/login.ts']};
+  await assert.rejects(secure.start(input),/Operator write grant required/);
+  const granted=await secure.grantWrite({project:'example',objective:'Fix login',allowedPaths:['src/auth'],ttlSeconds:3600});
+  const run=await secure.start({...input,writeGrantId:granted.grantId});
+  assert.equal(run.permission,'WRITE_APPROVED');
+  await assert.rejects(secure.start({...input,idempotencyKey:'two',writeGrantId:granted.grantId}),/consumed/);
+  const second=await secure.grantWrite({project:'example',objective:'Fix login',allowedPaths:['src/auth'],ttlSeconds:3600});
+  await assert.rejects(secure.start({...input,idempotencyKey:'two',changeSurfaces:['src/payments'],writeGrantId:second.grantId}),/exceeds operator grant/);
+  const wrong=await secure.grantWrite({project:'example',objective:'Different',allowedPaths:['src/auth'],ttlSeconds:3600});
+  await assert.rejects(secure.start({...input,idempotencyKey:'three',writeGrantId:wrong.grantId}),/Missing, expired/);
+ }finally{await rm(dir,{recursive:true,force:true});}
+}));
+
+test('parallel implementation needs a complete design and strictly disjoint scoped native workers',()=>withHarness(async (h)=>{
+ const run=await h.start({project:'app',objective:'Refactor independent services',idempotencyKey:'parallel',writesAuthorized:true,
+   changeSurfaces:['src/service-a','src/service-b'],observations:{independentWorkUnits:2}});
+ const design=await h.tick(run.id,solo);assert.equal(design.status,'GPT_A_INLINE');
+ await assert.rejects(h.defineUnits(run.id,[{objective:'A',paths:['src/service-a']},{objective:'B',paths:['src/service-b']}],(await h.get(run.id))!.revision),/Design phase/);
+ await h.report(run.id,design.phaseId!,{summary:'Mapped both services',evidence:['Design spec S1, S2']});
+ const r=await h.get(run.id);assert.ok(r);
+ await assert.rejects(h.defineUnits(run.id,[{objective:'A',paths:['src/service-a']},{objective:'Duplicate',paths:['src/service-a/file.ts']}],r.revision),/overlap/);
+ await assert.rejects(h.defineUnits(run.id,[{objective:'A',paths:['src/service-a']},{objective:'Out of scope',paths:['src/payment']}],r.revision),/exceeds authorized/);
+ const stored=await h.defineUnits(run.id,[{objective:'Implement A',paths:['src/service-a']},{objective:'Implement B',paths:['src/service-b']}],r.revision);
+ assert.equal(stored.units?.length,2);
+ const batch=await h.tick(run.id,solo);
+ assert.equal(batch.status,'GPT_A_NATIVE_IMPLEMENTATION_BATCH');assert.equal(batch.concurrentSlots,2);assert.equal(batch.next.length,2);
+ await assert.rejects(h.report(run.id,batch.phaseId!,{summary:'Integrated',evidence:['test'],candidateSha:sha}),/All isolated implementation units/);
+ for(let i=0;i<2;i++)await h.reportUnit(run.id,stored.units![i]!.id,{runId:`unit-child-${i}`,summary:`Unit ${i} done`,evidence:['Unit tests pass']});
+ const integration=await h.tick(run.id,solo);assert.equal(integration.status,'IMPLEMENTATION_INTEGRATION_REQUIRED');
+ await h.report(run.id,batch.phaseId!,{summary:'Integrated both scoped units',evidence:['Integration tests pass'],candidateSha:sha,runId:'gpt-a-parent'});
+ const after=await h.tick(run.id,solo);assert.ok(['GPT_A_NATIVE','READY_FOR_HOST_NATIVE_DISPATCH','REPORTED_COMPLETE_UNVERIFIED'].includes(after.status));
+}));
+
+test('delivery strategy is an immutable operator decision reused by the automatic harness',()=>withHarness(async(h)=>{
+ const run=await h.start({project:'project',objective:'Add feature',idempotencyKey:'delivery',writesAuthorized:true,changeSurfaces:['src/feature']});
+ const saved=await h.setDeliveryStrategy(run.id,'feature-branch-chain',run.revision);
+ assert.equal(saved.deliveryStrategy,'feature-branch-chain');
+ await assert.rejects(h.setDeliveryStrategy(run.id,'single-pr',saved.revision),/already frozen/);
+}));
+
+test('bounded correction requires a new SHA and resets independent verification plus 4R',()=>withHarness(async(h)=>{
+ const run=await h.start({project:'app',objective:'Fix sensitive login',idempotencyKey:'correction',writesAuthorized:true,changeSurfaces:['src/auth.ts']});
+ let t=await h.tick(run.id,solo);await h.report(run.id,t.phaseId!,{summary:'Design',evidence:['Plan']});
+ t=await h.tick(run.id,solo);await h.report(run.id,t.phaseId!,{summary:'Original change',evidence:['Unit tests'],candidateSha:sha,runId:'builder-1'});
+ t=await h.tick(run.id,solo);await h.report(run.id,t.phaseId!,{summary:'Verification',evidence:['test pass'],candidateSha:sha,runId:'verifier-1'});
+ t=await h.tick(run.id,solo);assert.equal(t.status,'READY_FOR_HOST_NATIVE_DISPATCH');
+ const old=await h.get(run.id);assert.equal(old?.reviewId,t.reviewId);
+ const corrected=await h.recordCorrection(run.id,{candidateSha:'b'.repeat(40),runId:'corrector-1',evidence:['Test suite rerun']},old!.revision);
+ assert.equal(corrected.correctionAttempts,1);assert.equal(corrected.previousReviewId,t.reviewId);
+ assert.equal(corrected.steps.find(s=>s.phase==='VERIFY')?.status,'PENDING');
+ t=await h.tick(run.id,solo);assert.equal(t.status,'GPT_A_NATIVE');
+ await assert.rejects(h.report(run.id,t.phaseId!,{summary:'Self check',evidence:['test'],candidateSha:'b'.repeat(40),runId:'corrector-1'}),/Independent verifier/);
+ await h.report(run.id,t.phaseId!,{summary:'New independent check',evidence:['tests run'],candidateSha:'b'.repeat(40),runId:'verifier-2'});
+ t=await h.tick(run.id,solo);assert.notEqual(t.reviewId,old?.reviewId);
+ await assert.rejects(h.recordCorrection(run.id,{candidateSha:'b'.repeat(40),runId:'corrector-2',evidence:['bad']},(await h.get(run.id))!.revision),/fresh SHA/);
+}));
