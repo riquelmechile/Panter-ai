@@ -35,6 +35,10 @@ function basicClient(req: IncomingMessage): { id: string; secret: string } {
     return { id: decodeURIComponent(raw.slice(0, i).replace(/\+/g, ' ')), secret: decodeURIComponent(raw.slice(i + 1).replace(/\+/g, ' ')) };
   } catch { return { id: '', secret: '' }; }
 }
+/** Operator-visible reason for a rejected OAuth step. Messages are fixed strings from check(); never secrets. */
+function logOAuthReject(stage: string, err: unknown) {
+  console.warn(`[oauth] ${stage} rejected: ${err instanceof Error ? err.message : 'unknown'}`);
+}
 function bearer(req: IncomingMessage) { const h = req.headers.authorization; return h?.startsWith('Bearer ') ? h.slice(7) : ''; }
 function reply(res: ServerResponse, status: number, data: object, headers: Record<string, string> = {}) {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers });
@@ -344,7 +348,7 @@ export class EmbeddedOAuth {
     }
     if (req.method === 'POST' && path === '/register') {
       try { this.throttled(`register:${rateLimitIdentity(this.clientIdentity(req))}`, 20); const registered = await this.register(await body(req)); reply(res, 201, registered); }
-      catch (err) { reply(res, 400, { error: 'invalid_client_metadata', error_description: err instanceof Error ? err.message : 'Invalid request' }); }
+      catch (err) { logOAuthReject('register', err); reply(res, 400, { error: 'invalid_client_metadata', error_description: err instanceof Error ? err.message : 'Invalid request' }); }
       return true;
     }
     if (req.method === 'GET' && path === '/authorize') {
@@ -353,7 +357,7 @@ export class EmbeddedOAuth {
         const { id, csrf } = await this.authorize(params(req.url ?? ''),this.clientIdentity(req));
         res.setHeader('Set-Cookie', `${this.consentCookie}=${csrf}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600`);
         redirect(res, `/oauth/consent?sid=${encodeURIComponent(id)}`);
-      } catch { reply(res, 400, { error: 'invalid_request' }); }
+      } catch (err) { logOAuthReject('authorize', err); reply(res, 400, { error: 'invalid_request' }); }
       return true;
     }
     if (path === '/oauth/consent' && req.method === 'GET') {
@@ -370,7 +374,7 @@ export class EmbeddedOAuth {
         const ageMinutes=Math.max(0,Math.floor((ts()-client.createdAt)/60));
         const html = `<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Panter-ai · Autorizar conexión</title><style>body{font:16px system-ui;max-width:460px;margin:8vh auto;padding:20px;background:#111827;color:white}main{background:#1f2937;border-radius:12px;padding:24px}input,select,button{display:block;width:100%;padding:10px;margin:12px 0;box-sizing:border-box}.warning{border:1px solid #f4b400;padding:12px;color:#fff}</style><main><h2>Autorizar conexión a Panter-ai</h2><p class="warning"><strong>Cliente NO VERIFICADO.</strong> El nombre y callback pueden ser declarados por otra persona. Una URL de redirección conocida no demuestra que sea tu sesión de ChatGPT o Claude. Confirma la solicitud desde la aplicación que tú abriste; si no la iniciaste, pulsa Denegar.</p><p>Nombre declarado (no verificado): ${escapeHtml(client.name)}</p><p>Identificador de registro: ${escapeHtml(client.id)}</p><p>Registrado hace aproximadamente ${ageMinutes} minutos</p><p>Destino de redirección: ${escapeHtml(pending.redirectUri)}</p><form method="post" action="/oauth/consent?sid=${encodeURIComponent(id)}"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><label>Host autorizado<select name="host">${options}</select></label><label>Clave del operador<input name="password" type="password" required autocomplete="off"></label><button name="decision" value="allow">Autorizar</button><button name="decision" value="deny">Denegar</button></form></main></html>`;
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff', 'content-security-policy': `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${callbackOrigin}; base-uri 'none'; frame-ancestors 'none'` }); res.end(html);
-      } catch { reply(res, 400, { error: 'invalid_request' }); }
+      } catch (err) { logOAuthReject('consent-page', err); reply(res, 400, { error: 'invalid_request' }); }
       return true;
     }
     if (path === '/oauth/consent' && req.method === 'POST') {
@@ -390,12 +394,12 @@ export class EmbeddedOAuth {
         const result = await this.approve(id, field(payload, 'csrf'), field(payload, 'password'), field(payload, 'host'), field(payload, 'decision'));
         res.setHeader('Set-Cookie', `${this.consentCookie}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`);
         redirect(res, result.uri);
-      } catch { reply(res, 403, { error: 'access_denied' }); }
+      } catch (err) { logOAuthReject('consent-submit', err); reply(res, 403, { error: 'access_denied' }); }
       return true;
     }
     if (path === '/token' && req.method === 'POST') {
       try { this.throttled(`token:${rateLimitIdentity(this.clientIdentity(req))}`, 100); const result = await this.exchange(await body(req), basicClient(req)); reply(res, 'error' in result ? 400 : 200, result); }
-      catch { reply(res, 400, { error: 'invalid_grant' }); }
+      catch (err) { logOAuthReject('token', err); reply(res, 400, { error: 'invalid_grant' }); }
       return true;
     }
     if (path === '/revoke' && req.method === 'POST') {
@@ -414,7 +418,7 @@ export class EmbeddedOAuth {
           if(found)for(const row of d.tokens)if(row.familyId===found.familyId)row.revoked=true;
         });
         reply(res, 200, {});
-      } catch { reply(res, 400, { error: 'invalid_request' }); }
+      } catch (err) { logOAuthReject('revoke', err); reply(res, 400, { error: 'invalid_request' }); }
       return true;
     }
     return false;
