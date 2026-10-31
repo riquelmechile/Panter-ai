@@ -118,8 +118,10 @@ function createSegment(p:string):void{
 }
 type Scan={segment:number,first:number,last:number,hash:string,bytes:number,contentSha256:string,previousSealHash:string};
 function scanSegment(p:string,index:number,sequence:number,prevHash:string,previousSealHash:string):Scan{
-  const data=openExisting(p);
-  if(data.length>0&&data.at(-1)!==10)throw new SegmentIntegrityError();
+  return scanSegmentBytes(openExisting(p),index,sequence,prevHash,previousSealHash);
+}
+function scanSegmentBytes(data:Buffer,index:number,sequence:number,prevHash:string,previousSealHash:string):Scan{
+  if(data.length>2*1024*1024||(data.length>0&&data.at(-1)!==10))throw new SegmentIntegrityError();
   const lines=data.length?data.toString('utf8').trimEnd().split('\n'):[];
   let seq=sequence,hash=prevHash;
   for(const line of lines){
@@ -134,6 +136,12 @@ function scanSegment(p:string,index:number,sequence:number,prevHash:string,previ
     seq++;
   }
   return {segment:index,first:sequence,last:seq-1,hash,bytes:data.length,contentSha256:digest(data),previousSealHash};
+}
+/** Strictly validate complete crash-tail prefix bytes against expected chain anchors. */
+export function verifySegmentPrefix(data:Buffer,index:number,firstSequence:number,prevHash:string,
+  previousSealHash:string):{entries:number,lastHash:string}{
+  const scan=scanSegmentBytes(data,index,firstSequence,prevHash,previousSealHash);
+  return {entries:scan.last-firstSequence+1,lastHash:scan.hash};
 }
 function claimOf(scan:Scan):SegmentSealClaim{
   return {domain:'panter.segment-seal/v1',segment:scan.segment,firstSequence:scan.first,
