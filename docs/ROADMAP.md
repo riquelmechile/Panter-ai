@@ -110,3 +110,17 @@ The checkboxes below are a **historical per-release backlog** and should not be 
 - [ ] Migrar estados auxiliares de revisión nativa/Panter-RDD y coordinar transacciones de negocio entre namespaces; no equivale todavía a despliegue horizontal.
 
 Guía: [SQLITE_MIGRATION.md](SQLITE_MIGRATION.md). Node 22 `node:sqlite` aún es experimental; fijar y validar la versión del runtime.
+
+## v0.16 runner aislado: primer corte de implementación
+
+- [x] ADR-001 aprobado: runner separado, grants firmados, sandbox, worktrees y auditabilidad.
+- [x] Núcleo offline de verificación de grants Ed25519: issuer/audience, identidad, misión/intento, SHA, alcance, vencimiento y anti-replay SQLite WAL.
+- [x] Protocolo tipado con allowlist sin shell libre ni dispatch de operaciones en esta etapa.
+- [x] Auditoría local append-only con hash-chain y esquema sin payloads secretos; **no** equivale a auditoría inmutable sin sellado externo.
+- [ ] Servicio Unix separado y `SO_PEERCRED`, verificación de grants en IPC real, política de claves y crash recovery.
+- [ ] Sandbox de npm/scripts, worktrees aislados y pruebas adversariales en Oracle ARM64.
+- [ ] Firma de grants en control plane únicamente para admins autenticados (`PANTER_OWNER_TRUSTED_HOSTS`), independiente de las llaves Panter-RDD.
+- [ ] Controlador de release con gates y política por servicio; `panter-ai` automático según ADR, commerce/pagos con protección configurable.
+- [ ] Revisión independiente de Claude sobre PR y SHA exacto; instalación/reinicio solo después.
+
+Estado: este primer PR **no pone en marcha** un runner, no da shell, no reinicia servicios ni reemplaza todavía HostOps. Véase [RUNNER_IMPLEMENTATION.md](RUNNER_IMPLEMENTATION.md).
