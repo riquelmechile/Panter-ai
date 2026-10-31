@@ -1,7 +1,7 @@
 /** Durable UNKNOWN-outcome coordinator. Never executes effects or issues grants. */
 import {createHash,createPublicKey,verify,type KeyObject} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
-import {closeSync,constants,lstatSync,mkdirSync,openSync,statSync} from 'node:fs';
+import {closeSync,constants,lstatSync,mkdirSync,openSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {RUNNER_OPERATIONS,type RunnerOperation} from './runner-grants.js';
 import {enableSqliteWal,retrySqliteStartup} from './sqlite-startup.js';
@@ -103,9 +103,9 @@ export class RunnerOutcomeLedger{
     this.readonlyMode=options.readonly===true;
     const root=resolve(dir);
     if(!this.readonlyMode)mkdirSync(root,{recursive:true,mode:0o700});
-    let s:ReturnType<typeof statSync>;
-    try{s=statSync(root);}catch{throw new OutcomeRejected();}
-    if(!s.isDirectory()||s.uid!==process.getuid?.()||(s.mode&0o077)!==0)throw new OutcomeRejected();
+    let s:ReturnType<typeof lstatSync>;
+    try{s=lstatSync(root);}catch{throw new OutcomeRejected();}
+    if(!s.isDirectory()||s.isSymbolicLink()||s.uid!==process.getuid?.()||(s.mode&0o077)!==0)throw new OutcomeRejected();
     const file=join(root,'runner-outcomes.sqlite');
     if(!this.readonlyMode){
       try{const fd=openSync(file,constants.O_CREAT|constants.O_EXCL|constants.O_RDWR|NOFOLLOW,0o600);closeSync(fd);}
@@ -201,6 +201,39 @@ export class RunnerOutcomeLedger{
       this.db.exec('COMMIT');
     }catch{this.db.exec('ROLLBACK');throw new OutcomeRejected();}
     return this.get(claim.operationId)!;
+  }
+  /**
+   * One consistent read-only SQLite snapshot for offline cutover preflight.
+   * Never opens a writer epoch, mutates a row or silently truncates results.
+   */
+  listAllReadonly(maxEntries=10_000):OutcomeSnapshot[]{
+    if(!this.readonlyMode||!Number.isSafeInteger(maxEntries)||
+      maxEntries<1||maxEntries>100_000)throw new OutcomeRejected();
+    this.db.exec('BEGIN');
+    try{
+      const rows=this.db.prepare('SELECT operation_id,intent_digest,lease_generation,state,receipt_digest,effect_deadline FROM outcomes ORDER BY operation_id LIMIT ?')
+        .all(maxEntries+1) as Array<{operation_id:string,intent_digest:string,lease_generation:number,
+          state:OutcomeState,receipt_digest:string|null,effect_deadline:number|null}>;
+      if(rows.length>maxEntries)throw new OutcomeRejected();
+      const result:OutcomeSnapshot[]=rows.map(row=>{
+        if(!UUID.test(row.operation_id)||!HEX.test(row.intent_digest)||
+          !Number.isSafeInteger(row.lease_generation)||row.lease_generation<1||
+          !['INTENT','EFFECT_WINDOW','OUTCOME_UNKNOWN','SUCCEEDED','FAILED','NO_EFFECT'].includes(row.state)||
+          (row.receipt_digest!==null&&!HEX.test(row.receipt_digest))||
+          (row.effect_deadline!==null&&(!Number.isSafeInteger(row.effect_deadline)||row.effect_deadline<=0))||
+          (['SUCCEEDED','FAILED','NO_EFFECT'].includes(row.state)&&
+            (row.receipt_digest===null||row.effect_deadline===null)))
+          throw new OutcomeRejected();
+        return {operationId:row.operation_id,state:row.state,intentDigest:row.intent_digest,
+          leaseGeneration:row.lease_generation,receiptDigest:row.receipt_digest,
+          effectDeadline:row.effect_deadline};
+      });
+      this.db.exec('COMMIT');
+      return result;
+    }catch{
+      this.db.exec('ROLLBACK');
+      throw new OutcomeRejected();
+    }
   }
   get(id:string):OutcomeSnapshot|null{
     if(!UUID.test(id))throw new OutcomeRejected();
