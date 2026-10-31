@@ -26,9 +26,11 @@ function safeDir(path:string):void{
   if(!stat.isDirectory()||stat.isSymbolicLink()||
      stat.uid!==process.getuid?.()||(stat.mode&0o077)!==0)throw new SegmentIntegrityError();
 }
-function identical(a:RunnerAuditEvent,b:RunnerAuditEvent):boolean{
-  return a.requestId===b.requestId&&a.operation===b.operation&&
-    a.grantDigest===b.grantDigest&&a.status===b.status&&a.outputDigest===b.outputDigest;
+function identical(a:unknown,b:RunnerAuditEvent):boolean{
+  if(!a||typeof a!=='object'||Array.isArray(a))return false;
+  const x=a as Record<string,unknown>;
+  return x.requestId===b.requestId&&x.operation===b.operation&&
+    x.grantDigest===b.grantDigest&&x.status===b.status&&x.outputDigest===b.outputDigest;
 }
 /** Confirm staged prefix corresponds to the exact complete verified legacy rows. */
 function verifyStagedPrefix(folder:string,rows:RunnerAuditEvent[],expected:number):void{
@@ -42,7 +44,7 @@ function verifyStagedPrefix(folder:string,rows:RunnerAuditEvent[],expected:numbe
       let parsed:unknown;
       try{parsed=JSON.parse(line);}catch{throw new SegmentIntegrityError();}
       if(!parsed||typeof parsed!=='object'||!('event' in parsed)||
-         !rows[index]||!identical((parsed as {event:RunnerAuditEvent}).event,rows[index]))
+         !rows[index]||!identical((parsed as {event:unknown}).event,rows[index]!))
         throw new SegmentIntegrityError();
       index++;
     }
@@ -100,7 +102,7 @@ export async function stageLegacyAuditCutover(
   const already=journal.state().entries;
   if(already>rows.length)throw new SegmentIntegrityError();
   verifyStagedPrefix(dir,rows,already);
-  for(let i=already;i<rows.length;i++)await journal.append(rows[i]);
+  for(let i=already;i<rows.length;i++)await journal.append(rows[i]!);
   if(journal.state().activeBytes>0)await journal.sealCurrent();
   const state=journal.state();
   if(state.entries!==rows.length||state.activeBytes!==0||state.sealed<1)
