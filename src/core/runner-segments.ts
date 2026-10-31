@@ -80,7 +80,7 @@ function validClaim(x:unknown):x is SegmentSealClaim{
     [x.lastHash,x.previousSealHash,x.contentSha256].every(z=>typeof z==='string'&&HEX.test(z));
 }
 function sameClaim(a:SegmentSealClaim,b:SegmentSealClaim):boolean{return sealBody(a).equals(sealBody(b));}
-function inspectSeal(seal:unknown,keysPinned:ReadonlyMap<string,KeyObject>,claim:SegmentSealClaim):SignedSegmentSeal {
+export function inspectSeal(seal:unknown,keysPinned:ReadonlyMap<string,KeyObject>,claim:SegmentSealClaim):SignedSegmentSeal {
   if(!keys(seal,['keyId','claim','signature'])||typeof seal.keyId!=='string'||
     typeof seal.signature!=='string'||!validClaim(seal.claim)||!sameClaim(seal.claim,claim))throw new SegmentIntegrityError();
   const key=keysPinned.get(seal.keyId);
