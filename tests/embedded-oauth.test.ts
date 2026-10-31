@@ -13,6 +13,7 @@ const resource = issuer + '/mcp';
 const callbackA = 'https://chatgpt.com/connector_platform_oauth_redirect';
 const callbackB = 'https://claude.ai/api/mcp/auth_callback';
 const callbackC = 'https://claude.com/api/mcp/auth_callback';
+const geminiCallbacks = ['oauth-redirect', 'oauth-redirect-sandbox', 'oauth-redirect-test'].flatMap(h => ['r', 'a'].map(k => `https://${h}.googleusercontent.com/${k}/user_bound_custom-mcp-1-panter_example_org`));
 const secret = 'owner-approval-password-32chars-very-private';
 const verifier = 'a'.repeat(64);
 const challenge = createHash('sha256').update(verifier).digest('base64url');
@@ -20,7 +21,7 @@ async function harness(run: (h: { base: string; oauth: EmbeddedOAuth; dir: strin
   const dir = await mkdtemp(join(tmpdir(), 'panter-embedded-oauth-'));
   let server: Server | undefined;
   try {
-    const oauth = await EmbeddedOAuth.open({ dir, resource, redirectUris: [callbackA, callbackB, callbackC], password: secret, clientIdentity });
+    const oauth = await EmbeddedOAuth.open({ dir, resource, redirectUris: [callbackA, callbackB, callbackC, ...geminiCallbacks], password: secret, clientIdentity });
     server = createServer(async (req, res) => { if (!await oauth.handle(req, res)) { res.statusCode = 404; res.end(); } });
     await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve));
     const address = server.address(); assert.ok(address && typeof address !== 'string');
@@ -499,4 +500,31 @@ test('a non-coordinator host that requests every advertised scope (Gemini) is gr
   const issued = await res.json() as { scope: string };
   assert.ok(!issued.scope.split(' ').includes('panter:lead'));
   assert.ok(issued.scope.split(' ').includes('panter:mesh'));
+}));
+
+test('Gemini: DCR with its six relay callbacks and consent answered with an HTML handoff (no 302)', () => harness(async ({ request }) => {
+  const reg = await request('/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redirect_uris: geminiCallbacks, token_endpoint_auth_method: 'client_secret_post', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], client_name: 'Gemini' }) });
+  assert.equal(reg.status, 201);
+  const meta = await reg.json() as { client_id: string; client_secret: string };
+  const relay = geminiCallbacks[0]!;
+  const q = new URLSearchParams({ client_id: meta.client_id, redirect_uri: relay, response_type: 'code', code_challenge: challenge, code_challenge_method: 'S256', scope: 'mcp offline_access panter:mesh panter:lead', resource, state: 'g-state' });
+  const start = await request('/authorize?' + q); assert.equal(start.status, 302);
+  const next = new URL(start.headers.get('location')!, issuer);
+  const cookie = start.headers.get('set-cookie')!.split(';')[0]!;
+  const page = await request(next.pathname + next.search, { headers: { cookie } });
+  const csrf = /name="csrf" value="([^"]+)"/.exec(await page.text())?.[1]; assert.ok(csrf);
+  const done = await request(next.pathname + next.search, post({ csrf, password: secret, host: 'gemini', decision: 'allow' }, { origin: issuer, cookie }));
+  assert.equal(done.status, 200);
+  assert.equal(done.headers.get('location'), null);
+  assert.match(done.headers.get('content-security-policy') ?? '', /form-action 'none'/);
+  const html = await done.text();
+  const target = /http-equiv="refresh" content="0;url=([^"]+)"/.exec(html)?.[1];
+  assert.ok(target);
+  const back = new URL(target!.replace(/&amp;/g, '&'));
+  assert.equal(back.origin + back.pathname, relay);
+  assert.equal(back.searchParams.get('state'), 'g-state');
+  assert.equal(back.searchParams.get('iss'), issuer);
+  const code = back.searchParams.get('code')!;
+  const tok = await request('/token', post({ grant_type: 'authorization_code', client_id: meta.client_id, client_secret: meta.client_secret, code, code_verifier: verifier, redirect_uri: relay, resource }));
+  assert.equal(tok.status, 200);
 }));

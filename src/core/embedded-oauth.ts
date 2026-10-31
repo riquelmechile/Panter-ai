@@ -39,6 +39,25 @@ function basicClient(req: IncomingMessage): { id: string; secret: string } {
 function logOAuthReject(stage: string, err: unknown) {
   console.warn(`[oauth] ${stage} rejected: ${err instanceof Error ? err.message : 'unknown'}`);
 }
+/**
+ * Gemini web returns through Google-owned relay callbacks (/r/ and /a/) that then
+ * navigate to gemini.google.com. Chrome enforces the consent page's form-action CSP
+ * over the whole redirect chain after a POST, so a 302 to the relay is blocked and
+ * Gemini never receives the code. Answer with a no-script HTML handoff instead,
+ * decoupling the form submission from the cross-origin navigation (same approach as
+ * DevZana). Only these exact Google relay hosts qualify; the URI itself was already
+ * validated against the configured callback allowlist.
+ */
+const GEMINI_RELAY_HOSTS = new Set(['oauth-redirect.googleusercontent.com', 'oauth-redirect-sandbox.googleusercontent.com', 'oauth-redirect-test.googleusercontent.com']);
+function isGeminiRelay(uri: string): boolean {
+  try { const u = new URL(uri); return u.protocol === 'https:' && GEMINI_RELAY_HOSTS.has(u.hostname) && (u.pathname.startsWith('/r/') || u.pathname.startsWith('/a/')); } catch { return false; }
+}
+function geminiHandoff(res: ServerResponse, uri: string) {
+  const target = escapeHtml(uri);
+  const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer"><meta http-equiv="refresh" content="0;url=${target}"><title>Continuar conexión con Gemini</title></head><body style="font:16px system-ui;background:#111827;color:white;max-width:460px;margin:8vh auto;padding:20px"><h2>Completar conexión con Gemini</h2><p>Si el navegador no vuelve automáticamente, usa el enlace.</p><p><a rel="noreferrer noopener" style="color:#93c5fd" href="${target}">Continuar a Gemini</a></p></body></html>`;
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'" });
+  res.end(html);
+}
 function bearer(req: IncomingMessage) { const h = req.headers.authorization; return h?.startsWith('Bearer ') ? h.slice(7) : ''; }
 function reply(res: ServerResponse, status: number, data: object, headers: Record<string, string> = {}) {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers });
@@ -182,7 +201,7 @@ export class EmbeddedOAuth {
   private async register(raw: URLSearchParams | Record<string, unknown>) {
     check(!(raw instanceof URLSearchParams), 'JSON registration required');
     const input = raw as Record<string, unknown>;
-    check(Array.isArray(input.redirect_uris) && input.redirect_uris.length > 0 && input.redirect_uris.length <= 5, 'Redirect URIs required');
+    check(Array.isArray(input.redirect_uris) && input.redirect_uris.length > 0 && input.redirect_uris.length <= 10, 'Redirect URIs required');
     const redirectUris = input.redirect_uris.map(x => validateRedirect(String(x)));
     check(redirectUris.every(u => this.callbacks.has(u)), 'Unapproved redirect URI');
     const authMethod = (input.token_endpoint_auth_method ?? 'none') as ClientAuthMethod;
@@ -393,7 +412,7 @@ export class EmbeddedOAuth {
         const payload = await body(req);
         const result = await this.approve(id, field(payload, 'csrf'), field(payload, 'password'), field(payload, 'host'), field(payload, 'decision'));
         res.setHeader('Set-Cookie', `${this.consentCookie}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`);
-        redirect(res, result.uri);
+        if (isGeminiRelay(result.uri)) geminiHandoff(res, result.uri); else redirect(res, result.uri);
       } catch (err) { logOAuthReject('consent-submit', err); reply(res, 403, { error: 'access_denied' }); }
       return true;
     }
