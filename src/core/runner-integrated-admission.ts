@@ -9,23 +9,27 @@ import {grantPayload,verifyRunnerGrant,type RunnerGrantContext,
   type SignedRunnerGrant,RunnerGrantLedger} from './runner-grants.js';
 import {RunnerOutcomeLedger,type OutcomeIntent} from './runner-outcomes.js';
 import {AsyncSegmentedRunnerAudit,type AsyncSealAuthority} from './runner-seal-http.js';
+import {RunnerAuditSealBatcher} from './runner-seal-batch.js';
 import {RunnerWriterFence,WriterFenced} from './runner-writer-fence.js';
 import type {SignedSegmentSeal} from './runner-segments.js';
 
 const ZERO='0'.repeat(64);
 export class RunnerIntegratedAdmission{
+  private readonly batcher:RunnerAuditSealBatcher;
   private constructor(
     private readonly fence:RunnerWriterFence,
     private readonly grants:RunnerGrantLedger,
     private readonly outcomes:RunnerOutcomeLedger,
     private readonly audit:AsyncSegmentedRunnerAudit,
-  ){}
+    batching:{maxEvents?:number,maxDelayMs?:number},
+  ){this.batcher=new RunnerAuditSealBatcher(audit,batching);}
   /**
    * All components are rooted under ONE private directory. No API admits
    * independently chosen fence/grant/outcome paths.
    */
   static async openAtRoot(root:string,remote:AsyncSealAuthority,
-    pinned:ReadonlyMap<string,KeyObject>,segmentLimit=1024*1024):Promise<RunnerIntegratedAdmission>{
+    pinned:ReadonlyMap<string,KeyObject>,segmentLimit=1024*1024,
+    batching:{maxEvents?:number,maxDelayMs?:number}={}):Promise<RunnerIntegratedAdmission>{
     const dir=resolve(root);
     const fence=RunnerWriterFence.claim(dir);
     let grants:RunnerGrantLedger|undefined,outcomes:RunnerOutcomeLedger|undefined;
@@ -34,7 +38,7 @@ export class RunnerIntegratedAdmission{
       outcomes=new RunnerOutcomeLedger(join(dir,'outcomes'));
       const audit=await AsyncSegmentedRunnerAudit.open(join(dir,'segments'),remote,pinned,segmentLimit);
       fence.assertCurrent();
-      return new RunnerIntegratedAdmission(fence,grants,outcomes,audit);
+      return new RunnerIntegratedAdmission(fence,grants,outcomes,audit,batching);
     }catch(e){
       outcomes?.close();grants?.close();fence.close();
       // The durable claim remains; no attempt to recover automatically.
@@ -42,7 +46,7 @@ export class RunnerIntegratedAdmission{
     }
   }
   getOutcome(id:string){return this.outcomes.get(id);}
-  close():void{this.outcomes.close();this.grants.close();this.fence.close();}
+  close():void{this.batcher.close();this.outcomes.close();this.grants.close();this.fence.close();}
   /** Fail-closed pre-effect admission. NEVER execute or issue an effect permit. */
   async prepareSignedIntent(
     grant:SignedRunnerGrant,publicKeys:ReadonlyMap<string,KeyObject>,
@@ -67,12 +71,11 @@ export class RunnerIntegratedAdmission{
     this.fence.assertCurrent();
     this.outcomes.prepare(intent);
     this.fence.assertCurrent();
-    await this.audit.append({requestId:intent.operationId,operation:intent.operation,
-      grantDigest:digest,status:'RESERVED',outputDigest:ZERO});
-    // Seal before returning. No effect window is opened by this library.
-    await this.audit.sealCurrent();
+    // Multiple concurrent intents share a single remote segment per batch/time.
+    // A caller never gets INTENT_SEALED until its own row is actually sealed.
+    const sealed=await this.batcher.appendAndSeal({requestId:intent.operationId,
+      operation:intent.operation,grantDigest:digest,status:'RESERVED',outputDigest:ZERO});
     this.fence.assertCurrent();
-    return {status:'INTENT_SEALED',operationId:intent.operationId,
-      sealed:this.audit.state().sealed};
+    return {status:'INTENT_SEALED',operationId:intent.operationId,sealed:sealed.sealed};
   }
 }
