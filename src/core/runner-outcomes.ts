@@ -103,14 +103,16 @@ export class RunnerOutcomeLedger{
     this.readonlyMode=options.readonly===true;
     const root=resolve(dir);
     if(!this.readonlyMode)mkdirSync(root,{recursive:true,mode:0o700});
-    const s=statSync(root);
+    let s:ReturnType<typeof statSync>;
+    try{s=statSync(root);}catch{throw new OutcomeRejected();}
     if(!s.isDirectory()||s.uid!==process.getuid?.()||(s.mode&0o077)!==0)throw new OutcomeRejected();
     const file=join(root,'runner-outcomes.sqlite');
     if(!this.readonlyMode){
       try{const fd=openSync(file,constants.O_CREAT|constants.O_EXCL|constants.O_RDWR|NOFOLLOW,0o600);closeSync(fd);}
       catch(e){if((e as NodeJS.ErrnoException).code!=='EEXIST')throw new OutcomeRejected();}
     }
-    const f=lstatSync(file);
+    let f:ReturnType<typeof lstatSync>;
+    try{f=lstatSync(file);}catch{throw new OutcomeRejected();}
     if(!f.isFile()||f.isSymbolicLink()||f.uid!==process.getuid?.()||(f.mode&0o077)!==0)throw new OutcomeRejected();
     this.db=new DatabaseSync(file,{readOnly:this.readonlyMode});
     if(this.readonlyMode){
@@ -166,6 +168,9 @@ export class RunnerOutcomeLedger{
   reconcile(raw:unknown,pinned:ReadonlyMap<string,KeyObject>):OutcomeSnapshot{
     if(this.readonlyMode)throw new OutcomeRejected();
     const env=receiptOK(raw,pinned),claim=env.claim;
+    // No signed observation may claim to be more than 5 minutes in the future.
+    // Validate even on idempotent replay so time skew cannot bypass this gate.
+    if(claim.observedAt>Date.now()+5*60*1000)throw new OutcomeRejected();
     const receiptDigest=hash(Buffer.concat([outcomeClaimPayload(claim),Buffer.from(env.signature,'base64url')]));
     this.db.exec('BEGIN IMMEDIATE');
     try{
@@ -180,10 +185,11 @@ export class RunnerOutcomeLedger{
       const now=Date.now();
       if(current.effectDeadline===null||now<current.effectDeadline||
         claim.observedAt<current.effectDeadline)throw new OutcomeRejected();
-      // A second writer does not mutate a live EFFECT_WINDOW. Once expired,
-      // an old epoch can be moved to UNKNOWN under the same SQLite transaction.
+      // An active writer can reconcile its own expired EFFECT_WINDOW, too.
+      // A second writer cannot alter a live window; both paths require the
+      // independently signed receipt and have passed the deadline checks.
       if(current.state==='EFFECT_WINDOW'){
-        const m=this.db.prepare("UPDATE outcomes SET state='OUTCOME_UNKNOWN' WHERE operation_id=? AND writer_epoch<? AND state='EFFECT_WINDOW' AND effect_deadline<=?")
+        const m=this.db.prepare("UPDATE outcomes SET state='OUTCOME_UNKNOWN' WHERE operation_id=? AND writer_epoch<=? AND state='EFFECT_WINDOW' AND effect_deadline<=?")
           .run(claim.operationId,this.writerEpoch,now);
         if(m.changes!==1)throw new OutcomeRejected();
         current=this.get(claim.operationId)!;
