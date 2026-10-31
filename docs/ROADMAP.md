@@ -156,3 +156,12 @@ La interfaz read-only no ejecuta código, no hace cambios en producción y no re
 - [ ] Gate 2: rotación encadenada, sellado externo y rendimiento sostenible.
 - [ ] Gate 4: reconciliación de efectos inciertos y recibos verificables independientes.
 - [ ] Runner ejecutable seguro: todavía falta identidad Unix entre UID reales, sandbox, grants conectados al socket, filesystem seguro y control de release. No instalar ni desplegar este corte.
+
+### v0.16 runner — cuarentena sin reanudación tras crash
+
+- [x] Gate 1 parcial: detectar cola JSONL terminal incompleta, verificar prefijo, preservar bytes exactos como evidencia 0400 con SHA-256 y recibo `OUTCOME_UNKNOWN`, sin truncar/reiniciar diario.
+- [x] Tests: crash de línea final, cuarentena y hash, intento de réplica, registro interior modificado y diario completo; el flujo sigue fail-closed.
+- [ ] Gate 1 restante: aprobación y reconciliación por operador de efectos inciertos antes de rotar/reanudar el diario, con evidencia externa.
+- [ ] Gate 2: rotación encadenada de segmentos, límite O(n)/16 MiB y sellado fuera del host.
+- [ ] Gate 4: transacciones/recibos de intención/resultado, recuperación `OUTCOME_UNKNOWN` y firma independiente.
+- [ ] No habilitar socket de ejecución ni despliegue hasta completar los gates y revisión independiente de Claude.
