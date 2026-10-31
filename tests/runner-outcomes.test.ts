@@ -209,3 +209,45 @@ test('independent outcome verifier rejects a private PEM and invalid deadline gr
     db.close();
   }finally{rmSync(root,{recursive:true,force:true});}
 });
+
+test('rejects signed observations more than five minutes ahead, including terminal replays',()=>{
+  const root=mkdtempSync(join(tmpdir(),'runner-outcome-skew-'));
+  try{
+    const db=new RunnerOutcomeLedger(root),intent=baseline(),snap=db.prepare(intent);
+    db.close();
+    const writer=new RunnerOutcomeLedger(root);
+    const future:OutcomeClaim={domain:'panter.outcome-reconciliation/v1',
+      operationId:intent.operationId,intentDigest:snap.intentDigest,leaseGeneration:5,
+      outcome:'NO_EFFECT',evidenceDigest:'f'.repeat(64),observedAt:Date.now()+5*60*1000+30_000};
+    rejects(()=>writer.reconcile(receipt(future),keys));
+    const valid={...future,observedAt:Date.now()};
+    assert.equal(writer.reconcile(receipt(valid),keys).state,'NO_EFFECT');
+    assert.equal(writer.reconcile(receipt(valid),keys).state,'NO_EFFECT');
+    rejects(()=>writer.reconcile(receipt(future),keys));
+    writer.close();
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
+test('current writer can reconcile its own expired effect window, but never early',async()=>{
+  const root=mkdtempSync(join(tmpdir(),'runner-outcome-self-reconcile-'));
+  try{
+    const db=new RunnerOutcomeLedger(root),intent=baseline(),snap=db.prepare(intent);
+    const deadline=Date.now()+65;
+    db.enterEffectWindow(intent.operationId,5,deadline);
+    const claim:OutcomeClaim={domain:'panter.outcome-reconciliation/v1',
+      operationId:intent.operationId,intentDigest:snap.intentDigest,leaseGeneration:5,
+      outcome:'SUCCEEDED',evidenceDigest:'e'.repeat(64),observedAt:deadline};
+    rejects(()=>db.reconcile(receipt(claim),keys));
+    assert.equal(db.get(intent.operationId)?.state,'EFFECT_WINDOW');
+    await new Promise(r=>setTimeout(r,90));
+    assert.equal(db.reconcile(receipt(claim),keys).state,'SUCCEEDED');
+    assert.equal(db.reconcile(receipt(claim),keys).state,'SUCCEEDED');
+    db.close();
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
+test('readonly on nonexistent directory or missing database rejects consistently',()=>{
+  const root=mkdtempSync(join(tmpdir(),'runner-outcome-readonly-missing-'));
+  try{
+    rejects(()=>RunnerOutcomeLedger.openReadonly(join(root,'does-not-exist')));
+    rejects(()=>RunnerOutcomeLedger.openReadonly(root));
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
