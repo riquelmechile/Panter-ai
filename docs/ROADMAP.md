@@ -147,3 +147,12 @@ La interfaz read-only no ejecuta código, no hace cambios en producción y no re
 - [x] Cliente lento limitado por plazo monotónico absoluto de 2 s y admisión concurrente acotada (máximo 8); test de respuesta sana ante cliente fragmentado y saturación.
 - [x] `umask` restaurado ante fallos durante creación del socket; prueba de fallo inducido.
 - [ ] Revisión independiente de Claude sobre SHA nuevo y CI del mismo SHA. No desplegar ni habilitar ejecutor; siguen los cuatro gates pre-servicio y ACL entre UID distintos.
+
+### v0.16 runner — firma Ed25519 canónica y anti-replay
+
+- [x] Gate pre-servicio 3: la representación base64url Ed25519 se comprueba mediante re-encodificación idéntica; alias de bits terminales se rechazan.
+- [x] El digest de reserva SQLite se deriva del payload de grant y de **64 bytes de firma verificados**, no de una cadena base64url; tests inspeccionan el ledger y comprueban rechazo sin consumo del grant.
+- [ ] Gate 1: recuperación y cuarentena de línea terminal truncada del diario.
+- [ ] Gate 2: rotación encadenada, sellado externo y rendimiento sostenible.
+- [ ] Gate 4: reconciliación de efectos inciertos y recibos verificables independientes.
+- [ ] Runner ejecutable seguro: todavía falta identidad Unix entre UID reales, sandbox, grants conectados al socket, filesystem seguro y control de release. No instalar ni desplegar este corte.

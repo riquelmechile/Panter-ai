@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -101,4 +102,45 @@ test('does not open a symlinked ledger database',()=>{
     symlinkSync(target,join(dir,'runner-grants.sqlite'));
     rejects(()=>new RunnerGrantLedger(dir));
   } finally {rmSync(dir,{recursive:true,force:true})}
+});
+
+test('rejects noncanonical base64url aliases of the same Ed25519 signature bytes',()=>{
+  const grant=signed(claims());
+  const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const last=grant.signature.at(-1)!;
+  const index=alphabet.indexOf(last);
+  assert.notEqual(index,-1);
+  const alias=grant.signature.slice(0,-1)+alphabet[index^1]!;
+  assert.notEqual(alias,grant.signature);
+  assert.equal(Buffer.from(alias,'base64url').toString('hex'),Buffer.from(grant.signature,'base64url').toString('hex'));
+  rejects(()=>verifyRunnerGrant({...grant,signature:alias},pinned,now));
+
+  const dir=mkdtempSync(join(tmpdir(),'runner-grant-alias-'));
+  try{
+    const db=new RunnerGrantLedger(dir);
+    rejects(()=>db.reserve({...grant,signature:alias},pinned,ctx,randomUUID(),now));
+    db.reserve(grant,pinned,ctx,randomUUID(),now);
+    rejects(()=>db.reserve({...grant,signature:alias},pinned,ctx,randomUUID(),now));
+    rejects(()=>db.reserve(grant,pinned,ctx,randomUUID(),now));
+    db.close();
+  }finally{rmSync(dir,{recursive:true,force:true})}
+});
+
+test('durable signed digest hashes raw 64-byte signature, not its base64url text',()=>{
+  const dir=mkdtempSync(join(tmpdir(),'runner-grant-canonical-digest-'));
+  try{
+    const grant=signed(claims());
+    const store=new RunnerGrantLedger(dir);
+    store.reserve(grant,pinned,ctx,randomUUID(),now);
+    store.close();
+    const inspect=new DatabaseSync(join(dir,'runner-grants.sqlite'),{readOnly:true});
+    const row=inspect.prepare('SELECT signed_digest FROM grant_uses WHERE grant_id=?')
+      .get(grant.claims.grantId) as {signed_digest:string};
+    inspect.close();
+    const payload=grantPayload(grant.claims);
+    const expected=createHash('sha256').update(payload).update(Buffer.from(grant.signature,'base64url')).digest('hex');
+    const legacy=createHash('sha256').update(payload).update(grant.signature).digest('hex');
+    assert.equal(row.signed_digest,expected);
+    assert.notEqual(row.signed_digest,legacy);
+  }finally{rmSync(dir,{recursive:true,force:true})}
 });
