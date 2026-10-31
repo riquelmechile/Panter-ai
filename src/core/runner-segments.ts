@@ -238,6 +238,22 @@ export class SegmentedRunnerAudit {
     const body={segment:this.segment,sequence:this.sequence,previousHash:this.lastHash,event};
     return rowEncoded({...body,hash:digest(rowBody(body))});
   }
+  /** Size of the next row for async pre-rotation; throws on invalid event. */
+  previewAppendBytes(event:SegmentedEvent):number{
+    if(!eventOk(event))throw new SegmentIntegrityError();
+    return this.row(event).length;
+  }
+  /** Immutable evidence for async off-host sealing, before any local rotation. */
+  pendingSeal():{claim:SegmentSealClaim;payload:Buffer}{
+    if(this.bytes===0)throw new SegmentIntegrityError();
+    const p=this.path(this.segment);
+    const scan=scanSegment(p,this.segment,this.firstSequence,this.segmentStartHash,this.previousSealHash);
+    if(scan.bytes!==this.bytes||scan.last!==this.sequence-1||scan.hash!==this.lastHash)
+      throw new SegmentIntegrityError();
+    const payload=openExisting(p);
+    if(digest(payload)!==scan.contentSha256)throw new SegmentIntegrityError();
+    return {claim:claimOf(scan),payload};
+  }
   state():SegmentInspection{return {sealed:this.segment-1,activeSegment:this.segment,entries:this.sequence-1,lastHash:this.lastHash,activeBytes:this.bytes};}
   /** Operator-controlled explicit seal; no effectful executor may rely on local-only hashes. */
   sealCurrent():SegmentInspection{

@@ -44,3 +44,9 @@ Antes de uso real:
 
 Documentación oficial de WebCrypto Ed25519: https://developers.cloudflare.com/workers/runtime-apis/web-crypto/
 Consistencia y escrituras condicionales R2: https://developers.cloudflare.com/r2/reference/consistency/
+
+## Primer tramo del issue #42: bridge asíncrono (solo biblioteca)
+
+`src/core/runner-seal-http.ts` aporta `HttpSegmentSealAuthority` (HTTPS con fetch inyectable, GET latest/segment, POST claim + bytes completos, sin redirecciones, timeout, respuesta limitada) y `AsyncSegmentedRunnerAudit.open()`, `append()` y `sealCurrent()`. No se intenta bloquear el event loop con HTTP síncrono: se solicita el sello **antes** de rotar localmente, se verifica la firma con las claves públicas fijadas del diario, y se crea el segmento siguiente solo después de confirmar el sello.
+
+En una respuesta HTTP perdida tras persistencia remota, la siguiente apertura lee anclas del Worker y el diario recupera el estado posterior al sello; una petición que sí haya fallado antes de persistir puede reintentarse **solo con los mismos bytes**. La memoria local no sustituye a R2 ni es autoridad de firma. El bridge serializa las operaciones por instancia y rechaza acceso concurrente; la exclusión entre procesos/UID aún no está implementada. La verificación y publicación real en R2 con identidad externa/Access/mTLS, el soporte de miles de segmentos (límite defensivo de 10.000 en preload), el cutover de diario legado y el endurecimiento de permisos siguen pendientes. No se creó ningún recurso Cloudflare ni se desplegó el runner.
