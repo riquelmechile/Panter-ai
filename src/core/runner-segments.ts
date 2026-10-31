@@ -75,8 +75,8 @@ function validClaim(x:unknown):x is SegmentSealClaim{
   return x.domain==='panter.segment-seal/v1'&&
     Number.isSafeInteger(x.segment)&&(x.segment as number)>0&&
     Number.isSafeInteger(x.firstSequence)&&(x.firstSequence as number)>0&&
-    Number.isSafeInteger(x.lastSequence)&&(x.lastSequence as number)>=(x.firstSequence as number)-1&&
-    Number.isSafeInteger(x.bytes)&&(x.bytes as number)>=0&&
+    Number.isSafeInteger(x.lastSequence)&&(x.lastSequence as number)>=(x.firstSequence as number)&&
+    Number.isSafeInteger(x.bytes)&&(x.bytes as number)>0&&
     [x.lastHash,x.previousSealHash,x.contentSha256].every(z=>typeof z==='string'&&HEX.test(z));
 }
 function sameClaim(a:SegmentSealClaim,b:SegmentSealClaim):boolean{return sealBody(a).equals(sealBody(b));}
@@ -105,7 +105,7 @@ function openExisting(p:string):Buffer {
   const fd=openSync(p,constants.O_RDONLY|NOFOLLOW|constants.O_NONBLOCK);
   try {
     const s=fstatSync(fd);
-    if(!s.isFile()||s.uid!==process.getuid?.()||(s.mode&0o077)!==0||s.size>16*1024*1024)throw new SegmentIntegrityError();
+    if(!s.isFile()||s.uid!==process.getuid?.()||(s.mode&0o077)!==0||s.size>2*1024*1024)throw new SegmentIntegrityError();
     const data=readFileSync(fd);
     const second=fstatSync(fd);
     if(data.length!==s.size||second.ino!==s.ino||second.size!==s.size||second.mtimeMs!==s.mtimeMs)throw new SegmentIntegrityError();
@@ -151,7 +151,7 @@ export class SegmentedRunnerAudit {
   private readonly authority:ExternalSealAuthority;
   private readonly pinned:ReadonlyMap<string,KeyObject>;
   constructor(root:string,authority:ExternalSealAuthority,pinned:ReadonlyMap<string,KeyObject>,limit=1024*1024){
-    if(!Number.isSafeInteger(limit)||limit<512||limit>16*1024*1024||pinned.size===0)throw new SegmentIntegrityError();
+    if(!Number.isSafeInteger(limit)||limit<512||limit>2*1024*1024||pinned.size===0)throw new SegmentIntegrityError();
     this.root=validateDir(root);this.authority=authority;this.pinned=pinned;this.limit=limit;
     this.recover();
   }
@@ -171,7 +171,9 @@ export class SegmentedRunnerAudit {
     if(highest>indices.length||highest<indices.length-1)throw new SegmentIntegrityError();
     if(indices.length===0){
       if(latest!==null)throw new SegmentIntegrityError();
-      createSegment(this.path(1));this.syncDir();return;
+      createSegment(this.path(1));this.syncDir();
+      this.firstSequence=this.sequence;this.segmentStartHash=this.lastHash;
+      return;
     }
     let first=1,prev=ZERO,prevSeal=ZERO;
     for(const [offset,number] of indices.entries()){
@@ -193,11 +195,13 @@ export class SegmentedRunnerAudit {
       createSegment(this.path(highest+1));this.syncDir();
       this.segment=highest+1;this.bytes=0;
       this.previousSealHash=prevSeal;
+      this.firstSequence=this.sequence;this.segmentStartHash=this.lastHash;
     }
   }
   private rotate():void {
+    // Explicit active-segment anchors survive recovery without recounting sealed rows.
     const scan=scanSegment(this.path(this.segment),this.segment,
-      this.sequence-this.countCurrentRows(),this.lastHashAtSegmentStart(),this.previousSealHash);
+      this.firstSequence,this.segmentStartHash,this.previousSealHash);
     const claim=claimOf(scan);
     const existing=this.authority.get(this.segment);
     const seal=inspectSeal(existing??this.authority.seal(claim),this.pinned,claim);
@@ -210,8 +214,6 @@ export class SegmentedRunnerAudit {
   }
   private firstSequence=1;
   private segmentStartHash=ZERO;
-  private countCurrentRows():number{return this.sequence-this.firstSequence;}
-  private lastHashAtSegmentStart():string{return this.segmentStartHash;}
   append(event:SegmentedEvent):SegmentInspection {
     if(!eventOk(event))throw new SegmentIntegrityError();
     let row=this.row(event);

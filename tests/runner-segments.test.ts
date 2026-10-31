@@ -100,7 +100,15 @@ test('restart after signed seal but before next segment creation can recover wit
     assert.equal(reopened.state().entries,1);
     reopened.append(event());
     assert.equal(reopened.state().entries,2);
-    assert.equal(store.anchors.size,1);
+    // Regression: first rotation after crash must start at sequence 2, not 1.
+    const sealedAgain=reopened.sealCurrent();
+    assert.equal(sealedAgain.sealed,2);
+    for(let i=0;i<12;i++)reopened.append(event());
+    const finalState=reopened.state();
+    assert.ok(finalState.sealed>=3,'automatic rotation must also work after recovery');
+    const verified=new SegmentedRunnerAudit(root,store,pins,650);
+    assert.deepEqual(verified.state(),finalState);
+    assert.equal(store.anchors.size,finalState.sealed);
   }finally{rmSync(root,{recursive:true,force:true});}
 });
 test('rejects symlinked segment, unexpected files and insecure permissions',()=>{
@@ -126,5 +134,22 @@ test('off-host unavailable or refused seal blocks rotation, never silently conti
     journal.append(event());
     assert.throws(()=>journal.sealCurrent());
     assert.deepEqual(readdirSync(root),['segment-00000001.jsonl']);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+// Second crash path: the first post-recovery rotation happens automatically in append.
+test('auto-rotation immediately after crash-recovered seal remains verifiable',()=>{
+  const root=mkdtempSync(join(tmpdir(),'runner-segment-auto-crash-'));
+  try{
+    const store=new FakeExternalAuthority();
+    const journal=new SegmentedRunnerAudit(root,store,pins,650);
+    journal.append(event());
+    journal.sealCurrent();
+    unlinkSync(join(root,'segment-00000002.jsonl'));
+    const recovered=new SegmentedRunnerAudit(root,store,pins,650);
+    for(let i=0;i<12;i++)recovered.append(event());
+    const state=recovered.state();
+    assert.ok(state.sealed>=2);
+    assert.deepEqual(new SegmentedRunnerAudit(root,store,pins,650).state(),state);
   }finally{rmSync(root,{recursive:true,force:true});}
 });
