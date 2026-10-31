@@ -106,3 +106,9 @@ La cuarentena ya no crea archivos finales `.bin` o `.json` antes de escribir sus
 - Tests cubren reintentos con temporales huérfanos, ausencia de temporales al finalizar correctamente y rechazo de archivos finales `.bin`/`.json` de longitud cero o parcial.
 
 El diario fuente sigue intacto, el resultado permanece `OUTCOME_UNKNOWN` y **no se autoriza reanudar efectos**. Siguen pendientes sellado externo, rotación, reconciliación y pruebas del ejecutor.
+
+## Fase 2 — Backend externo de sellado Cloudflare (sin deploy)
+
+Se implementa en código de referencia un Cloudflare Worker en `src/runner/seal-worker.mjs` con clave privada Ed25519 fuera del runner y objetos R2 de solo-creación. Verifica hashes de los registros y continuidad del sello anterior antes de firmar y publicar. Solo admite endpoints autenticados de consulta y emisión; un intento de sobrescribir contenido existente falla cerrado. La secuencia de escritura `payload` y luego `receipt` tolera que un crash deje un payload completo sin recibo, que se puede completar mediante reintento idéntico.
+
+**No significa sellado remoto activo:** no se han creado bucket, Worker, secretos, permisos IAM ni controles Cloudflare Access. El contrato del diario segmentado (PR #35) todavía es síncrono y necesita un bridge protegido para consultar el Worker asíncrono; las pruebas nuevas usan R2 simulado. La separación UID/host, rollback E2E y cierre de gates del ejecutor siguen pendientes. Véase `docs/RUNNER_SEAL_WORKER.md` para contrato y provisionamiento revisable.

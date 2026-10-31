@@ -180,3 +180,11 @@ La interfaz read-only no ejecuta código, no hace cambios en producción y no re
 - [x] Sincronizar directorio tras publicación y tras retirar temporal; admitir temporales huérfanos sin alterar la evidencia.
 - [x] Tests: bin/json definitivos de 0 bytes o parciales se rechazan, temporal huérfano no bloquea reintento, ruta final contiene archivos íntegros.
 - [ ] Revisión independiente de Claude sobre SHA nuevo antes del merge; sigue prohibido instalar o habilitar ejecutor.
+
+## Fase 2 — Autoridad R2/Worker de sellado (código sin despliegue)
+
+- [x] Worker Ed25519 con almacenamiento R2 condicional `If-None-Match: *`, sin API de edición/borrado y validación de cadena de segmento.
+- [x] Tests con R2 simulado: firma, continuidad, payload crash, contenido/digest manipulados, accesos no autorizados y reintentos.
+- [ ] Aprobar recursos, configurar R2/Worker, llaves independientes, Access/mTLS e IAM restrictivo; probar contra servicios Cloudflare reales.
+- [ ] Bridge async externo hacia `ExternalSealAuthority`, pruebas de rollback/caídas de red y sincronización durable en Oracle.
+- [ ] Sin deploy/activación antes de todas las revisiones independientes y pruebas de seguridad E2E.
