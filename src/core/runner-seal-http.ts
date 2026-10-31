@@ -4,6 +4,7 @@
  * No Worker/R2 resources or credentials are provisioned by this module.
  */
 import type {KeyObject} from 'node:crypto';
+import {loadSealCheckpoint,saveSealCheckpoint} from './runner-seal-checkpoint.js';
 import {inspectSeal,segmentSealDigest,segmentSealPayload,SegmentedRunnerAudit,SegmentIntegrityError,
   type ExternalSealAuthority,type SegmentInspection,type SegmentedEvent,
   type SegmentSealClaim,type SignedSegmentSeal} from './runner-segments.js';
@@ -65,6 +66,7 @@ class SealCache implements ExternalSealAuthority {
   latest():SignedSegmentSeal|null{return this.receipts.get(this.receipts.size)??null;}
   get(n:number):SignedSegmentSeal|null{return this.receipts.get(n)??null;}
   seal():SignedSegmentSeal{throw new SegmentIntegrityError();} // no synchronous signing fallback
+  all():SignedSegmentSeal[]{return [...this.receipts.values()];}
   install(segment:number,receipt:SignedSegmentSeal,expected?:SegmentSealClaim):void{
     if(!receipt||receipt.claim?.segment!==segment||!Number.isSafeInteger(segment)||
       segment!==this.receipts.size+1)throw new SegmentIntegrityError();
@@ -92,16 +94,26 @@ export class AsyncSegmentedRunnerAudit {
     private readonly remote:AsyncSealAuthority,
     private readonly cache:SealCache,
     private readonly limit:number,
+    private readonly root:string,
   ){}
   static async open(root:string,remote:AsyncSealAuthority,pinned:ReadonlyMap<string,KeyObject>,
     limit=1024*1024):Promise<AsyncSegmentedRunnerAudit>{
     const cache=new SealCache(pinned);
     try{
       const latest=await remote.latest();
+      if(latest!==null)inspectSeal(latest,pinned,latest.claim);
+      const checkpoint=loadSealCheckpoint(root);
+      if(checkpoint!==null){
+        for(const [i,receipt] of checkpoint.entries())cache.install(i+1,receipt);
+        if(latest===null&&checkpoint.length>0)throw new SegmentIntegrityError();
+      }
       if(latest!==null){
-        const end=latest.claim?.segment;
-        if(typeof end!=='number'||!Number.isSafeInteger(end)||end<1||end>10_000)throw new SegmentIntegrityError();
-        for(let i=1;i<=end;i++){
+        const end=latest.claim.segment;
+        if(!Number.isSafeInteger(end)||end<1||end>99_999_999||
+          cache.all().length>end)throw new SegmentIntegrityError();
+        // Cache is ONLY a local performance hint: verify every signed receipt
+        // in the checkpoint and anchor it to latest signed external receipt.
+        for(let i=cache.all().length+1;i<=end;i++){
           const receipt=await remote.get(i);
           if(!receipt)throw new SegmentIntegrityError();
           cache.install(i,receipt);
@@ -109,8 +121,9 @@ export class AsyncSegmentedRunnerAudit {
         if(segmentSealDigest(cache.latest()!)!==segmentSealDigest(latest))
           throw new SegmentIntegrityError();
       }
-      return new AsyncSegmentedRunnerAudit(new SegmentedRunnerAudit(root,cache,pinned,limit),
-        remote,cache,limit);
+      const journal=new SegmentedRunnerAudit(root,cache,pinned,limit);
+      saveSealCheckpoint(root,cache.all());
+      return new AsyncSegmentedRunnerAudit(journal,remote,cache,limit,root);
     }catch{throw new SegmentIntegrityError();}
   }
   state():SegmentInspection{return this.journal.state();}
@@ -126,7 +139,9 @@ export class AsyncSegmentedRunnerAudit {
     const receipt=await this.remote.seal(claim,payload);
     this.cache.install(claim.segment,receipt,claim);
     // verify independent signature, local content and chain before creating next
-    return this.journal.sealCurrent();
+    const state=this.journal.sealCurrent();
+    saveSealCheckpoint(this.root,this.cache.all());
+    return state;
   }
   async sealCurrent():Promise<SegmentInspection>{
     return this.exclusive(()=>this.sealUnlocked());

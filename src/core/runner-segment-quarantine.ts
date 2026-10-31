@@ -48,7 +48,14 @@ export function quarantineActiveSegmentTail(rootPath:string,remoteLatest:SignedS
   const anchor=signedLatest(remoteLatest,pinned);
   const expected=Array.from({length:anchor.segment},(_,i)=>
     'segment-'+String(i+1).padStart(8,'0')+'.jsonl');
-  if(readdirSync(root).sort().join('|')!==expected.sort().join('|'))
+  const present=readdirSync(root);
+  const checkpoint=present.includes('seal-checkpoint.json');
+  if(checkpoint){
+    const info=lstatSync(join(root,'seal-checkpoint.json'));
+    if(!info.isFile()||info.isSymbolicLink()||info.uid!==process.getuid?.()||
+      (info.mode&0o077)!==0)throw new SegmentIntegrityError();
+  }
+  if(present.filter(name=>name!=='seal-checkpoint.json').sort().join('|')!==expected.sort().join('|'))
     throw new SegmentIntegrityError();
   const filename=join(root,'segment-'+String(anchor.segment).padStart(8,'0')+'.jsonl');
   let raw:Buffer;
