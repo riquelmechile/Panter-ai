@@ -106,3 +106,19 @@ La cuarentena ya no crea archivos finales `.bin` o `.json` antes de escribir sus
 - Tests cubren reintentos con temporales huérfanos, ausencia de temporales al finalizar correctamente y rechazo de archivos finales `.bin`/`.json` de longitud cero o parcial.
 
 El diario fuente sigue intacto, el resultado permanece `OUTCOME_UNKNOWN` y **no se autoriza reanudar efectos**. Siguen pendientes sellado externo, rotación, reconciliación y pruebas del ejecutor.
+
+## Fase 2 — Segmentación y sellado de auditoría (biblioteca nueva; no activada)
+
+\`src/core/runner-segments.ts\` implementa \`SegmentedRunnerAudit\` para reducir el costo de cada escritura de auditoría. Mantiene estado incremental, verifica al abrir y en cada rotación, pero **no vuelve a analizar todo el historial en cada \`append\`**. Usa segmentos privados numerados con límite configurable de 512 bytes a 16 MiB (valor predeterminado 1 MiB); cada evento encadena SHA-256 del anterior y la secuencia no se reinicia entre segmentos. Las escrituras de cada evento y las entradas nuevas de directorio se sincronizan con \`fsync\`. La rotación no continúa hasta que el comprobante externo queda verificado.
+
+**Sellado externo:** contrato \`ExternalSealAuthority\` con \`get\`, \`latest\` y \`seal\` inmutables. Un servicio **independiente del UID y del host runner** debe firmar el manifiesto de cada segmento con una clave privada Ed25519 que el runner no posee, mantener un índice monotónico que detecte rollbacks y entregar el recibo firmado. La biblioteca coteja índice, secuencias, último hash, digest de bytes completos y el hash del recibo del segmento anterior. Al reiniciar contrasta cada archivo con el recibo remoto y su última referencia, bloqueando alteraciones y rollback. Si ocurrió un crash después del sellado remoto y antes de abrir el siguiente segmento, crea únicamente el segmento activo faltante.
+
+**Límites / gates aún bloqueantes:** esta entrega define la interfaz y utiliza una autoridad *simulada solo en tests*, **NO crea un bucket Cloudflare R2 ni provisiona claves, no almacena pruebas off-host reales y NO enchufa este nuevo diario en el proceso en producción**. Se requiere backend duradero append-only por índice, permisos separados, antirrollback respaldado fuera de Oracle, pruebas E2E de falla de red y recuperación del activo truncado antes de habilitar cualquier ejecutor. La biblioteca se diseñó como un **escritor único**: requiere lease y fencing multiproceso en el controlador. El archivo antiguo \`RunnerAuditJournal\` se mantiene por compatibilidad, y su limitación O(n) continúa vigente hasta el cutover explícito revisado. Ningún servicio o root modificado.
+
+Pruebas \`tests/runner-segments.test.ts\`: rotación forzada por tamaño, continuidad de cadenas tras reinicio, modificaciones de segmentos históricos, recibos Ed25519 alterados, rollback del almacén externo, colas activas incompletas, reinicio tras sellar sin crear segmento siguiente y caída del servicio externo (fail-closed). Las pruebas no representan un despliegue real del sellador.
+
+## Corrección tras revisión del PR #35
+
+El segmento activo mantiene explícitos `firstSequence` y `segmentStartHash` en apertura, recuperación de crash tras sello y rotación. Así, un primer append seguido de sello explícito o de rotación automática tras recuperar no atribuye filas del segmento sellado al segmento nuevo. Pruebas reabren y verifican la cadena completa.
+
+Contrato temporal alineado con Worker del PR #39: `limit` máximo **2 MiB** (por defecto 1 MiB); claims de sellado requieren `bytes > 0` y `lastSequence >= firstSequence`, por lo que no se sellan segmentos vacíos. Falta decidir una política final de segmento vacío (issue #43). El backend real, la cuarentena de líneas activas truncadas, el sellado por evento/tiempo y el adaptador asíncrono **no** están implementados: son gates previos al runner.

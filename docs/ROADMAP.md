@@ -180,3 +180,13 @@ La interfaz read-only no ejecuta código, no hace cambios en producción y no re
 - [x] Sincronizar directorio tras publicación y tras retirar temporal; admitir temporales huérfanos sin alterar la evidencia.
 - [x] Tests: bin/json definitivos de 0 bytes o parciales se rechazan, temporal huérfano no bloquea reintento, ruta final contiene archivos íntegros.
 - [ ] Revisión independiente de Claude sobre SHA nuevo antes del merge; sigue prohibido instalar o habilitar ejecutor.
+
+## Fase 2 — diario segmentado offline y sellado verificable (PR de biblioteca)
+
+- [x] Biblioteca `SegmentedRunnerAudit`: escritura incremental, límite por segmento, cadena hash global y revalidación en apertura/rotación.
+- [x] Protocolo de comprobantes Ed25519 por segmento: digests de bytes, índice monotónico, referencia de sello anterior, detección de alteraciones y rollback por comparación con autoridad externa.
+- [x] Pruebas unitarias con autoridad externa SIMULADA, cortes durante rotación, autoridad caída y contenido/manifiestos alterados.
+- [ ] **Gate producción:** backend remoto real con almacenamiento append-only, control exclusivo fuera del UID/host, publicación durable, firmas privadas aisladas y prueba E2E con pérdida de red y rollback.
+- [ ] **Gate producción:** cutover del `RunnerAuditJournal` legado a segmentos y recuperación segura de truncamiento del último segmento, sin eliminar la evidencia histórica.
+- [ ] **Gate producción:** fencing de único escritor, conciliación de efectos `OUTCOME_UNKNOWN`, grants en transporte AF_UNIX, worktrees y sandbox reales con UID distintos.
+- [ ] Revisar con Claude el SHA exacto y CI antes de merge, sin desplegar.
