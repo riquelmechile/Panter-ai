@@ -23,9 +23,10 @@ export class SqliteLedger {
     this.filename = join(path, 'panter.sqlite');
     this.db = new DatabaseSync(this.filename);
     chmodSync(this.filename, 0o600);
+    // Initial WAL initialization may contend with another opener.
+    this.db.exec('PRAGMA busy_timeout=10000');
     this.db.exec('PRAGMA journal_mode=WAL');
     this.db.exec('PRAGMA synchronous=FULL');
-    this.db.exec('PRAGMA busy_timeout=10000');
     this.migrate(path);
   }
   static open(dir: string): SqliteLedger { return new SqliteLedger(dir); }

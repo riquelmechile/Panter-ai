@@ -18,6 +18,18 @@
 5. Las rutas relativas del grant no sustituyen comprobaciones de `realpath`, symlink/TOCTOU y `openat` que deberán implementar worktrees y sandbox antes de aceptar archivos.
 6. El diario requiere **un solo escritor**; hay que introducir coordinación transaccional para multiproceso y sellado externo antes de su puesta en servicio. Revisar uso de espacio, truncamientos, rotación y crash recovery.
 
+## Gates bloqueantes antes de poner el ejecutor en servicio (review Claude PR #25)
+
+**Estos cuatro puntos NO bloquean el merge de esta biblioteca sin ejecutor, pero todos son requisitos de aceptación obligatorios antes de habilitar cualquier socket/dispatcher que produzca efectos.** La revisión de Claude encontró y reprodujo estos riesgos:
+
+1. **Crash y cola parcial del diario:** implementar detección de una única línea terminal incompleta (sin salto final), preservarla en cuarentena de solo lectura con hash, ubicación y evidencia verificable, reconciliar reserva/efectos antes de continuar y reanudar en un nuevo segmento válido. Alteraciones en cualquier entrada completa o en el interior del diario deben seguir fallando cerrado; probar corte eléctrico simulado, reinicio y falsificación.
+2. **Rotación y límites de tamaño/rendimiento:** el diario actual valida O(n) cada `append` y al superar 16 MiB falla cerrado; antes de servicio definir límites operativos y rotación de segmentos sellados, encadenar hash final del segmento anterior con el génesis del siguiente, verificar continuidad al reiniciar, gestionar `fsync`, cuotas/espacio y evitar el re-hash integral por evento. Probar crecimiento y rotación bajo carga.
+3. **Firma/digest canónicos:** derivar la identidad/digest de una firma sobre sus **64 bytes Ed25519 decodificados**, o exigir base64url canónico con recodificación idéntica. La forma actual utiliza el texto de la firma en el digest del ledger: una recodificación alternativa válida se rechaza por anti-replay (no es bypass), pero impide correlación canónica. Probar que representaciones equivalentes no generan identidades divergentes, sin aceptar replays ni alterar el payload firmado.
+4. **Durabilidad y verificación externa de efectos:** hacer recuperable la falta de atomicidad entre **reserva SQLite, ejecución y append de auditoría** mediante protocolo de estados de intención/resultado y reconciliación de `OUTCOME_UNKNOWN`; nunca reintentar escrituras automáticamente tras una interrupción sin cercar al proceso anterior. Además **sellar/exportar el diario fuera del host/UID del runner**, verificar firma/continuidad entre segmentos y su cadena al reiniciar. Se requieren pruebas de fallo en cada frontera y detección de manipulación posterior. **Ambos subrequisitos son bloqueantes** antes del servicio.
+
+**Corrección P1 ya implementada en este PR:** `PRAGMA busy_timeout=10000` se ejecuta antes de `PRAGMA journal_mode=WAL` (en sentencias separadas) tanto para `runner-grants.ts` como para el almacén legado `sqlite-ledger.ts`. `tests/runner-grants-multiprocess.test.ts` inicia dos procesos **independientes** sobre una base nueva, desde una barrera simultánea: verifica una reserva ganadora y una denegada (4 repeticiones), y dos incrementos persistidos en el ledger principal (3 repeticiones). Ningún proceso debe fallar durante la apertura por `database is locked`.
+
+
 ## Verificación exigida y siguientes PR
 
 - CI: `npm run check`, `npm run build`, `npm test`; pruebas nuevas de firma válida, firma falsificada, alcance/lease/SHA, expiración, anti-replay con SQLite tras reinicio, rutas prohibidas y auditoría alterada.

@@ -176,7 +176,10 @@ export class RunnerGrantLedger {
     const f = lstatSync(file);
     if (!f.isFile() || f.isSymbolicLink() || (f.mode & 0o077) !== 0 || f.uid !== process.getuid?.()) throw new GrantRejected();
     this.db = new DatabaseSync(file);
-    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=10000');
+    // WAL may require an exclusive lock on first open; wait before requesting it.
+    this.db.exec('PRAGMA busy_timeout=10000');
+    this.db.exec('PRAGMA journal_mode=WAL');
+    this.db.exec('PRAGMA synchronous=FULL');
     this.db.exec('CREATE TABLE IF NOT EXISTS grant_uses (grant_id TEXT PRIMARY KEY, signed_digest TEXT NOT NULL, used INTEGER NOT NULL, max_uses INTEGER NOT NULL, expires_at INTEGER NOT NULL)');
     this.db.exec('CREATE TABLE IF NOT EXISTS request_uses (request_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL REFERENCES grant_uses(grant_id))');
   }

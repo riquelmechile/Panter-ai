@@ -117,6 +117,12 @@ Guía: [SQLITE_MIGRATION.md](SQLITE_MIGRATION.md). Node 22 `node:sqlite` aún es
 - [x] Núcleo offline de verificación de grants Ed25519: issuer/audience, identidad, misión/intento, SHA, alcance, vencimiento y anti-replay SQLite WAL.
 - [x] Protocolo tipado con allowlist sin shell libre ni dispatch de operaciones en esta etapa.
 - [x] Auditoría local append-only con hash-chain y esquema sin payloads secretos; **no** equivale a auditoría inmutable sin sellado externo.
+- [x] Corrección preventiva de apertura WAL: `busy_timeout` ANTES de `journal_mode` en runner y ledger principal; test con dos procesos OS concurrentes sobre una base nueva, verificando apertura y reservas/commits.
+- [ ] **Gate pre-servicio 1:** recuperar de forma controlada una cola final incompleta del diario, con cuarentena y evidencia, manteniendo fallo cerrado ante alteración interna.
+- [ ] **Gate pre-servicio 2:** rotación encadenada de diario antes de 16 MiB, sellado entre segmentos, límites de espacio y evitar O(n) por append.
+- [ ] **Gate pre-servicio 3:** correlación canónica Ed25519 (bytes de firma o representación base64url estrictamente canónica) y pruebas contra recodificación.
+- [ ] **Gate pre-servicio 4a:** protocolo y recuperación de efectos inciertos entre grant SQLite, ejecución y registro; probar crash en cada frontera.
+- [ ] **Gate pre-servicio 4b:** exportar/sellar el diario fuera del host o UID del runner; verificar continuidad y detección de manipulación.
 - [ ] Servicio Unix separado y `SO_PEERCRED`, verificación de grants en IPC real, política de claves y crash recovery.
 - [ ] Sandbox de npm/scripts, worktrees aislados y pruebas adversariales en Oracle ARM64.
 - [ ] Firma de grants en control plane únicamente para admins autenticados (`PANTER_OWNER_TRUSTED_HOSTS`), independiente de las llaves Panter-RDD.
