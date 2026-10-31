@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {createHash,generateKeyPairSync,randomUUID,sign} from 'node:crypto';
-import {appendFileSync,mkdtempSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
+import {appendFileSync,chmodSync,mkdtempSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {RunnerAuditJournal} from '../src/core/runner-journal.js';
@@ -75,9 +75,15 @@ test('tampered staging manifest, signed anchor or sealed JSONL blocks without re
   try{
     const file=join(x.staging,'cutover-staging-'+x.receipt.legacySha256+'.json');
     const original=readFileSync(file);
-    writeFileSync(file,Buffer.from(original.toString().replace('"legacyBytes":', '"legacyBytes":9999,"bogus":')),{mode:0o400});
+    // Forensic manifest is intentionally 0400: mutate its mode in the test,
+    // then restore the original immutable-style permissions before preflight.
+    chmodSync(file,0o600);
+    writeFileSync(file,Buffer.from(original.toString().replace('"legacyBytes":', '"legacyBytes":9999,"bogus":')));
+    chmodSync(file,0o400);
     await assert.rejects(()=>inspectLegacyCutoverEvidence(x.root,x.legacy,x.staging,x.remote,pinned),SegmentIntegrityError);
-    writeFileSync(file,original,{mode:0o400});
+    chmodSync(file,0o600);
+    writeFileSync(file,original);
+    chmodSync(file,0o400);
     const record=x.remote.seals.get(1)!;
     x.remote.seals.set(1,{...record,signature:record.signature.slice(0,-1)+(record.signature.endsWith('A')?'E':'A')});
     await assert.rejects(()=>inspectLegacyCutoverEvidence(x.root,x.legacy,x.staging,x.remote,pinned),SegmentIntegrityError);
