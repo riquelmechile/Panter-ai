@@ -237,15 +237,20 @@ test('readiness probe waits for listen(), not just an already-bound socket pathn
   cp.stdout.setEncoding('utf8');
   cp.stderr.setEncoding('utf8');
   cp.stderr.on('data',(x:string)=>{errors+=x;});
-  let bound!:()=>void;
-  const ready=new Promise<void>(resolve=>{bound=resolve;});
+  let bound!:()=>void,fail!:(error:Error)=>void;
+  const ready=new Promise<void>((resolve,reject)=>{bound=resolve;fail=reject;});
+  const exited=new Promise<number|null>((resolve,reject)=>{
+    cp.once('error',reject);
+    cp.once('close',resolve);
+  });
+  cp.once('error',fail);
   cp.stdout.on('data',(x:string)=>{output+=x;if(output.includes('BOUND'))bound();});
+  cp.once('close',code=>{if(!output.includes('BOUND'))fail(new Error('fixture exited '+code+': '+errors));});
   try{
     await ready;
     assert.equal(existsSync(sock),true,'bound pathname exists before listening');
     await waitForSocket(sock,cp,()=>({output,errors}));
-    const code=await new Promise<number|null>(resolve=>cp.once('close',resolve));
-    assert.equal(code,0,errors);
+    assert.equal(await exited,0,errors);
   }finally{
     if(cp.exitCode===null)cp.kill('SIGKILL');
     rmSync(dir,{recursive:true,force:true});
