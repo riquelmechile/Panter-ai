@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { enableSqliteWal, retrySqliteStartup } from './sqlite-startup.js';
 
 export const LEGACY_LEDGERS = ['state', 'agents', 'mesh', 'harness', 'oauth'] as const;
 export type LedgerName = typeof LEGACY_LEDGERS[number];
@@ -24,10 +25,12 @@ export class SqliteLedger {
     this.db = new DatabaseSync(this.filename);
     chmodSync(this.filename, 0o600);
     // Initial WAL initialization may contend with another opener.
-    this.db.exec('PRAGMA busy_timeout=10000');
-    this.db.exec('PRAGMA journal_mode=WAL');
+    const deadline=Date.now()+15_000;
+    this.db.exec('PRAGMA busy_timeout=1000');
+    enableSqliteWal(this.db,deadline);
     this.db.exec('PRAGMA synchronous=FULL');
-    this.migrate(path);
+    retrySqliteStartup(()=>this.migrate(path),deadline);
+    this.db.exec('PRAGMA busy_timeout=10000');
   }
   static open(dir: string): SqliteLedger { return new SqliteLedger(dir); }
   private migrate(dir: string): void {

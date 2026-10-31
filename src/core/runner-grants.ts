@@ -9,6 +9,7 @@ import { createHash, createPublicKey, verify, type KeyObject } from 'node:crypto
 import { DatabaseSync } from 'node:sqlite';
 import { closeSync, constants, lstatSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { enableSqliteWal, retrySqliteStartup } from './sqlite-startup.js';
 
 export const RUNNER_OPERATIONS = [
   'workspace.prepare', 'git.inspect', 'git.diff', 'build.install',
@@ -189,11 +190,22 @@ export class RunnerGrantLedger {
     if (!f.isFile() || f.isSymbolicLink() || (f.mode & 0o077) !== 0 || f.uid !== process.getuid?.()) throw new GrantRejected();
     this.db = new DatabaseSync(file);
     // WAL may require an exclusive lock on first open; wait before requesting it.
-    this.db.exec('PRAGMA busy_timeout=10000');
-    this.db.exec('PRAGMA journal_mode=WAL');
+    const deadline=Date.now()+15_000;
+    this.db.exec('PRAGMA busy_timeout=1000');
+    enableSqliteWal(this.db,deadline);
     this.db.exec('PRAGMA synchronous=FULL');
-    this.db.exec('CREATE TABLE IF NOT EXISTS grant_uses (grant_id TEXT PRIMARY KEY, signed_digest TEXT NOT NULL, used INTEGER NOT NULL, max_uses INTEGER NOT NULL, expires_at INTEGER NOT NULL)');
-    this.db.exec('CREATE TABLE IF NOT EXISTS request_uses (request_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL REFERENCES grant_uses(grant_id))');
+    retrySqliteStartup(()=>{
+      this.db.exec('BEGIN IMMEDIATE');
+      try{
+        this.db.exec('CREATE TABLE IF NOT EXISTS grant_uses (grant_id TEXT PRIMARY KEY, signed_digest TEXT NOT NULL, used INTEGER NOT NULL, max_uses INTEGER NOT NULL, expires_at INTEGER NOT NULL)');
+        this.db.exec('CREATE TABLE IF NOT EXISTS request_uses (request_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL REFERENCES grant_uses(grant_id))');
+        this.db.exec('COMMIT');
+      }catch(error){
+        this.db.exec('ROLLBACK');
+        throw error;
+      }
+    },deadline);
+    this.db.exec('PRAGMA busy_timeout=10000');
   }
   reserve(envelope: unknown, keys: ReadonlyMap<string,KeyObject>, ctx: RunnerGrantContext, requestId: string, now=Date.now()): void {
     const claims = verifyRunnerGrant(envelope, keys, now);
