@@ -120,18 +120,59 @@ export function quarantineRunnerAuditTail(dir: string): QuarantinedRunnerTail {
     prefixEntries:validated.length,prefixLastHash:validated.at(-1)?.hash??ZERO,
     tailSha256:tailDigest,tailBytes:tail.length,quarantinedFile,receiptFile,
   };
-  function writeEvidence(target:string,payload:Buffer):void {
-    const evidenceFd=openSync(target,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|O_NOFOLLOW,0o400);
+  /** Return true only if a previously created evidence file is byte-exact. */
+  function verifyExisting(target:string,payload:Buffer):boolean {
+    let evidenceFd:number;
+    try {
+      // O_NONBLOCK prevents an attacker-created FIFO from blocking the recovery.
+      evidenceFd=openSync(target,constants.O_RDONLY|O_NOFOLLOW|constants.O_NONBLOCK);
+    }catch(e){
+      if ((e as NodeJS.ErrnoException).code==='ENOENT') return false;
+      throw new AuditIntegrityError();
+    }
+    try {
+      const first=fstatSync(evidenceFd);
+      if (!first.isFile() || first.isSymbolicLink() ||
+          first.uid!==process.getuid?.() || (first.mode&0o777)!==0o400 ||
+          first.size!==payload.length) throw new AuditIntegrityError();
+      const actual=readFileSync(evidenceFd);
+      const after=fstatSync(evidenceFd);
+      if (!actual.equals(payload) || first.size!==after.size ||
+          first.mtimeMs!==after.mtimeMs) throw new AuditIntegrityError();
+      return true;
+    }finally{closeSync(evidenceFd);}
+  }
+  function ensureEvidence(target:string,payload:Buffer):void {
+    if (verifyExisting(target,payload)) return;
+    let evidenceFd:number;
+    try {
+      evidenceFd=openSync(target,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|O_NOFOLLOW,0o400);
+    }catch(e) {
+      // Another writer may have created it; only an exact verified copy is safe.
+      if ((e as NodeJS.ErrnoException).code==='EEXIST' && verifyExisting(target,payload)) return;
+      throw new AuditIntegrityError();
+    }
     try {
       let offset=0;
-      while(offset<payload.length)offset+=writeSync(evidenceFd,payload,offset,payload.length-offset);
+      while(offset<payload.length){
+        const written=writeSync(evidenceFd,payload,offset,payload.length-offset);
+        if (written<=0) throw new AuditIntegrityError();
+        offset+=written;
+      }
       fsyncSync(evidenceFd);
     }finally{closeSync(evidenceFd);}
+    if (!verifyExisting(target,payload)) throw new AuditIntegrityError();
   }
   try {
     // The raw tail can contain broken UTF-8; preserve exact bytes, never log it.
-    writeEvidence(quarantinedFile,tail);
-    writeEvidence(receiptFile,Buffer.from(JSON.stringify(report)+'\n','utf8'));
+    const receiptPayload=Buffer.from(JSON.stringify(report)+'\n','utf8');
+    const savedBin=verifyExisting(quarantinedFile,tail);
+    const savedReceipt=verifyExisting(receiptFile,receiptPayload);
+    // A receipt without its evidence is an inconsistent state, not a crash
+    // window we can auto-heal. Refuse silently recreating missing evidence.
+    if (savedReceipt && !savedBin) throw new AuditIntegrityError();
+    ensureEvidence(quarantinedFile,tail);
+    ensureEvidence(receiptFile,receiptPayload);
     const dirFd=openSync(quarantine,constants.O_RDONLY|constants.O_DIRECTORY|O_NOFOLLOW);
     try{fsyncSync(dirFd);}finally{closeSync(dirFd);}
   }catch{throw new AuditIntegrityError();}

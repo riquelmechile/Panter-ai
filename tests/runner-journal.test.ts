@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, symlinkSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AuditIntegrityError, RunnerAuditJournal, quarantineRunnerAuditTail, type RunnerAuditEvent } from '../src/core/runner-journal.js';
@@ -77,8 +77,9 @@ test('crash-truncated final record is quarantined byte-for-byte; active journal 
     assert.ok(!JSON.stringify(receipt).includes('INCOMPLETE_SECRET_CANARY'));
     assert.throws(()=>new RunnerAuditJournal(dir),AuditIntegrityError);
     assert.throws(()=>j.append(event()),AuditIntegrityError);
-    // Exact evidence names prevent repeated silent quarantines.
-    assert.throws(()=>quarantineRunnerAuditTail(dir),AuditIntegrityError);
+    // A complete retry verifies both files and returns the identical receipt.
+    assert.deepEqual(quarantineRunnerAuditTail(dir),evidence);
+    assert.deepEqual(readFileSync(j.path),before);
   }finally{rmSync(dir,{recursive:true,force:true})}
 });
 test('internally tampered entries are not quarantinable as a crash tail',()=>{
@@ -101,4 +102,73 @@ test('clean journal and unrelated malformed complete record are not crash-tail c
     appendFileSync(j.path,'{"malformed":true}\n');
     assert.throws(()=>quarantineRunnerAuditTail(dir),AuditIntegrityError);
   }finally{rmSync(dir,{recursive:true,force:true})}
+});
+
+function damagedJournal(dir:string):{journal:string,tail:Buffer} {
+  const j=new RunnerAuditJournal(dir);
+  j.append(event());
+  const tail=Buffer.from('{"seq":2,"broken":"INCOMPLETE');
+  appendFileSync(j.path,tail);
+  return {journal:j.path,tail};
+}
+test('retry after crash between raw bin and JSON receipt completes matching evidence',()=>{
+  const dir=mkdtempSync(join(tmpdir(),'runner-quarantine-crash-between-'));
+  try {
+    const {journal}=damagedJournal(dir);
+    const original=readFileSync(journal);
+    const evidence=quarantineRunnerAuditTail(dir);
+    unlinkSync(evidence.receiptFile);
+    const retry=quarantineRunnerAuditTail(dir);
+    assert.deepEqual(retry,evidence);
+    assert.equal(existsSync(retry.receiptFile),true);
+    assert.deepEqual(readFileSync(journal),original);
+    assert.throws(()=>new RunnerAuditJournal(dir),AuditIntegrityError);
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+test('corrupted partial or replaced bin fails closed without writing receipt',()=>{
+  for(const damage of ['short','mismatch','symlink']) {
+    const dir=mkdtempSync(join(tmpdir(),'runner-quarantine-corrupt-bin-'));
+    try {
+      const {journal}=damagedJournal(dir);
+      const initial=readFileSync(journal);
+      const evidence=quarantineRunnerAuditTail(dir);
+      unlinkSync(evidence.receiptFile);
+      if(damage==='symlink') {
+        unlinkSync(evidence.quarantinedFile);
+        symlinkSync(journal,evidence.quarantinedFile);
+      } else {
+        chmodSync(evidence.quarantinedFile,0o600);
+        const original=readFileSync(evidence.quarantinedFile);
+        const bytes=damage==='short'?original.subarray(0,-1):Buffer.from(original);
+        if(damage==='mismatch')bytes[0]=bytes[0]===0x61?0x62:0x61;
+        writeFileSync(evidence.quarantinedFile,bytes);
+        chmodSync(evidence.quarantinedFile,0o400);
+      }
+      assert.throws(()=>quarantineRunnerAuditTail(dir),AuditIntegrityError,damage);
+      assert.equal(existsSync(evidence.receiptFile),false);
+      assert.deepEqual(readFileSync(journal),initial);
+    }finally{rmSync(dir,{recursive:true,force:true});}
+  }
+});
+test('tampered or missing receipt never gets accepted or replaced silently',()=>{
+  for(const damage of ['receipt modified','receipt symlink','bin removed']) {
+    const dir=mkdtempSync(join(tmpdir(),'runner-quarantine-receipt-tamper-'));
+    try {
+      const {journal}=damagedJournal(dir);
+      const original=readFileSync(journal);
+      const evidence=quarantineRunnerAuditTail(dir);
+      if(damage==='receipt modified') {
+        chmodSync(evidence.receiptFile,0o600);
+        writeFileSync(evidence.receiptFile,'{"forged":true}\n');
+        chmodSync(evidence.receiptFile,0o400);
+      } else if(damage==='receipt symlink') {
+        unlinkSync(evidence.receiptFile);
+        symlinkSync(journal,evidence.receiptFile);
+      } else {
+        unlinkSync(evidence.quarantinedFile);
+      }
+      assert.throws(()=>quarantineRunnerAuditTail(dir),AuditIntegrityError,damage);
+      assert.deepEqual(readFileSync(journal),original);
+    }finally{rmSync(dir,{recursive:true,force:true});}
+  }
 });
