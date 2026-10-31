@@ -1,3 +1,4 @@
+import { SqliteLedger } from '../src/core/sqlite-ledger.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
@@ -59,6 +60,13 @@ async function authorize(request: (p: string, init?: RequestInit) => Promise<Res
 }
 async function token(request: (p: string, init?: RequestInit) => Promise<Response>, clientId: string, code: string, callback = callbackA) {
   return request('/token', post({ grant_type: 'authorization_code', client_id: clientId, code, code_verifier: verifier, redirect_uri: callback, resource }));
+}
+
+
+function persistedOAuth(dir: string) {
+  const db = SqliteLedger.open(dir);
+  try { return db.read('oauth', {version:1,clients:[],pending:[],grants:[],codes:[],tokens:[]}); }
+  finally { db.close(); }
 }
 
 test('embedded OAuth discovery, DCR, PKCE, consent, token, restart and no code replay', () => harness(async ({ oauth, dir, request }) => {
@@ -267,7 +275,7 @@ test('tokens are stored by digest, never persisted in plaintext', () => harness(
   const client = await register(request);
   const { code } = await authorize(request, client, 'gpt-b');
   const issued = await (await token(request, client, code)).json() as { access_token: string; refresh_token: string };
-  const json = await (await import('node:fs/promises')).readFile(join(dir, 'oauth.json'), 'utf8');
+  const json = JSON.stringify(persistedOAuth(dir));
   assert.ok(!json.includes(issued.access_token) && !json.includes(issued.refresh_token));
 }));
 
@@ -320,13 +328,12 @@ test('unverified consent display labels client provenance and shows registration
  assert.match(html,/ChatGPT Official &amp; &lt;team&gt;/);
  assert.doesNotMatch(html,/ChatGPT Official & <team>/);
 }));
-test('invalid public revocations remain 200 and do not rewrite persisted OAuth ledger',()=>harness(async({request,dir})=>{
+test('invalid public revocations remain 200 and preserve persisted OAuth ledger',()=>harness(async({request,dir})=>{
  const clientId=await register(request);
- const file=join(dir,'oauth.json');
- const before=await (await import('node:fs/promises')).readFile(file,'utf8');
+ const before=JSON.stringify(persistedOAuth(dir));
  const response=await request('/revoke',post({client_id:clientId,token:'x'.repeat(64)}));
  assert.equal(response.status,200);
- const after=await (await import('node:fs/promises')).readFile(file,'utf8');
+ const after=JSON.stringify(persistedOAuth(dir));
  assert.equal(after,before);
 }));
 
@@ -355,7 +362,7 @@ test('one IP cannot consume the 100 global consent slots or lock out a second IP
  const consentCookie=first.headers.get('set-cookie')!.split(';')[0]!;
  for(let i=0;i<4;i++)assert.equal((await call('198.51.100.20')).status,302);
  for(let i=0;i<40;i++)assert.equal((await call('198.51.100.20')).status,400);
- const data=JSON.parse(await (await import('node:fs/promises')).readFile(join(dir,'oauth.json'),'utf8'));
+ const data=persistedOAuth(dir);
  assert.equal(data.pending.length,5,'Never evict the original pending session');
  assert.equal((await request(consentLocation,{headers:{cookie:consentCookie}})).status,200,
    'The initial legitimate consent remains usable after an abusive retry flood');
@@ -449,7 +456,7 @@ test('M1 residual: 20 sources cannot evict a legitimate pending consent after re
   const limit=source===21?4:5;
   for(let j=0;j<limit;j++)assert.equal((await authorizeAt(ip,client)).status,302);
  }
- const ledger=JSON.parse(await (await import('node:fs/promises')).readFile(join(dir,'oauth.json'),'utf8'));
+ const ledger=persistedOAuth(dir);
  assert.equal(ledger.pending.length,100);
  const over=await authorizeAt('192.0.2.21',await registerAt('192.0.2.22'));
  assert.equal(over.status,400,'At capacity, new requests fail instead of evicting unrelated pending sessions');

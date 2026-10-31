@@ -1,6 +1,7 @@
+import { SqliteLedger } from '../src/core/sqlite-ledger.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MeshEngine } from '../src/core/mesh.js';
@@ -45,10 +46,12 @@ test('only GPT-A can assign coordinator profile and worker cannot gain that role
 test('v0.3 messages without revision migrate in memory, preserving durable history', () => harness(async (mesh, dir) => {
   await mesh.setProfile('gpt-a', grok, 0);
   const work = await mesh.delegate('gpt-a', { missionId: 'legacy', target: 'grok', role: 'reviewer', instruction: 'Audit', idempotencyKey: 'l' });
-  const dataPath = join(dir, 'mesh.json');
-  const data = JSON.parse(await readFile(dataPath, 'utf8'));
-  data.messages.push({ id: 'legacy1', missionId: 'legacy', from: 'grok', to: 'gpt-a', workId: work.id, kind: 'QUESTION', text: 'old', createdAt: new Date().toISOString() });
-  await writeFile(dataPath, JSON.stringify(data));
+  const db = SqliteLedger.open(dir);
+  db.mutate('mesh', {messages: [] as Array<Record<string,unknown>>}, data => {
+    data.messages.push({ id: 'legacy1', missionId: 'legacy', from: 'grok', to: 'gpt-a',
+      workId: work.id, kind: 'QUESTION', text: 'old', createdAt: new Date().toISOString() });
+  });
+  db.close();
   const reopened = await MeshEngine.open(dir);
   assert.equal((await reopened.inbox('gpt-a', 0)).messages[0]?.text, 'old');
 }));

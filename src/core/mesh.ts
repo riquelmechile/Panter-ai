@@ -1,6 +1,6 @@
+import { SqliteLedger } from './sqlite-ledger.js';
 /** Original, provider-independent collaboration ledger for authenticated MCP hosts. */
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { agentDefinition, checkSkills, specialistPacket, REVIEW_4R, JUDGMENT_DAY, type GentleSkillId } from './gentle-catalog.js';
@@ -23,60 +23,58 @@ function sha(value: string) { return createHash('sha256').update(value).digest('
 function iso() { return new Date().toISOString(); }
 
 export class MeshEngine {
-  private file: string;
+  private readonly sqlite: SqliteLedger;
   private state: MeshData = { version: 1, profiles: [], specialistBindings: [], reviews:[], works: [], messages: [], inboxRevision: { 'gpt-a': 0, 'gpt-b': 0, 'grok': 0, 'gemini': 0, 'claude': 0 } };
   private chain: Promise<unknown> = Promise.resolve();
   /** Emitted only AFTER the updated ledger is atomically persisted. */
   readonly events = new EventEmitter();
   private writeGuard:((missionId:string,paths:string[])=>Promise<void>)|null=null;
   setWriteGuard(guard:(missionId:string,paths:string[])=>Promise<void>){this.writeGuard=guard;}
-  private constructor(dir: string) { this.file = join(resolve(dir), 'mesh.json'); }
-
+  private constructor(dir: string) { this.sqlite = SqliteLedger.open(dir); }
   static async open(dir: string) {
     const x = new MeshEngine(dir);
-    await mkdir(resolve(dir), { recursive: true, mode: 0o700 });
-    try {
-      const parsed = JSON.parse(await readFile(x.file, 'utf8')) as MeshData;
-      check(parsed.version === 1 && Array.isArray(parsed.works) && Array.isArray(parsed.profiles) && Array.isArray(parsed.messages), 'Invalid mesh ledger');
-      for (const host of HOSTS) check(Number.isSafeInteger(parsed.inboxRevision[host]) && parsed.inboxRevision[host] >= 0, 'Invalid inbox revision');
-      // v0.3 messages had no per-recipient cursor. Assign monotonic historical
-      // positions without losing messages or advancing already published revisions.
+    const parsed = x.sqlite.read('mesh', x.state);
+    check(parsed.version === 1 && Array.isArray(parsed.works) && Array.isArray(parsed.profiles) && Array.isArray(parsed.messages), 'Invalid mesh ledger');
+    for (const host of HOSTS) check(Number.isSafeInteger(parsed.inboxRevision[host]) && parsed.inboxRevision[host] >= 0, 'Invalid inbox revision');
+    const before = JSON.stringify(parsed);
+    const normalize = (data: MeshData) => {
       const historical: Record<Host, number> = { 'gpt-a': 0, 'gpt-b': 0, 'grok': 0, 'gemini': 0, 'claude': 0 };
-      for (const m of parsed.messages) {
+      for (const m of data.messages) {
         check(isHost(m.to) && isHost(m.from), 'Invalid message actor');
         historical[m.to]++;
         if (!Number.isSafeInteger(m.inboxRevision) || m.inboxRevision <= 0) m.inboxRevision = historical[m.to];
         historical[m.to] = Math.max(historical[m.to], m.inboxRevision);
       }
-      for (const host of HOSTS) parsed.inboxRevision[host] = Math.max(parsed.inboxRevision[host], historical[host]);
-      if (parsed.specialistBindings !== undefined) check(Array.isArray(parsed.specialistBindings), 'Invalid specialist binding ledger');
-      parsed.specialistBindings ??= [];
-      parsed.reviews ??= [];
-      x.state = parsed;
-    } catch (e) {
-      if (!(e instanceof Error) || !('code' in e) || e.code !== 'ENOENT') throw e;
-    }
+      for (const host of HOSTS) data.inboxRevision[host] = Math.max(data.inboxRevision[host], historical[host]);
+      if (data.specialistBindings !== undefined) check(Array.isArray(data.specialistBindings), 'Invalid specialist binding ledger');
+      data.specialistBindings ??= [];
+      data.reviews ??= [];
+    };
+    normalize(parsed);
+    // Persist upgrades inside a transaction; subsequent reads cannot lose historical cursors.
+    x.state = JSON.stringify(parsed) === before ? parsed
+      : x.sqlite.mutate('mesh', x.state, data => normalize(data)).after;
     return x;
   }
+
   private async write<T>(fn: (d: MeshData) => T): Promise<T> {
-    const p = this.chain.then(async () => {
-      const copy = structuredClone(this.state);
-      const result = fn(copy);
-      const changed = HOSTS.filter(host => copy.inboxRevision[host] !== this.state.inboxRevision[host]);
-      // Publishing and state update must not get out of order: the event is
-      // emitted only after rename, never before persistence.
-      const tmp = `${this.file}.${randomUUID()}.tmp`;
-      await writeFile(tmp, JSON.stringify(copy, null, 2), { flag: 'wx', mode: 0o600 });
-      await rename(tmp, this.file);
-      this.state = copy;
+    const p = this.chain.then(() => {
+      const { before, after, result } = this.sqlite.mutate('mesh', this.state, fn);
+      const changed = HOSTS.filter(host => after.inboxRevision[host] !== before.inboxRevision[host]);
+      this.state = after;
       if (changed.length > 0) this.events.emit('changed');
-      for (const host of changed) this.events.emit(host, copy.inboxRevision[host]);
-      return structuredClone(result);
+      for (const host of changed) this.events.emit(host, after.inboxRevision[host]);
+      return result;
     });
     this.chain = p.then(() => {}, () => {});
     return p;
   }
-  private async read<T>(fn: (d: MeshData) => T): Promise<T> { await this.chain; return structuredClone(fn(this.state)); }
+  private async read<T>(fn: (d: MeshData) => T): Promise<T> {
+    await this.chain;
+    this.state = this.sqlite.read('mesh', this.state);
+    return structuredClone(fn(this.state));
+  }
+
   private notify(d: MeshData, host: Host) { d.inboxRevision[host] = (d.inboxRevision[host] ?? 0) + 1; return d.inboxRevision[host]; }
 
   async setProfile(caller: Host, profile: Omit<ActorProfile, 'revision'>, expectedRevision: number) {

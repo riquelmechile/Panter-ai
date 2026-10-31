@@ -1,10 +1,9 @@
+import { SqliteLedger } from './sqlite-ledger.js';
 /** Panter automatic ODD harness: the user chooses an objective, not agents.
  * GPT-A/host-owned models execute packets. This engine never launches inference.
  * Persisted orchestration decisions are not authorizations or external proof.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
 import { specialistPacket, GENTLE_AGENTS, type GentleAgentId } from './gentle-catalog.js';
 import { hostRequest } from './policy.js';
 import { type Host, type MeshEngine } from './mesh.js';
@@ -84,24 +83,29 @@ export function chooseHarness(input:HarnessInput){
 export class AutomaticHarness {
   private state:State={version:1,runs:[]};
   private pending:Promise<unknown>=Promise.resolve();
-  private constructor(private readonly file:string,private readonly mesh:MeshEngine,private readonly native:NativeSubagentReview,private readonly github?:GitHubDeliveryGate,private readonly officialRdd?:NativeReviewBridge,private readonly rdd?:PanterRdd,private readonly requireWriteGrant=false){}
+  private constructor(private readonly sqlite:SqliteLedger,private readonly mesh:MeshEngine,private readonly native:NativeSubagentReview,private readonly github?:GitHubDeliveryGate,private readonly officialRdd?:NativeReviewBridge,private readonly rdd?:PanterRdd,private readonly requireWriteGrant=false){}
   static async open(dir:string,mesh:MeshEngine,native:NativeSubagentReview,github?:GitHubDeliveryGate,officialRdd?:NativeReviewBridge,rdd?:PanterRdd,requireWriteGrant=false){
-    await mkdir(resolve(dir),{recursive:true,mode:0o700});
-    const engine=new AutomaticHarness(join(resolve(dir),'harness.json'),mesh,native,github,officialRdd,rdd,requireWriteGrant);
-    try{const value:unknown=JSON.parse(await readFile(engine.file,'utf8'));
-      ensure(!!value&&typeof value==='object'&&'version' in value&&value.version===1&&'runs' in value&&Array.isArray(value.runs),'Invalid harness store');
-      engine.state=value as State;
-    }catch(e){if(!(e instanceof Error)||!('code' in e)||e.code!=='ENOENT')throw e;}
+    const engine=new AutomaticHarness(SqliteLedger.open(dir),mesh,native,github,officialRdd,rdd,requireWriteGrant);
+    const value:unknown=engine.sqlite.read('harness',engine.state);
+    ensure(!!value&&typeof value==='object'&&'version' in value&&value.version===1&&'runs' in value&&Array.isArray(value.runs),'Invalid harness store');
+    engine.state=value as State;
     return engine;
   }
-  private async read<T>(fn:(s:State)=>T){await this.pending;return structuredClone(fn(this.state));}
-  private async write<T>(fn:(s:State)=>T){
-    const task=this.pending.then(async()=>{const copy=structuredClone(this.state),v=fn(copy);
-      const tmp=`${this.file}.${randomUUID()}.tmp`;
-      await writeFile(tmp,JSON.stringify(copy,null,2),{mode:0o600,flag:'wx'});
-      await rename(tmp,this.file);this.state=copy;return structuredClone(v);});
-    this.pending=task.then(()=>undefined,()=>undefined);return task;
+  private async read<T>(fn:(s:State)=>T){
+    await this.pending;
+    this.state=this.sqlite.read('harness',this.state);
+    return structuredClone(fn(this.state));
   }
+  private async write<T>(fn:(s:State)=>T){
+    const task=this.pending.then(()=>{
+      const {after,result}=this.sqlite.mutate('harness',this.state,fn);
+      this.state=after;
+      return result;
+    });
+    this.pending=task.then(()=>undefined,()=>undefined);
+    return task;
+  }
+
   /** An authenticated operator grants narrowly scoped source-write authority; model prose is not a grant. */
   async grantWrite(input:{project:string;objective:string;allowedPaths:string[];ttlSeconds:number}){
     ensure(input.project.length>0&&input.project.length<=100,'Invalid grant project');
