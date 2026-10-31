@@ -1,7 +1,6 @@
+import { SqliteLedger } from './sqlite-ledger.js';
 /** Original, host-operated agent workflow. No inference, shell or remote-agent process lives here. */
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
 import { PanterStore } from './store.js';
 
 export type AgentRole = 'scout' | 'designer' | 'builder' | 'verifier' | 'reviewer';
@@ -95,40 +94,34 @@ function nowIso() { return new Date().toISOString(); }
 export class AgentEngine {
   private state: AgentState = { version: 1, flows: [], tasks: [] };
   private chain: Promise<unknown> = Promise.resolve();
-  private readonly file: string;
+  private readonly sqlite: SqliteLedger;
   private constructor(dataDir: string, private readonly missions: PanterStore) {
-    this.file = join(resolve(dataDir), 'agents.json');
+    this.sqlite = SqliteLedger.open(dataDir);
   }
   static async open(dataDir: string, missions: PanterStore): Promise<AgentEngine> {
     const engine = new AgentEngine(dataDir, missions);
-    await mkdir(resolve(dataDir), { recursive: true, mode: 0o700 });
-    try {
-      const data: unknown = JSON.parse(await readFile(engine.file, 'utf8'));
-      requireThat(!!data && typeof data === 'object' && 'version' in data && data.version === 1 &&
-        'flows' in data && Array.isArray(data.flows) && 'tasks' in data && Array.isArray(data.tasks), 'Invalid agent state');
-      engine.state = data as AgentState;
-    } catch (error) {
-      if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') throw error;
-    }
+    const data: unknown = engine.sqlite.read('agents', engine.state);
+    requireThat(!!data && typeof data === 'object' && 'version' in data && data.version === 1 &&
+      'flows' in data && Array.isArray(data.flows) && 'tasks' in data && Array.isArray(data.tasks), 'Invalid agent state');
+    engine.state = data as AgentState;
     return engine;
   }
+
   private write<T>(fn: (state: AgentState) => T): Promise<T> {
-    const pending = this.chain.then(async () => {
-      const copy = structuredClone(this.state);
-      const output = fn(copy);
-      const tmp = `${this.file}.${randomUUID()}.tmp`;
-      await writeFile(tmp, JSON.stringify(copy, null, 2), { mode: 0o600, flag: 'wx' });
-      await rename(tmp, this.file);
-      this.state = copy;
-      return structuredClone(output);
+    const pending = this.chain.then(() => {
+      const { after, result } = this.sqlite.mutate('agents', this.state, fn);
+      this.state = after;
+      return result;
     });
     this.chain = pending.then(() => undefined, () => undefined);
     return pending;
   }
   private async read<T>(fn: (state: AgentState) => T): Promise<T> {
     await this.chain;
+    this.state = this.sqlite.read('agents', this.state);
     return structuredClone(fn(this.state));
   }
+
   async createFlow(missionId: string, spec: string, signals: FlowSignals, reviewRequired = false): Promise<AgentFlow> {
     requireThat(!!(await this.missions.getMission(missionId)), 'Mission not found');
     requireThat(spec.trim().length > 0 && spec.length <= 30000, 'Spec length must be 1..30000');

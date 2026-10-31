@@ -1,10 +1,9 @@
+import { SqliteLedger } from './sqlite-ledger.js';
 /** Self-hosted OAuth authorization boundary for Panter-ai (single-owner preview).
  * No model inference and no third-party identity provider are required.
  * All public clients require PKCE S256 and explicit operator approval.
  */
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { isHost, type Host } from './mesh.js';
 import { rateLimitIdentity } from './trusted-proxy.js';
@@ -129,7 +128,7 @@ export class EmbeddedOAuth {
   readonly issuer: string;
   readonly resource: string;
   private ledger = empty();
-  private readonly file: string;
+  private readonly sqlite: SqliteLedger;
   private serial: Promise<unknown> = Promise.resolve();
   private readonly callbacks: Set<string>;
   private readonly operatorPassword: string;
@@ -144,33 +143,32 @@ export class EmbeddedOAuth {
     this.clientIdentity=clientIdentity;
     check(callbacks.length > 0 && callbacks.length <= 30, 'Configure approved OAuth redirect URIs');
     this.callbacks = new Set(callbacks.map(validateRedirect));
-    this.file = join(resolve(dir), 'oauth.json');
+    this.sqlite = SqliteLedger.open(dir);
   }
   static async open(cfg: { dir: string; resource: string; redirectUris: string[]; password: string; clientIdentity?:(req:IncomingMessage)=>string }) {
     const provider = new EmbeddedOAuth(cfg.dir, cfg.resource, cfg.redirectUris, cfg.password,
       cfg.clientIdentity??(req=>req.socket.remoteAddress??'unknown'));
-    await mkdir(resolve(cfg.dir), { recursive: true, mode: 0o700 });
-    try {
-      const parsed: Ledger = JSON.parse(await readFile(provider.file, 'utf8'));
-      check(parsed.version === 1 && Array.isArray(parsed.clients) && Array.isArray(parsed.pending) && Array.isArray(parsed.grants) && Array.isArray(parsed.codes) && Array.isArray(parsed.tokens), 'Invalid OAuth ledger');
-      provider.ledger = parsed;
-    } catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; }
+    const parsed: Ledger = provider.sqlite.read('oauth', empty());
+    check(parsed.version === 1 && Array.isArray(parsed.clients) && Array.isArray(parsed.pending) &&
+      Array.isArray(parsed.grants) && Array.isArray(parsed.codes) && Array.isArray(parsed.tokens), 'Invalid OAuth ledger');
+    provider.ledger = parsed;
     return provider;
   }
-  private async read<T>(fn: (ledger: Ledger) => T): Promise<T> { await this.serial; return structuredClone(fn(this.ledger)); }
+  private async read<T>(fn: (ledger: Ledger) => T): Promise<T> {
+    await this.serial;
+    this.ledger = this.sqlite.read('oauth', this.ledger);
+    return structuredClone(fn(this.ledger));
+  }
   private async change<T>(fn: (ledger: Ledger) => T): Promise<T> {
-    const next = this.serial.then(async () => {
-      const copy = structuredClone(this.ledger);
-      const value = fn(copy);
-      const temp = `${this.file}.${randomUUID()}.tmp`;
-      await writeFile(temp, JSON.stringify(copy), { mode: 0o600, flag: 'wx' });
-      await rename(temp, this.file);
-      this.ledger = copy;
-      return structuredClone(value);
+    const next = this.serial.then(() => {
+      const { after, result } = this.sqlite.mutate('oauth', this.ledger, fn);
+      this.ledger = after;
+      return result;
     });
     this.serial = next.then(() => {}, () => {});
     return next;
   }
+
   protectedResourceMetadata() {
     return { resource: this.resource, authorization_servers: [this.issuer], bearer_methods_supported: ['header'], scopes_supported: [...ALLOWED_SCOPES] };
   }

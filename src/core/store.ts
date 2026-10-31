@@ -1,5 +1,5 @@
+import { SqliteLedger } from './sqlite-ledger.js';
 import { randomUUID, createHash } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 
 export type MissionStatus = 'DRAFT' | 'READY' | 'RUNNING' | 'VERIFYING' | 'DONE' | 'BLOCKED';
@@ -28,33 +28,23 @@ function hash(text: string): string { return createHash('sha256').update(text).d
 export class PanterStore {
   private state: State = { version: 1, missions: [], work: [] };
   private queue: Promise<unknown> = Promise.resolve();
-  private readonly filename: string;
-  private constructor(dir: string) { this.filename = join(resolve(dir), 'state.json'); }
-
+  private readonly sqlite: SqliteLedger;
+  private constructor(dir: string) { this.sqlite = SqliteLedger.open(dir); }
   static async open(dir: string): Promise<PanterStore> {
     const store = new PanterStore(dir);
-    await mkdir(resolve(dir), { recursive: true, mode: 0o700 });
-    try {
-      const state: unknown = JSON.parse(await readFile(store.filename, 'utf8'));
-      assert(typeof state === 'object' && state !== null && 'version' in state && state.version === 1, 'Unsupported data format');
-      assert('missions' in state && Array.isArray(state.missions), 'Corrupt missions store');
-      assert('work' in state && Array.isArray(state.work), 'Corrupt work store');
-      store.state = state as State;
-    } catch (error) {
-      if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') throw error;
-    }
+    const state: unknown = store.sqlite.read('state', store.state);
+    assert(typeof state === 'object' && state !== null && 'version' in state && state.version === 1, 'Unsupported data format');
+    assert('missions' in state && Array.isArray(state.missions), 'Corrupt missions store');
+    assert('work' in state && Array.isArray(state.work), 'Corrupt work store');
+    store.state = state as State;
     return store;
   }
 
   private modify<T>(operation: (state: State) => T): Promise<T> {
-    const next = this.queue.then(async () => {
-      const copy = structuredClone(this.state);
-      const value = operation(copy);
-      const tmp = `${this.filename}.${randomUUID()}.tmp`;
-      await writeFile(tmp, JSON.stringify(copy, null, 2), { mode: 0o600, flag: 'wx' });
-      await rename(tmp, this.filename);
-      this.state = copy;
-      return value;
+    const next = this.queue.then(() => {
+      const { after, result } = this.sqlite.mutate('state', this.state, operation);
+      this.state = after;
+      return result;
     });
     this.queue = next.then(() => undefined, () => undefined);
     return next;
@@ -62,6 +52,7 @@ export class PanterStore {
 
   private async read<T>(operation: (state: State) => T): Promise<T> {
     await this.queue;
+    this.state = this.sqlite.read('state', this.state);
     return operation(structuredClone(this.state));
   }
 
