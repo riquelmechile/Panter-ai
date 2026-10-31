@@ -126,6 +126,8 @@ test('a reserved journal event without matching terminal outcome blocks prefligh
   try{
     const old=new RunnerAuditJournal(x.legacy);
     old.append(event());
+    // Refresh staging: failure must be due to the missing outcome, not a stale manifest.
+    await stageLegacyAuditCutover(x.legacy,x.staging,x.remote,pinned,650);
     await assert.rejects(()=>inspectLegacyCutoverEvidence(x.root,x.legacy,x.staging,x.remote,pinned),SegmentIntegrityError);
   }finally{rmSync(x.tmp,{recursive:true,force:true});}
 });
