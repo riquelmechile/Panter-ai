@@ -65,7 +65,7 @@ test('rejects modified sealed content and forged external checkpoint',()=>{
         writeFileSync(file,original.replace('"RESERVED"','"SUCCEEDED"'));
       }else if(kind==='signature'){
         const receipt=store.anchors.get(1)!;
-        store.anchors.set(1,{...receipt,signature:receipt.signature.slice(0,-1)+'A'});
+        store.anchors.set(1,{...receipt,signature:receipt.signature.slice(0,-1)+(receipt.signature.endsWith('A')?'E':'A')});
       }else{
         store.anchors.clear();
       }
