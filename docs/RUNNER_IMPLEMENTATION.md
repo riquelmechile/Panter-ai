@@ -82,3 +82,15 @@ Se añade `quarantineRunnerAuditTail(dir)` a `src/core/runner-journal.ts` para t
 - Pruebas de interrupción con bytes truncados, preservación exacta/solo lectura, reinicio fail-closed, evidencia determinista, rechazo de manipulación de registros interiores, diario limpio y reintento.
 
 **Alcance del gate 1:** la **detección y cuarentena** queda implementada; su **reanudación segura** después de reconciliar efectos sigue pendiente y **bloquea la puesta en servicio**. Gate 2 (rotación y sellado externo) y gate 4 (efectos inciertos) tampoco están cerrados. Esta utilidad offline no activa ningún ejecutor ni se despliega en Oracle.
+
+## Revisión Claude PR #31 — idempotencia de cuarentena tras un segundo crash
+
+El siguiente PR incremental corrige el fallo detectado por Claude, manteniendo el diario offline y sin permiso de reanudar efectos:
+
+- `quarantineRunnerAuditTail` comprueba mediante `O_NOFOLLOW` y `fstat` que cualquier .bin/.json existente es archivo regular, privado `0400`, propiedad del UID autorizado, del tamaño correcto y **byte a byte idéntico** a la evidencia que corresponde al diario actual. Nombres vinculados al SHA-256 original.
+- Con ambos archivos válidos, un segundo intento devuelve el **mismo reporte** sin reescribirlos.
+- Si el crash ocurrió entre guardar `.bin` completo y crear el recibo `.json`, verifica el primero y crea el recibo mediante `O_EXCL`, con `fsync` de archivo/directorio. No reemplaza ni repara evidencia diferente.
+- Si existe un `.bin` truncado/modificado, un recibo falso, un symlink, permisos inseguros o un recibo sin su evidencia, **deniega**. No borra ni sobrescribe las pruebas y deja el diario original intacto.
+- Los tests cubren reintento completo, recuperación del recibo ausente, alteración de evidencia/recibo y rechazo de symlink.
+
+**Límite:** este código solo completa la *captura de evidencia* de crash de forma idempotente bajo supuesto de **un escritor**. No resuelve una carrera con escritores concurrentes, ni reanuda el diario, ni declara un efecto seguro o finalizado. Siguen pendientes autorización de reconciliación del gate 1, rotación/sellado del gate 2 y resolución de efectos inciertos del gate 4, además de sandbox/ACL/UID. El ejecutor permanece deshabilitado.

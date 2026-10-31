@@ -165,3 +165,11 @@ La interfaz read-only no ejecuta código, no hace cambios en producción y no re
 - [ ] Gate 2: rotación encadenada de segmentos, límite O(n)/16 MiB y sellado fuera del host.
 - [ ] Gate 4: transacciones/recibos de intención/resultado, recuperación `OUTCOME_UNKNOWN` y firma independiente.
 - [ ] No habilitar socket de ejecución ni despliegue hasta completar los gates y revisión independiente de Claude.
+
+### v0.16 runner — reintentos seguros de evidencia crash
+
+- [x] Repetir cuarentena completa valida `.bin` y recibo contra contenido esperado y devuelve el mismo reporte sin sobrescribirlos.
+- [x] Recuperar del crash tras guardar `.bin` (válido) antes del recibo: completar solo el recibo faltante con `O_EXCL` y `fsync`.
+- [x] Rechazar evidencia parcial/alterada, recibos falsificados, symlinks y recibos huérfanos; original permanece fail-closed.
+- [ ] Gate 1: reconciliación de efectos y reanudación controlada del diario; gate 2: rotación/sellado; gate 4: recuperación OUTCOME_UNKNOWN y verificación externa.
+- [ ] No permitir escritor concurrente, socket ejecutor, servicio o despliegue hasta pruebas y aprobación independiente.
