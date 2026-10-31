@@ -528,3 +528,17 @@ test('Gemini: DCR with its six relay callbacks and consent answered with an HTML
   const tok = await request('/token', post({ grant_type: 'authorization_code', client_id: meta.client_id, client_secret: meta.client_secret, code, code_verifier: verifier, redirect_uri: relay, resource }));
   assert.equal(tok.status, 200);
 }));
+
+test('ChatGPT-style request without offline_access still receives a rotating refresh token', () => harness(async ({ request }) => {
+  const clientId = await register(request);
+  const { code } = await authorize(request, clientId, 'gpt-b', callbackA, 'mcp');
+  const res = await token(request, clientId, code);
+  assert.equal(res.status, 200);
+  const issued = await res.json() as { refresh_token?: string; scope: string };
+  assert.ok(issued.refresh_token && issued.refresh_token.length >= 32);
+  assert.ok(issued.scope.split(' ').includes('offline_access'));
+  const rotated = await request('/token', post({ grant_type: 'refresh_token', client_id: clientId, refresh_token: issued.refresh_token! }));
+  assert.equal(rotated.status, 200);
+  const next = await rotated.json() as { refresh_token?: string };
+  assert.ok(next.refresh_token && next.refresh_token !== issued.refresh_token);
+}));

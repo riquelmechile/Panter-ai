@@ -274,7 +274,10 @@ export class EmbeddedOAuth {
       // Clients such as Gemini request every advertised scope. The leader scope is
       // never granted to a non-coordinator host: drop it instead of failing consent.
       const requested = host === 'gpt-a' ? p.requestedScopes : p.requestedScopes.filter(s => s !== 'panter:lead');
-      const scopes = [...new Set([...requested, 'mcp', 'panter:mesh'])];
+      // Operator-approved connections always get a rotating refresh token. ChatGPT does not
+      // request offline_access and would otherwise be disconnected when the 1h access token
+      // expires; refresh rotation and replay-family revocation still apply.
+      const scopes = [...new Set([...requested, 'mcp', 'panter:mesh', 'offline_access'])];
       if (host === 'gpt-a') scopes.push('panter:lead');
       if (!existing) d.grants.push({ clientId: p.clientId, host, redirectUri: p.redirectUri, scopes: [...new Set(scopes)], approvedAt: ts(), revoked: false });
       const code = secureId(32);
