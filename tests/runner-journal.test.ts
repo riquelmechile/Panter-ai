@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AuditIntegrityError, RunnerAuditJournal, quarantineRunnerAuditTail, type RunnerAuditEvent } from '../src/core/runner-journal.js';
@@ -170,5 +170,59 @@ test('tampered or missing receipt never gets accepted or replaced silently',()=>
       assert.throws(()=>quarantineRunnerAuditTail(dir),AuditIntegrityError,damage);
       assert.deepEqual(readFileSync(journal),original);
     }finally{rmSync(dir,{recursive:true,force:true});}
+  }
+});
+
+test('orphan temporary files from interrupted publication never prevent safe retries',()=>{
+  const dir=mkdtempSync(join(tmpdir(),'runner-quarantine-temp-crash-'));
+  try{
+    const {journal}=damagedJournal(dir);
+    const before=readFileSync(journal);
+    const receipt=quarantineRunnerAuditTail(dir);
+    unlinkSync(receipt.receiptFile); // model crash after final bin link
+    const orphan=join(dir,'quarantine','.pending-'+randomUUID().replaceAll('-',''));
+    writeFileSync(orphan,Buffer.from('incomplete temporary evidence'),{mode:0o400});
+    const repeated=quarantineRunnerAuditTail(dir);
+    assert.deepEqual(repeated,receipt);
+    assert.equal(existsSync(orphan),true); // never silently purge alleged evidence
+    assert.deepEqual(readFileSync(journal),before);
+    assert.throws(()=>new RunnerAuditJournal(dir),AuditIntegrityError);
+    assert.deepEqual(quarantineRunnerAuditTail(dir),receipt);
+  }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test('publishing evidence leaves only complete final files, not pending names',()=>{
+  const dir=mkdtempSync(join(tmpdir(),'runner-quarantine-atomic-'));
+  try{
+    damagedJournal(dir);
+    const report=quarantineRunnerAuditTail(dir);
+    assert.deepEqual(readdirSync(join(dir,'quarantine')).sort(),[
+      report.quarantinedFile.split('/').at(-1)!, report.receiptFile.split('/').at(-1)!,
+    ].sort());
+    assert.equal(statSync(report.quarantinedFile).mode&0o777,0o400);
+    assert.equal(statSync(report.receiptFile).mode&0o777,0o400);
+    assert.deepEqual(quarantineRunnerAuditTail(dir),report);
+  }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test('zero-byte or partially written FINAL bin and JSON remain tamper evidence and fail closed',()=>{
+  for(const kind of ['bin','json'] as const){
+    for(const partial of [false,true]){
+      const dir=mkdtempSync(join(tmpdir(),'runner-quarantine-unsafe-final-'));
+      try{
+        const {journal}=damagedJournal(dir);
+        const original=readFileSync(journal);
+        const report=quarantineRunnerAuditTail(dir);
+        const victim=kind==='bin'?report.quarantinedFile:report.receiptFile;
+        chmodSync(victim,0o600);
+        const originalEvidence=readFileSync(victim);
+        const damaged=partial?originalEvidence.subarray(0,Math.max(1,originalEvidence.length>>1)):Buffer.alloc(0);
+        writeFileSync(victim,damaged);
+        chmodSync(victim,0o400);
+        assert.throws(()=>quarantineRunnerAuditTail(dir),AuditIntegrityError);
+        assert.deepEqual(readFileSync(victim),damaged);
+        assert.deepEqual(readFileSync(journal),original);
+      }finally{rmSync(dir,{recursive:true,force:true});}
+    }
   }
 });

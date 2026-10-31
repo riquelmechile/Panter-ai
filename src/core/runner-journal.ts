@@ -4,8 +4,8 @@
  * Single-writer by design. A trusted off-host seal is required for tamper
  * resistance; this local hash chain alone is not an immutable audit log.
  */
-import { createHash } from 'node:crypto';
-import { closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, statSync, writeSync, fstatSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { closeSync, constants, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync, fstatSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { RUNNER_OPERATIONS, type RunnerOperation } from './runner-grants.js';
 
@@ -142,26 +142,48 @@ export function quarantineRunnerAuditTail(dir: string): QuarantinedRunnerTail {
       return true;
     }finally{closeSync(evidenceFd);}
   }
+  function syncQuarantineDir():void {
+    const fd=openSync(quarantine,constants.O_RDONLY|constants.O_DIRECTORY|O_NOFOLLOW);
+    try{fsyncSync(fd);}finally{closeSync(fd);}
+  }
   function ensureEvidence(target:string,payload:Buffer):void {
     if (verifyExisting(target,payload)) return;
-    let evidenceFd:number;
+    // Never expose a final evidence name before its content has been fully
+    // written and fsynced. A crash can leave a private orphan temporary,
+    // which has no bearing on a later retry or proof of a completed effect.
+    const temporary=join(quarantine,'.pending-'+randomBytes(16).toString('hex'));
+    let published=false;
     try {
-      evidenceFd=openSync(target,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|O_NOFOLLOW,0o400);
-    }catch(e) {
-      // Another writer may have created it; only an exact verified copy is safe.
-      if ((e as NodeJS.ErrnoException).code==='EEXIST' && verifyExisting(target,payload)) return;
-      throw new AuditIntegrityError();
-    }
-    try {
-      let offset=0;
-      while(offset<payload.length){
-        const written=writeSync(evidenceFd,payload,offset,payload.length-offset);
-        if (written<=0) throw new AuditIntegrityError();
-        offset+=written;
+      const evidenceFd=openSync(temporary,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|O_NOFOLLOW,0o400);
+      try {
+        let offset=0;
+        while(offset<payload.length){
+          const written=writeSync(evidenceFd,payload,offset,payload.length-offset);
+          if(written<=0) throw new AuditIntegrityError();
+          offset+=written;
+        }
+        fsyncSync(evidenceFd);
+      }finally{closeSync(evidenceFd);}
+      // Same-directory hard link is an atomic NO-REPLACE publication.
+      // A second writer can win: accept only if final bytes match.
+      try {
+        linkSync(temporary,target);
+        published=true;
+      }catch(e){
+        if((e as NodeJS.ErrnoException).code!=='EEXIST' || !verifyExisting(target,payload)) throw new AuditIntegrityError();
       }
-      fsyncSync(evidenceFd);
-    }finally{closeSync(evidenceFd);}
-    if (!verifyExisting(target,payload)) throw new AuditIntegrityError();
+      // Persist final directory entry before removing the temporary name.
+      syncQuarantineDir();
+      if(!verifyExisting(target,payload)) throw new AuditIntegrityError();
+    }finally{
+      try {
+        unlinkSync(temporary);
+        syncQuarantineDir();
+      }catch(e){
+        if((e as NodeJS.ErrnoException).code!=='ENOENT') throw new AuditIntegrityError();
+      }
+    }
+    if(!published && !verifyExisting(target,payload)) throw new AuditIntegrityError();
   }
   try {
     // The raw tail can contain broken UTF-8; preserve exact bytes, never log it.
@@ -173,8 +195,7 @@ export function quarantineRunnerAuditTail(dir: string): QuarantinedRunnerTail {
     if (savedReceipt && !savedBin) throw new AuditIntegrityError();
     ensureEvidence(quarantinedFile,tail);
     ensureEvidence(receiptFile,receiptPayload);
-    const dirFd=openSync(quarantine,constants.O_RDONLY|constants.O_DIRECTORY|O_NOFOLLOW);
-    try{fsyncSync(dirFd);}finally{closeSync(dirFd);}
+    syncQuarantineDir();
   }catch{throw new AuditIntegrityError();}
   // The active journal remains untouched. It still fails closed on construction/
   // append until an independently reviewed recovery and effect reconciliation.
