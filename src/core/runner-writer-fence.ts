@@ -6,7 +6,7 @@
  */
 import {randomUUID} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
-import {closeSync,constants,lstatSync,mkdirSync,openSync,statSync} from 'node:fs';
+import {closeSync,constants,lstatSync,mkdirSync,openSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {enableSqliteWal,retrySqliteStartup} from './sqlite-startup.js';
 

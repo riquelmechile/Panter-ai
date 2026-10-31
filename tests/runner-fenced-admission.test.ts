@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {spawn} from 'node:child_process';
 import {createHash,generateKeyPairSync,randomUUID,sign} from 'node:crypto';
-import {mkdtempSync,rmSync} from 'node:fs';
+import {mkdirSync,mkdtempSync,rmSync,symlinkSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {RunnerWriterFence,WriterFenced} from '../src/core/runner-writer-fence.js';
@@ -97,4 +97,13 @@ test('single writer prepares grant, durable intent and off-host signed audit; no
     assert.throws(()=>RunnerWriterFence.claim(join(root,'fence')),WriterFenced);
     outcomes.close();grants.close();fence.close();
   }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test('writer fence rejects a symlinked root before SQLite access',()=>{
+  const dir=mkdtempSync(join(tmpdir(),'runner-fence-symlink-'));
+  try{
+    const real=join(dir,'real'),alias=join(dir,'alias');
+    mkdirSync(real,{mode:0o700});symlinkSync(real,alias);
+    assert.throws(()=>RunnerWriterFence.claim(alias),WriterFenced);
+  }finally{rmSync(dir,{recursive:true,force:true});}
 });
