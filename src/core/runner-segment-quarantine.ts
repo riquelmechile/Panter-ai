@@ -2,11 +2,11 @@
  * Evidence-only capture for a terminal incomplete JSONL row.
  * No truncation, retry, cutover, or resumption. This is NOT a recovery grant.
  */
-import {createHash,randomBytes,verify,type KeyObject} from 'node:crypto';
+import {createHash,randomBytes,type KeyObject} from 'node:crypto';
 import {closeSync,constants,fstatSync,fsyncSync,linkSync,lstatSync,mkdirSync,
   openSync,readFileSync,readdirSync,unlinkSync,writeSync} from 'node:fs';
 import {basename,dirname,join,resolve} from 'node:path';
-import {SegmentIntegrityError,segmentSealDigest,segmentSealPayload,verifySegmentPrefix,
+import {SegmentIntegrityError,inspectSeal,segmentSealDigest,verifySegmentPrefix,
   type SignedSegmentSeal} from './runner-segments.js';
 
 const ZERO='0'.repeat(64);
@@ -29,15 +29,11 @@ export type QuarantinedSegmentTail={
 function signedLatest(latest:SignedSegmentSeal|null,pinned:ReadonlyMap<string,KeyObject>):
   {segment:number,first:number,previousHash:string,previousSealHash:string,anchor:string}{
   if(latest===null)return {segment:1,first:1,previousHash:ZERO,previousSealHash:ZERO,anchor:ZERO};
-  const claim=latest.claim;
-  const key=pinned.get(latest.keyId);
-  if(!key||key.asymmetricKeyType!=='ed25519'||!claim||
-    !Number.isSafeInteger(claim.segment)||claim.segment<1||claim.segment>=99_999_999||
-    !/^[A-Za-z0-9_-]{86}$/.test(latest.signature))throw new SegmentIntegrityError();
-  const sig=Buffer.from(latest.signature,'base64url');
-  if(sig.length!==64||sig.toString('base64url')!==latest.signature||
-    !verify(null,segmentSealPayload(claim),key,sig))throw new SegmentIntegrityError();
-  const anchor=segmentSealDigest(latest);
+  // Common strict verifier validates exact envelope keys, canonical signature and claim.
+  const verified=inspectSeal(latest,pinned,latest.claim);
+  const claim=verified.claim;
+  if(claim.segment>=99_999_999)throw new SegmentIntegrityError();
+  const anchor=segmentSealDigest(verified);
   return {segment:claim.segment+1,first:claim.lastSequence+1,
     previousHash:claim.lastHash,previousSealHash:anchor,anchor};
 }
@@ -87,7 +83,9 @@ export function quarantineActiveSegmentTail(rootPath:string,remoteLatest:SignedS
     firstSequence:anchor.first,prefixEntries:checked.entries,prefixLastHash:checked.lastHash,
     externalAnchorDigest:anchor.anchor,originalSha256:sha(raw),originalBytes:raw.length,
     tailSha256:sha(tail),tailBytes:tail.length,evidenceFile,receiptFile};
-  const receiptBytes=Buffer.from(JSON.stringify(report)+'\n');
+  // Durable receipt contains only relocatable basenames, never absolute paths.
+  const relativeReport={...report,evidenceFile:basename(evidenceFile),receiptFile:basename(receiptFile)};
+  const receiptBytes=Buffer.from(JSON.stringify(relativeReport)+'\n');
   function fsyncDir(){
     const dirFd=openSync(evidenceDir,constants.O_RDONLY|constants.O_DIRECTORY|NOFOLLOW);
     try{fsyncSync(dirFd);}finally{closeSync(dirFd);}

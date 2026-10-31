@@ -78,3 +78,21 @@ test('empty active prefix with a crashed first write is capturable but not recov
     assert.equal(q.tailBytes,1);
   }finally{rmSync(dir,{recursive:true,force:true});}
 });
+
+test('receipt stores only portable basenames and survives relocating parent directory',()=>{
+  const dir=mkdtempSync(join(tmpdir(),'segment-relocation-')),root=join(dir,'journal');
+  try{
+    const a=new FakeAuthority();
+    const j=new SegmentedRunnerAudit(root,a,pinned,650);
+    j.append(event());
+    appendFileSync(join(root,'segment-00000001.jsonl'),'{"partial":');
+    const q=quarantineActiveSegmentTail(root,null,pinned);
+    const stored=JSON.parse(readFileSync(q.receiptFile,'utf8'));
+    assert.equal(stored.evidenceFile,q.evidenceFile.split('/').at(-1));
+    assert.equal(stored.receiptFile,q.receiptFile.split('/').at(-1));
+    assert.ok(!stored.evidenceFile.startsWith('/'));
+    assert.ok(!stored.receiptFile.startsWith('/'));
+    // The evidence file is still byte-exact and the active source is unchanged.
+    assert.equal(readFileSync(q.evidenceFile).toString(),'{"partial":');
+  }finally{rmSync(dir,{recursive:true,force:true});}
+});

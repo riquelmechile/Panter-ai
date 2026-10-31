@@ -4,7 +4,7 @@
  * No Worker/R2 resources or credentials are provisioned by this module.
  */
 import type {KeyObject} from 'node:crypto';
-import {segmentSealDigest,SegmentedRunnerAudit,SegmentIntegrityError,
+import {inspectSeal,segmentSealDigest,segmentSealPayload,SegmentedRunnerAudit,SegmentIntegrityError,
   type ExternalSealAuthority,type SegmentInspection,type SegmentedEvent,
   type SegmentSealClaim,type SignedSegmentSeal} from './runner-segments.js';
 
@@ -61,13 +61,24 @@ export class HttpSegmentSealAuthority implements AsyncSealAuthority {
 /** Synchronous, in-memory authority populated ONLY by completed HTTP calls. */
 class SealCache implements ExternalSealAuthority {
   private readonly receipts=new Map<number,SignedSegmentSeal>();
+  constructor(private readonly pinned:ReadonlyMap<string,KeyObject>){}
   latest():SignedSegmentSeal|null{return this.receipts.get(this.receipts.size)??null;}
   get(n:number):SignedSegmentSeal|null{return this.receipts.get(n)??null;}
   seal():SignedSegmentSeal{throw new SegmentIntegrityError();} // no synchronous signing fallback
-  install(segment:number,receipt:SignedSegmentSeal):void{
+  install(segment:number,receipt:SignedSegmentSeal,expected?:SegmentSealClaim):void{
     if(!receipt||receipt.claim?.segment!==segment||!Number.isSafeInteger(segment)||
       segment!==this.receipts.size+1)throw new SegmentIntegrityError();
-    this.receipts.set(segment,receipt);
+    // Verify BEFORE caching: a forged HTTP response must not poison the instance.
+    const verified=inspectSeal(receipt,this.pinned,receipt.claim);
+    // After POST, require the exact claim of the local JSONL submitted.
+    if(expected&&!segmentSealPayload(verified.claim).equals(segmentSealPayload(expected)))
+      throw new SegmentIntegrityError();
+    const previous=this.latest();
+    if(verified.claim.previousSealHash!==(previous?segmentSealDigest(previous):'0'.repeat(64)))
+      throw new SegmentIntegrityError();
+    if(previous&&(verified.claim.firstSequence!==previous.claim.lastSequence+1))
+      throw new SegmentIntegrityError();
+    this.receipts.set(segment,verified);
   }
 }
 /**
@@ -84,7 +95,7 @@ export class AsyncSegmentedRunnerAudit {
   ){}
   static async open(root:string,remote:AsyncSealAuthority,pinned:ReadonlyMap<string,KeyObject>,
     limit=1024*1024):Promise<AsyncSegmentedRunnerAudit>{
-    const cache=new SealCache();
+    const cache=new SealCache(pinned);
     try{
       const latest=await remote.latest();
       if(latest!==null){
@@ -113,7 +124,7 @@ export class AsyncSegmentedRunnerAudit {
     // Network failure leaves the active local segment unchanged; the server
     // may already have sealed it, so recovery/retry MUST reuse these bytes.
     const receipt=await this.remote.seal(claim,payload);
-    this.cache.install(claim.segment,receipt);
+    this.cache.install(claim.segment,receipt,claim);
     // verify independent signature, local content and chain before creating next
     return this.journal.sealCurrent();
   }

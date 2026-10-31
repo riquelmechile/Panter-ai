@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {createHash,generateKeyPairSync,randomUUID} from 'node:crypto';
+import {createHash,generateKeyPairSync,randomUUID,sign} from 'node:crypto';
 import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {AsyncSegmentedRunnerAudit,HttpSegmentSealAuthority} from '../src/core/runner-seal-http.js';
-import {SegmentIntegrityError,type SegmentedEvent} from '../src/core/runner-segments.js';
+import {SegmentIntegrityError,segmentSealPayload,type SegmentedEvent} from '../src/core/runner-segments.js';
 // @ts-expect-error Separate Cloudflare JavaScript Worker has no local TS declaration.
 import worker from '../src/runner/seal-worker.mjs';
 
@@ -101,4 +101,61 @@ test('HTTP bridge denies non-HTTPS or URL with embedded credentials before netwo
   assert.throws(()=>new HttpSegmentSealAuthority('http://worker.test/',TOKEN),SegmentIntegrityError);
   assert.throws(()=>new HttpSegmentSealAuthority('https://evil:pass@worker.test/',TOKEN),SegmentIntegrityError);
   assert.throws(()=>new HttpSegmentSealAuthority('https://worker.test/?secret=x',TOKEN),SegmentIntegrityError);
+});
+
+test('forged Worker seal response never poisons in-memory cache; later genuine retry succeeds',async()=>{
+  const root=mkdtempSync(join(tmpdir(),'runner-http-poison-retry-'));
+  try{
+    const {send,remote}=service();
+    const journal=await AsyncSegmentedRunnerAudit.open(root,remote,pins,650);
+    await journal.append(event());
+    let tamper=true;
+    const flaky=new HttpSegmentSealAuthority('https://worker.test/',TOKEN,async req=>{
+      const response=await send(req);
+      if(tamper&&req.method==='POST'&&response.status===200){
+        tamper=false;
+        const data=await response.json() as {receipt:{signature:string}};
+        const signature=data.receipt.signature;
+        data.receipt.signature=signature.slice(0,-1)+(signature.endsWith('A')?'E':'A');
+        return Response.json(data);
+      }
+      return response;
+    });
+    // The original journal is no longer used; local-only exclusive serialization.
+    const active=await AsyncSegmentedRunnerAudit.open(root,flaky,pins,650);
+    await assert.rejects(()=>active.sealCurrent(),SegmentIntegrityError);
+    assert.equal(active.state().sealed,0);
+    // Worker already persisted a real seal; retry same bytes, same instance.
+    assert.equal((await active.sealCurrent()).sealed,1);
+    assert.equal(active.state().activeSegment,2);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test('signed but wrong segment claim cannot poison cache; valid retry seals normally',async()=>{
+  const root=mkdtempSync(join(tmpdir(),'runner-http-wrong-claim-'));
+  try{
+    const {send,remote}=service();
+    const initial=await AsyncSegmentedRunnerAudit.open(root,remote,pins,650);
+    await initial.append(event());
+    let rewrite=true;
+    const faulty=new HttpSegmentSealAuthority('https://worker.test/',TOKEN,async request=>{
+      const response=await send(request);
+      if(rewrite&&request.method==='POST'&&response.status===200){
+        rewrite=false;
+        const raw=await response.json() as {receipt:{
+          keyId:string;claim:any;signature:string
+        }};
+        const claim={...raw.receipt.claim,bytes:raw.receipt.claim.bytes+1};
+        raw.receipt={...raw.receipt,claim,
+          signature:sign(null,segmentSealPayload(claim),pair.privateKey).toString('base64url')};
+        return Response.json(raw);
+      }
+      return response;
+    });
+    const active=await AsyncSegmentedRunnerAudit.open(root,faulty,pins,650);
+    await assert.rejects(()=>active.sealCurrent(),SegmentIntegrityError);
+    assert.equal(active.state().activeSegment,1);
+    assert.equal(active.state().sealed,0);
+    assert.equal((await active.sealCurrent()).sealed,1);
+  }finally{rmSync(root,{recursive:true,force:true});}
 });
