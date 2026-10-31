@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {spawn, type ChildProcessWithoutNullStreams} from 'node:child_process';
+import {spawn, spawnSync, type ChildProcessWithoutNullStreams} from 'node:child_process';
 import {existsSync, mkdtempSync, rmSync, chmodSync, writeFileSync, symlinkSync} from 'node:fs';
 import {connect} from 'node:net';
 import {tmpdir} from 'node:os';
@@ -113,4 +113,90 @@ test('rejects non-private parent, symlinked parent, and occupied socket path',as
     assert.equal(await c.exit,2);
     assert.equal(existsSync(occupied),true);
   }finally{rmSync(base,{recursive:true,force:true});}
+});
+
+test('slow trickling client has a fixed total deadline and cannot delay valid peers',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'panter-ipc-deadline-'));
+  const sock=join(dir,'runner.sock');
+  const server=launch(sock,ownUid);
+  let slow:ReturnType<typeof connect>|undefined;
+  let interval:ReturnType<typeof setInterval>|undefined;
+  try {
+    await waitForSocket(sock,server.cp,server.logs);
+    slow=connect({path:sock});
+    const peer=slow;
+    peer.on('error',()=>{ /* denial may close the socket mid-write */ });
+    if(peer.connecting)await new Promise<void>((resolve,reject)=>{
+      peer.once('connect',resolve);peer.once('error',reject);
+    });
+    let slowResponse='';
+    peer.setEncoding('utf8');
+    peer.on('data',(piece:string)=>{slowResponse+=piece;});
+    const started=Date.now();
+    peer.write('{');
+    interval=setInterval(()=>{if(Date.now()-started>1400){if(interval)clearInterval(interval);return;}if(!peer.destroyed)peer.write(' ');},450);
+    await delay(200);
+    const startHealthy=Date.now();
+    const legitimate=await request(sock,'{"version":1,"operation":"runner.status"}\n');
+    assert.equal(JSON.parse(legitimate).status,'READ_ONLY');
+    assert.ok(Date.now()-startHealthy<1700,'slow peer must not monopolize the accept loop');
+    const until=Date.now()+3500;
+    while(!slowResponse && Date.now()<until)await delay(40);
+    assert.equal(JSON.parse(slowResponse).status,'DENIED');
+    assert.ok(Date.now()-started<3200,'trickle must not renew the 2s total deadline');
+  } finally {
+    if(interval)clearInterval(interval);
+    slow?.destroy();
+    await stopServer(server);
+    rmSync(dir,{recursive:true,force:true});
+  }
+});
+
+test('a saturated read-only admission pool denies excess connections without processing requests',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'panter-ipc-cap-'));
+  const sock=join(dir,'runner.sock');
+  const server=launch(sock,ownUid);
+  const holders:ReturnType<typeof connect>[]=[];
+  try {
+    await waitForSocket(sock,server.cp,server.logs);
+    for(let i=0;i<8;i++){
+      const peer=connect({path:sock});
+      peer.on('error',()=>{});
+      await new Promise<void>((resolve,reject)=>{peer.once('connect',resolve);peer.once('error',reject);});
+      peer.write('{');
+      holders.push(peer);
+    }
+    await delay(150);
+    try {
+      const denied=await request(sock,'{"version":1,"operation":"runner.status"}\n');
+      assert.equal(JSON.parse(denied).status,'DENIED');
+    } catch (error) {
+      assert.ok(error instanceof Error && ['EPIPE','ECONNRESET'].includes((error as NodeJS.ErrnoException).code??''),
+        'Excess peer may only be rejected or reset');
+    }
+  } finally {
+    for(const peer of holders)peer.destroy();
+    await stopServer(server);
+    rmSync(dir,{recursive:true,force:true});
+  }
+});
+
+test('umask is restored even when Python socket allocation fails',()=>{
+  const script=[
+    'import os, tempfile, runpy',
+    'from unittest.mock import patch',
+    "serve=runpy.run_path('src/runner/readonly_ipc.py',run_name='runner_test')['serve']",
+    'original=os.umask(0o077)',
+    'os.umask(original)',
+    "with tempfile.TemporaryDirectory() as directory:",
+    "  with patch('socket.socket',side_effect=OSError('socket allocation failed')):",
+    '    try: serve(directory + "/runner.sock",os.getuid())',
+    '    except OSError: pass',
+    '    else: raise AssertionError("expected failure")',
+    'after=os.umask(0o077)',
+    'os.umask(after)',
+    'assert after==original, "umask must be restored on socket allocation failure"',
+  ].join('\n');
+  const result=spawnSync('python3',['-B','-c',script],{cwd:process.cwd(),encoding:'utf8',timeout:8000});
+  assert.equal(result.status,0,result.stderr);
 });

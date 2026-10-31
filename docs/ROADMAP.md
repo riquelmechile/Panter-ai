@@ -140,3 +140,10 @@ Estado: este primer PR **no pone en marcha** un runner, no da shell, no reinicia
 - [ ] Worktrees reales con validación `openat2`, control de symlinks, aislamiento y sandbox de scripts; pruebas adversariales y revisión de Claude antes de producción.
 
 La interfaz read-only no ejecuta código, no hace cambios en producción y no reemplaza todavía HostOps. Se conserva la política de un solo dueño de ADR-001 para la futura capa de autorización.
+### Correcciones review PR #27 — aislamiento por repo/SHA y admisión defensiva
+
+- [x] `worktreePath` y `attemptKey` incluyen hash completo de repositorio y SHA Git exacto; test de aislamiento entre repos/SHA reutilizando idénticos IDs.
+- [x] IDs de misión/work/intento alineados con contrato de grants; rutas contienen únicamente hashes seguros.
+- [x] Cliente lento limitado por plazo monotónico absoluto de 2 s y admisión concurrente acotada (máximo 8); test de respuesta sana ante cliente fragmentado y saturación.
+- [x] `umask` restaurado ante fallos durante creación del socket; prueba de fallo inducido.
+- [ ] Revisión independiente de Claude sobre SHA nuevo y CI del mismo SHA. No desplegar ni habilitar ejecutor; siguen los cuatro gates pre-servicio y ACL entre UID distintos.

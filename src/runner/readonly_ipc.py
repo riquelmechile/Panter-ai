@@ -15,11 +15,15 @@ import socket
 import stat
 import struct
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 MAX_REQUEST_BYTES = 16 * 1024
 PEER_CRED_BYTES = struct.calcsize("3i")
+REQUEST_DEADLINE_SECONDS = 2.0
+MAX_ACTIVE_CLIENTS = 8
 DENIED = b'{"status":"DENIED"}\n'
 READ_ONLY = b'{"version":1,"status":"READ_ONLY","executionEnabled":false}\n'
 
@@ -61,9 +65,13 @@ def authorized_peer(conn: socket.socket, allowed_uid: int) -> bool:
 
 
 def read_intent(conn: socket.socket) -> bool:
-    conn.settimeout(2.0)
+    deadline = time.monotonic() + REQUEST_DEADLINE_SECONDS
     message = bytearray()
     while len(message) <= MAX_REQUEST_BYTES:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        conn.settimeout(remaining)
         try:
             data = conn.recv(min(2048, MAX_REQUEST_BYTES + 1 - len(message)))
         except (OSError, TimeoutError):
@@ -92,20 +100,44 @@ def serve(socket_path: str, allowed_uid: int) -> None:
     target = validate_socket_path(socket_path)
     # The socket path is owned by the runner's UID; no group/world access.
     prior_umask = os.umask(0o177)
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server: socket.socket | None = None
+    prior_sigterm: Any = None
     cleanup_inode: int | None = None
     stopping = False
+    slots = threading.BoundedSemaphore(MAX_ACTIVE_CLIENTS)
 
     def request_stop(_signal: int, _frame: Any) -> None:
         nonlocal stopping
         stopping = True
 
-    prior_sigterm = signal.signal(signal.SIGTERM, request_stop)
+    def handle_client(conn: socket.socket) -> None:
+        # Keep the server's accept loop responsive while enforcing a bounded
+        # number of concurrent peers and a non-renewable wall-clock deadline.
+        try:
+            with conn:
+                if not authorized_peer(conn, allowed_uid):
+                    try:
+                        conn.sendall(DENIED)
+                    except OSError:
+                        pass
+                    return
+                is_status = read_intent(conn)
+                try:
+                    conn.sendall(READ_ONLY if is_status else DENIED)
+                except OSError:
+                    pass
+        finally:
+            slots.release()
+
     try:
+        # The try encloses socket creation and signal setup so umask is
+        # restored even when either operation raises.
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        prior_sigterm = signal.signal(signal.SIGTERM, request_stop)
         server.bind(str(target))
         os.chmod(target, 0o600, follow_symlinks=False)
         cleanup_inode = os.lstat(target).st_ino
-        server.listen(8)
+        server.listen(MAX_ACTIVE_CLIENTS)
         server.settimeout(0.4)
         while not stopping:
             try:
@@ -116,23 +148,25 @@ def serve(socket_path: str, allowed_uid: int) -> None:
                 if stopping:
                     break
                 raise
-            with conn:
-                # Do not read any client bytes before validating kernel identity.
-                if not authorized_peer(conn, allowed_uid):
+            if not slots.acquire(blocking=False):
+                with conn:
                     try:
                         conn.sendall(DENIED)
                     except OSError:
                         pass
-                    continue
-                is_status = read_intent(conn)
-                try:
-                    conn.sendall(READ_ONLY if is_status else DENIED)
-                except OSError:
-                    pass
+                continue
+            try:
+                threading.Thread(target=handle_client, args=(conn,), daemon=True).start()
+            except BaseException:
+                slots.release()
+                conn.close()
+                raise
     finally:
-        server.close()
+        if server is not None:
+            server.close()
+        if prior_sigterm is not None:
+            signal.signal(signal.SIGTERM, prior_sigterm)
         os.umask(prior_umask)
-        signal.signal(signal.SIGTERM, prior_sigterm)
         if cleanup_inode is not None:
             try:
                 current = os.lstat(target)
