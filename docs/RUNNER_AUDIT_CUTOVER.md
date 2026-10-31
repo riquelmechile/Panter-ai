@@ -1,0 +1,7 @@
+# Gate #42 — staging verificable del cutover del diario legado
+
+**No hay corte de servicio ni sustitución del escritor de producción.** `stageLegacyAuditCutover` valida el diario antiguo con `O_NOFOLLOW`, propiedad/modo, SHA-256 de sus bytes y cadena completa. Copia cada evento tipado en el orden original al `AsyncSegmentedRunnerAudit`; confirma cada rotación mediante la autoridad selladora independiente y al terminar sella el activo, compara nuevamente la fuente y publica un manifiesto sin secretos por temp+fsync+link sin reemplazo. Si se pierde la conexión tras un seal, la siguiente apertura recupera el último recibo externo y compara el prefijo de eventos staged antes de continuar. El original permanece intacto.
+
+Esta etapa demuestra correspondencia de eventos y sellado externo en tests simulados, **NO** que el diario legado haya dejado de recibir escrituras. La verificación de hash antes/después detecta cambios concurrentes durante el staging, pero NO impide un append justo después de regresar. Tampoco autentica el origen del Worker real en Cloudflare, ni crea recursos.
+
+**Bloqueos obligatorios antes del cutover efectivo:** mecanismo único de escritor entre procesos y UID con fencing verificable, congelación del escritor legado, prueba de que ningún efecto/in-flight quedó sin reconciliar, R2 real con claves externas auditadas, lectura de toda la cadena histórica y reanudación atómica sin duplicación. No tocar symlinks `current`, servicios ni secretos; no habilitar dispatcher en este PR.

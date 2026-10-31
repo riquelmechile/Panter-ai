@@ -60,6 +60,33 @@ function parseAuditText(content: string): RunnerAuditLine[] {
   } catch { throw new AuditIntegrityError(); }
   return lines;
 }
+/** Immutable, fully verified snapshot for offline cutover staging. No writer is enabled. */
+export function snapshotRunnerAudit(dir:string):{rows:RunnerAuditLine[];sha256:string;bytes:number;lastHash:string}{
+  const root=resolve(dir);
+  let rootInfo:ReturnType<typeof lstatSync>;
+  try{rootInfo=lstatSync(root);}catch{throw new AuditIntegrityError();}
+  if(!rootInfo.isDirectory()||rootInfo.isSymbolicLink()||
+    rootInfo.uid!==process.getuid?.()||(rootInfo.mode&0o077)!==0)throw new AuditIntegrityError();
+  const file=join(root,'runner-audit.jsonl');
+  let fd:number;
+  try{fd=openSync(file,constants.O_RDONLY|O_NOFOLLOW|constants.O_NONBLOCK);}
+  catch{throw new AuditIntegrityError();}
+  try{
+    const before=fstatSync(fd);
+    if(!before.isFile()||before.uid!==process.getuid?.()||(before.mode&0o077)!==0||
+      before.size>16*1024*1024)throw new AuditIntegrityError();
+    const raw=readFileSync(fd);
+    const after=fstatSync(fd);
+    if(raw.length!==before.size||after.size!==before.size||after.ino!==before.ino||
+       after.mtimeMs!==before.mtimeMs)throw new AuditIntegrityError();
+    let content:string;
+    try{content=new TextDecoder('utf-8',{fatal:true}).decode(raw);}
+    catch{throw new AuditIntegrityError();}
+    const rows=parseAuditText(content);
+    return {rows,sha256:createHash('sha256').update(raw).digest('hex'),
+      bytes:raw.length,lastHash:rows.at(-1)?.hash??ZERO};
+  }finally{closeSync(fd);}
+}
 function parseLines(file: string): RunnerAuditLine[] {
   if (!existsSync(file)) return [];
   return parseAuditText(readFileSync(file,'utf8'));
