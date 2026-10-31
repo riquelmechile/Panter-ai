@@ -24,8 +24,8 @@ export class RunnerWriterFence{
   static claim(dir:string):RunnerWriterFence{
     const root=resolve(dir);
     mkdirSync(root,{recursive:true,mode:0o700});
-    const s=statSync(root);
-    if(!s.isDirectory()||s.uid!==process.getuid?.()||(s.mode&0o077)!==0)
+    const s=lstatSync(root);
+    if(!s.isDirectory()||s.isSymbolicLink()||s.uid!==process.getuid?.()||(s.mode&0o077)!==0)
       throw new WriterFenced();
     const file=join(root,'runner-writer-fence.sqlite');
     try{
