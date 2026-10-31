@@ -25,6 +25,16 @@ function eq(a: string, b: string): boolean {
 }
 function validString(value: unknown, max = 256): value is string { return typeof value === 'string' && value.length > 0 && value.length <= max; }
 function escapeHtml(s: string) { return s.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!); }
+/** RFC 6749 §2.3.1 HTTP Basic client credentials (form-urlencoded id/secret). Empty when absent/malformed. */
+function basicClient(req: IncomingMessage): { id: string; secret: string } {
+  const h = req.headers.authorization;
+  if (!h?.startsWith('Basic ')) return { id: '', secret: '' };
+  try {
+    const raw = Buffer.from(h.slice(6).trim(), 'base64').toString('utf8'); const i = raw.indexOf(':');
+    if (i < 1) return { id: '', secret: '' };
+    return { id: decodeURIComponent(raw.slice(0, i).replace(/\+/g, ' ')), secret: decodeURIComponent(raw.slice(i + 1).replace(/\+/g, ' ')) };
+  } catch { return { id: '', secret: '' }; }
+}
 function bearer(req: IncomingMessage) { const h = req.headers.authorization; return h?.startsWith('Bearer ') ? h.slice(7) : ''; }
 function reply(res: ServerResponse, status: number, data: object, headers: Record<string, string> = {}) {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers });
@@ -76,7 +86,9 @@ function queryRedirect(uri: string, values: Record<string, string>) {
   return url.toString();
 }
 
-type Client = { id: string; name: string; redirectUris: string[]; createdAt: number };
+type Client = { id: string; name: string; redirectUris: string[]; createdAt: number; secretDigest?: string; authMethod?: ClientAuthMethod };
+type ClientAuthMethod = 'none' | 'client_secret_basic' | 'client_secret_post';
+const CLIENT_AUTH_METHODS: readonly ClientAuthMethod[] = ['none', 'client_secret_basic', 'client_secret_post'];
 type Pending = { id: string; clientId: string; redirectUri: string; challenge: string; state: string; requestedScopes: string[]; csrfDigest: string; expiresAt: number; failures: number; sourceDigest?: string };
 type Grant = { clientId: string; host: Host; redirectUri: string; scopes: string[]; approvedAt: number; revoked: boolean };
 type Code = { digest: string; clientId: string; host: Host; redirectUri: string; challenge: string; scopes: string[]; expiresAt: number; consumed: boolean };
@@ -136,7 +148,7 @@ export class EmbeddedOAuth {
   authorizationServerMetadata() {
     // RFC 9207: both consent outcomes return the exact `iss` in the redirect.
     // ChatGPT needs this advertised to bind its stable OAuth callback.
-    return { issuer: this.issuer, authorization_response_iss_parameter_supported: true, authorization_endpoint: this.issuer + '/authorize', token_endpoint: this.issuer + '/token', registration_endpoint: this.issuer + '/register', revocation_endpoint: this.issuer + '/revoke', response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], token_endpoint_auth_methods_supported: ['none'], code_challenge_methods_supported: ['S256'], scopes_supported: [...ALLOWED_SCOPES] };
+    return { issuer: this.issuer, authorization_response_iss_parameter_supported: true, authorization_endpoint: this.issuer + '/authorize', token_endpoint: this.issuer + '/token', registration_endpoint: this.issuer + '/register', revocation_endpoint: this.issuer + '/revoke', response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], token_endpoint_auth_methods_supported: [...CLIENT_AUTH_METHODS], code_challenge_methods_supported: ['S256'], scopes_supported: [...ALLOWED_SCOPES] };
   }
   challenge() {
     return `Bearer realm="panter-ai", resource_metadata="${this.issuer}/.well-known/oauth-protected-resource", scope="mcp"`;
@@ -169,16 +181,19 @@ export class EmbeddedOAuth {
     check(Array.isArray(input.redirect_uris) && input.redirect_uris.length > 0 && input.redirect_uris.length <= 5, 'Redirect URIs required');
     const redirectUris = input.redirect_uris.map(x => validateRedirect(String(x)));
     check(redirectUris.every(u => this.callbacks.has(u)), 'Unapproved redirect URI');
-    check(input.token_endpoint_auth_method === undefined || input.token_endpoint_auth_method === 'none', 'Public clients only');
+    const authMethod = (input.token_endpoint_auth_method ?? 'none') as ClientAuthMethod;
+    check(CLIENT_AUTH_METHODS.includes(authMethod), 'Unsupported client authentication');
     check(input.grant_types === undefined || (Array.isArray(input.grant_types) && input.grant_types.every(x => x === 'authorization_code' || x === 'refresh_token') && input.grant_types.includes('authorization_code')), 'Unsupported grants');
     check(input.response_types === undefined || (Array.isArray(input.response_types) && input.response_types.length === 1 && input.response_types[0] === 'code'), 'Unsupported response type');
     const name = typeof input.client_name === 'string' ? input.client_name.slice(0, 120) : 'MCP client';
     return this.change(d => {
       d.clients=d.clients.filter(c=>c.createdAt>ts()-86400||d.grants.some(g=>g.clientId===c.id));
       check(d.clients.length < 100, 'Registration capacity reached');
-      const client: Client = { id: 'pc_' + secureId(24), name, redirectUris, createdAt: ts() };
+      // Confidential clients (e.g. Gemini) get a one-time-displayed secret; only its digest is stored.
+      const secret = authMethod === 'none' ? '' : 'ps_' + secureId(32);
+      const client: Client = { id: 'pc_' + secureId(24), name, redirectUris, createdAt: ts(), ...(secret ? { secretDigest: hash(secret), authMethod } : {}) };
       d.clients.push(client);
-      return { client_id: client.id, client_name: client.name, redirect_uris: client.redirectUris, token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], client_id_issued_at: client.createdAt };
+      return { client_id: client.id, client_name: client.name, redirect_uris: client.redirectUris, token_endpoint_auth_method: authMethod, ...(secret ? { client_secret: secret, client_secret_expires_at: 0 } : {}), grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], client_id_issued_at: client.createdAt };
     });
   }
   private async authorize(query: URLSearchParams, clientIp: string) {
@@ -253,9 +268,13 @@ export class EmbeddedOAuth {
     if (refresh) d.tokens.push({ digest: hash(refresh), familyId: family, clientId, host, scopes, kind: 'refresh', expiresAt: now + REFRESH_TTL, revoked: false, resource: this.resource });
     return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TTL, scope: scopes.join(' '), ...(refresh ? { refresh_token: refresh } : {}) };
   }
-  private async exchange(input: URLSearchParams | Record<string, unknown>) {
-    const grant = field(input, 'grant_type'); const clientId = field(input, 'client_id');
+  private async exchange(input: URLSearchParams | Record<string, unknown>, basic: { id: string; secret: string } = { id: '', secret: '' }) {
+    const grant = field(input, 'grant_type'); const bodyId = field(input, 'client_id');
+    check(!(basic.id && bodyId && basic.id !== bodyId), 'Conflicting client credentials');
+    const clientId = basic.id || bodyId; const secret = basic.secret || field(input, 'client_secret');
     check(validString(clientId), 'client_id required');
+    const authed = await this.read(d => d.clients.find(c => c.id === clientId));
+    if (authed?.secretDigest) check(secret.length >= 32 && eq(hash(secret), authed.secretDigest), 'Invalid client secret');
     if (grant === 'authorization_code') {
       const code = field(input, 'code'), verifier = field(input, 'code_verifier'), redirectUri = field(input, 'redirect_uri');
       check(/^[A-Za-z0-9_-]{43,128}$/.test(verifier), 'Invalid PKCE verifier');
@@ -373,7 +392,7 @@ export class EmbeddedOAuth {
       return true;
     }
     if (path === '/token' && req.method === 'POST') {
-      try { this.throttled(`token:${rateLimitIdentity(this.clientIdentity(req))}`, 100); const result = await this.exchange(await body(req)); reply(res, 'error' in result ? 400 : 200, result); }
+      try { this.throttled(`token:${rateLimitIdentity(this.clientIdentity(req))}`, 100); const result = await this.exchange(await body(req), basicClient(req)); reply(res, 'error' in result ? 400 : 200, result); }
       catch { reply(res, 400, { error: 'invalid_grant' }); }
       return true;
     }

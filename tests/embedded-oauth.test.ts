@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server } from 'node:http';
@@ -75,7 +75,7 @@ test('embedded OAuth discovery, DCR, PKCE, consent, token, restart and no code r
   assert.equal(asMetadata.authorization_response_iss_parameter_supported, true);
   assert.equal('client_id_metadata_document_supported' in asMetadata, false, 'Do not advertise unsupported CIMD');
   assert.equal(asMetadata.registration_endpoint, issuer + '/register');
-  assert.deepEqual(asMetadata.token_endpoint_auth_methods_supported, ['none']);
+  assert.deepEqual(asMetadata.token_endpoint_auth_methods_supported, ['none', 'client_secret_basic', 'client_secret_post']);
   assert.ok(asMetadata.code_challenge_methods_supported.includes('S256'));
   for (const path of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp']) {
     const metadata = await request(path);
@@ -461,3 +461,32 @@ test('M1 residual: 20 sources cannot evict a legitimate pending consent after re
  assert.equal(approval.status,302,'The original operator can finish consent at full pending capacity');
  assert.ok(new URL(approval.headers.get('location')!).searchParams.get('code'));
 },req=>new ClientAddressPolicy('127.0.0.1/32').identify(req)));
+
+test('confidential DCR (Gemini-style client_secret_basic/post) issues a secret and /token enforces it', () => harness(async ({ oauth, dir, request }) => {
+  for (const method of ['client_secret_basic', 'client_secret_post'] as const) {
+    const reg = await request('/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redirect_uris: [callbackA], token_endpoint_auth_method: method, grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], client_name: 'Gemini' }) });
+    assert.equal(reg.status, 201);
+    const meta = await reg.json() as { client_id: string; client_secret?: string; token_endpoint_auth_method: string };
+    assert.equal(meta.token_endpoint_auth_method, method);
+    assert.ok(meta.client_secret && meta.client_secret.length >= 32);
+    const clientSecret = meta.client_secret!;
+    // The secret is never persisted in clear text.
+    assert.ok(!JSON.stringify(await oauth.listClients()).includes(clientSecret));
+    for (const f of await readdir(dir)) assert.ok(!(await readFile(join(dir, f), 'utf8').catch(() => '')).includes(clientSecret));
+    const basic = (id: string, sec: string) => 'Basic ' + Buffer.from(`${encodeURIComponent(id)}:${encodeURIComponent(sec)}`).toString('base64');
+    const exchange = (code: string, sec: string) => method === 'client_secret_basic'
+      ? request('/token', post({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: callbackA, resource }, { authorization: basic(meta.client_id, sec) }))
+      : request('/token', post({ grant_type: 'authorization_code', client_id: meta.client_id, client_secret: sec, code, code_verifier: verifier, redirect_uri: callbackA, resource }));
+    const first = await authorize(request, meta.client_id, 'gemini');
+    const wrong = await exchange(first.code, 'x'.repeat(40));
+    assert.equal(wrong.status, 400);
+    const missing = await request('/token', post({ grant_type: 'authorization_code', client_id: meta.client_id, code: first.code, code_verifier: verifier, redirect_uri: callbackA, resource }));
+    assert.equal(missing.status, 400);
+    const ok = await exchange(first.code, clientSecret);
+    assert.equal(ok.status, 200);
+    const tokens = await ok.json() as { access_token?: string };
+    assert.ok(tokens.access_token);
+  }
+  const bad = await request('/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redirect_uris: [callbackA], token_endpoint_auth_method: 'private_key_jwt' }) });
+  assert.equal(bad.status, 400);
+}));
