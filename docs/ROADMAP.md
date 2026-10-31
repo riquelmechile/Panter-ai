@@ -80,3 +80,23 @@ The checkboxes below are a **historical per-release backlog** and should not be 
 - [ ] Integrate actual ChatGPT host-native child launch and verify independent execution evidence and throughput.
 - [ ] Wire full official Gentle AI Go RDD v2 consent/transition/fix/validation/acknowledgement on a trusted Git runner; current bridge is read-only.
 - [ ] Add multi-process transactional storage and isolate correction worktrees before production.
+
+## v0.15.x embedded OAuth — contrato con clientes reales (PR #18)
+
+- [x] Cookie de consentimiento `SameSite=Lax` (Secure, HttpOnly, 10 min): ChatGPT llega a `/authorize` por navegación cross-site y los navegadores no envían cookies `Strict` en esa cadena. El CSRF de doble envío y la verificación de Origin del POST se mantienen.
+- [x] Clientes confidenciales: `/register` acepta `none`, `client_secret_basic` y `client_secret_post`; el secreto se entrega una vez y solo se guarda su hash. `/token` y `/revoke` aceptan credenciales por HTTP Basic (RFC 6749 §2.3.1) o en el cuerpo y exigen el secreto a los clientes confidenciales. PKCE S256 sigue siendo obligatorio para todos.
+- [x] Gemini: hasta 10 `redirect_uris` (Gemini registra 6 relays `/r/` y `/a/` de Google) y entrega HTML sin scripts tras el consentimiento para los hosts relay exactos de Google, porque Chrome aplica el `form-action` CSP a toda la cadena del POST. ChatGPT, Claude y Grok siguen con 302.
+- [x] `panter:lead` solo se concede a `gpt-a`; si otro host lo pide, se descarta en vez de fallar el consentimiento.
+- [x] Toda conexión aprobada recibe `offline_access` y refresh rotativo (ChatGPT no lo solicita); reuso detectado revoca la familia.
+- [x] Logs `[oauth] <etapa> rejected: <motivo>` con mensajes fijos únicamente; los errores no controlados (p. ej. JSON malformado) se registran solo por clase, nunca con fragmentos del cuerpo.
+- [ ] Validación sostenida en los cinco hosts reales (renovación de GPT-A/GPT-B tras la primera hora, revocación desde Gemini).
+
+## v0.15.x despliegue de un solo dueño — `PANTER_OWNER_TRUSTED_HOSTS` (PR #18, commit 14bbb58)
+
+**Ampliación de privilegios administrativos (opt-in).** Por defecto las herramientas admin-only solo se pueden usar con `PANTER_OPERATOR_TOKEN` por el socket Unix privado. Con `PANTER_OWNER_TRUSTED_HOSTS=<hosts>`, los principales OAuth autenticados de esos hosts también son admin.
+
+- [x] Alcance exacto (todo lo que pasa por `requireAdmin`): `panter_harness_write_grant` (incluye auto-emitirse grants de escritura), `panter_harness_delivery_strategy_set`, `panter_oauth_clients`, `panter_oauth_client_revoke`, `panter_mesh_uncertain_writers`, `panter_mesh_reconcile_writer`, `panter_host_policy` y las herramientas legacy de misiones/trabajo/flujos/agentes registradas con `registerLegacyTool` (`panter_mission_*`, `panter_work_*`, `panter_agent_*`, `panter_flow_*`).
+- [x] La identidad sale del token OAuth emitido tras el consentimiento con clave de operador, nunca de argumentos. Solo se aceptan identidades de host válidas (`gpt-a`, `gpt-b`, `grok`, `gemini`, `claude`); una entrada inválida aborta el arranque.
+- [x] Sin la variable el comportamiento no cambia (test `owner-trust`). `requireLeader` (gpt-a) y la separación autor/revisor en GitHub no se relajan.
+- [x] Supuesto de seguridad: todas las cuentas conectadas pertenecen al mismo dueño. Si se usa, el registro de clientes (`/register`, `/authorize`, `/oauth/consent`) debe quedar cerrado en el borde (en producción: 403 en el túnel) y abrirse solo para reconectar.
+- [ ] Riesgo aceptado: un token robado de cualquiera de esos hosts tiene poder de operador hasta que se revoque su cliente. Mitigación: revocación por cliente, refresh rotativo con detección de reuso y quitar la variable para volver al modo restringido.

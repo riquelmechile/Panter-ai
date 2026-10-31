@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server } from 'node:http';
@@ -13,6 +13,7 @@ const resource = issuer + '/mcp';
 const callbackA = 'https://chatgpt.com/connector_platform_oauth_redirect';
 const callbackB = 'https://claude.ai/api/mcp/auth_callback';
 const callbackC = 'https://claude.com/api/mcp/auth_callback';
+const geminiCallbacks = ['oauth-redirect', 'oauth-redirect-sandbox', 'oauth-redirect-test'].flatMap(h => ['r', 'a'].map(k => `https://${h}.googleusercontent.com/${k}/user_bound_custom-mcp-1-panter_example_org`));
 const secret = 'owner-approval-password-32chars-very-private';
 const verifier = 'a'.repeat(64);
 const challenge = createHash('sha256').update(verifier).digest('base64url');
@@ -20,7 +21,7 @@ async function harness(run: (h: { base: string; oauth: EmbeddedOAuth; dir: strin
   const dir = await mkdtemp(join(tmpdir(), 'panter-embedded-oauth-'));
   let server: Server | undefined;
   try {
-    const oauth = await EmbeddedOAuth.open({ dir, resource, redirectUris: [callbackA, callbackB, callbackC], password: secret, clientIdentity });
+    const oauth = await EmbeddedOAuth.open({ dir, resource, redirectUris: [callbackA, callbackB, callbackC, ...geminiCallbacks], password: secret, clientIdentity });
     server = createServer(async (req, res) => { if (!await oauth.handle(req, res)) { res.statusCode = 404; res.end(); } });
     await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve));
     const address = server.address(); assert.ok(address && typeof address !== 'string');
@@ -36,11 +37,16 @@ async function register(request: (p: string, init?: RequestInit) => Promise<Resp
   const result = await request('/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redirect_uris: [callback], token_endpoint_auth_method: 'none', response_types: ['code'], grant_types: ['authorization_code', 'refresh_token'] }) });
   assert.equal(result.status, 201); return (await result.json() as { client_id: string }).client_id;
 }
-async function authorize(request: (p: string, init?: RequestInit) => Promise<Response>, clientId: string, host: string, callback = callbackA) {
-  const q = new URLSearchParams({ client_id: clientId, redirect_uri: callback, response_type: 'code', code_challenge: challenge, code_challenge_method: 'S256', scope: 'mcp offline_access', resource, state: 'opaque-state' });
+async function authorize(request: (p: string, init?: RequestInit) => Promise<Response>, clientId: string, host: string, callback = callbackA, scope = 'mcp offline_access') {
+  const q = new URLSearchParams({ client_id: clientId, redirect_uri: callback, response_type: 'code', code_challenge: challenge, code_challenge_method: 'S256', scope, resource, state: 'opaque-state' });
   const start = await request('/authorize?' + q); assert.equal(start.status, 302);
   const next = new URL(start.headers.get('location')!, issuer);
-  const consentCookie = start.headers.get('set-cookie')!.split(';')[0]!;
+  const setCookie = start.headers.get('set-cookie')!;
+  // The consent cookie is set on /authorize, which the AI client reaches through a cross-site
+  // navigation, then followed by a redirect to /oauth/consent. Browsers withhold SameSite=Strict
+  // cookies on that redirect chain, so the consent page must use Lax (double-submit CSRF still holds).
+  assert.match(setCookie, /SameSite=Lax/); assert.match(setCookie, /HttpOnly/); assert.match(setCookie, /Secure/);
+  const consentCookie = setCookie.split(';')[0]!;
   const page = await request(next.pathname + next.search, { headers: { cookie: consentCookie } });
   assert.equal(page.status, 200);
   const html = await page.text(); const csrf = /name="csrf" value="([^"]+)"/.exec(html)?.[1]; assert.ok(csrf);
@@ -70,7 +76,7 @@ test('embedded OAuth discovery, DCR, PKCE, consent, token, restart and no code r
   assert.equal(asMetadata.authorization_response_iss_parameter_supported, true);
   assert.equal('client_id_metadata_document_supported' in asMetadata, false, 'Do not advertise unsupported CIMD');
   assert.equal(asMetadata.registration_endpoint, issuer + '/register');
-  assert.deepEqual(asMetadata.token_endpoint_auth_methods_supported, ['none']);
+  assert.deepEqual(asMetadata.token_endpoint_auth_methods_supported, ['none', 'client_secret_basic', 'client_secret_post']);
   assert.ok(asMetadata.code_challenge_methods_supported.includes('S256'));
   for (const path of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp']) {
     const metadata = await request(path);
@@ -456,3 +462,111 @@ test('M1 residual: 20 sources cannot evict a legitimate pending consent after re
  assert.equal(approval.status,302,'The original operator can finish consent at full pending capacity');
  assert.ok(new URL(approval.headers.get('location')!).searchParams.get('code'));
 },req=>new ClientAddressPolicy('127.0.0.1/32').identify(req)));
+
+test('confidential DCR (Gemini-style client_secret_basic/post) issues a secret and /token enforces it', () => harness(async ({ oauth, dir, request }) => {
+  for (const method of ['client_secret_basic', 'client_secret_post'] as const) {
+    const reg = await request('/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redirect_uris: [callbackA], token_endpoint_auth_method: method, grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], client_name: 'Gemini' }) });
+    assert.equal(reg.status, 201);
+    const meta = await reg.json() as { client_id: string; client_secret?: string; token_endpoint_auth_method: string };
+    assert.equal(meta.token_endpoint_auth_method, method);
+    assert.ok(meta.client_secret && meta.client_secret.length >= 32);
+    const clientSecret = meta.client_secret!;
+    // The secret is never persisted in clear text.
+    assert.ok(!JSON.stringify(await oauth.listClients()).includes(clientSecret));
+    for (const f of await readdir(dir)) assert.ok(!(await readFile(join(dir, f), 'utf8').catch(() => '')).includes(clientSecret));
+    const basic = (id: string, sec: string) => 'Basic ' + Buffer.from(`${encodeURIComponent(id)}:${encodeURIComponent(sec)}`).toString('base64');
+    const exchange = (code: string, sec: string) => method === 'client_secret_basic'
+      ? request('/token', post({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: callbackA, resource }, { authorization: basic(meta.client_id, sec) }))
+      : request('/token', post({ grant_type: 'authorization_code', client_id: meta.client_id, client_secret: sec, code, code_verifier: verifier, redirect_uri: callbackA, resource }));
+    const first = await authorize(request, meta.client_id, 'gemini');
+    const wrong = await exchange(first.code, 'x'.repeat(40));
+    assert.equal(wrong.status, 400);
+    const missing = await request('/token', post({ grant_type: 'authorization_code', client_id: meta.client_id, code: first.code, code_verifier: verifier, redirect_uri: callbackA, resource }));
+    assert.equal(missing.status, 400);
+    const ok = await exchange(first.code, clientSecret);
+    assert.equal(ok.status, 200);
+    const tokens = await ok.json() as { access_token?: string };
+    assert.ok(tokens.access_token);
+  }
+  const bad = await request('/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redirect_uris: [callbackA], token_endpoint_auth_method: 'private_key_jwt' }) });
+  assert.equal(bad.status, 400);
+}));
+
+test('a non-coordinator host that requests every advertised scope (Gemini) is granted without panter:lead', () => harness(async ({ request }) => {
+  const clientId = await register(request);
+  const { code } = await authorize(request, clientId, 'gemini', callbackA, 'mcp offline_access panter:mesh panter:lead');
+  const res = await token(request, clientId, code);
+  assert.equal(res.status, 200);
+  const issued = await res.json() as { scope: string };
+  assert.ok(!issued.scope.split(' ').includes('panter:lead'));
+  assert.ok(issued.scope.split(' ').includes('panter:mesh'));
+}));
+
+test('Gemini: DCR with its six relay callbacks and consent answered with an HTML handoff (no 302)', () => harness(async ({ request }) => {
+  const reg = await request('/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redirect_uris: geminiCallbacks, token_endpoint_auth_method: 'client_secret_post', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], client_name: 'Gemini' }) });
+  assert.equal(reg.status, 201);
+  const meta = await reg.json() as { client_id: string; client_secret: string };
+  const relay = geminiCallbacks[0]!;
+  const q = new URLSearchParams({ client_id: meta.client_id, redirect_uri: relay, response_type: 'code', code_challenge: challenge, code_challenge_method: 'S256', scope: 'mcp offline_access panter:mesh panter:lead', resource, state: 'g-state' });
+  const start = await request('/authorize?' + q); assert.equal(start.status, 302);
+  const next = new URL(start.headers.get('location')!, issuer);
+  const cookie = start.headers.get('set-cookie')!.split(';')[0]!;
+  const page = await request(next.pathname + next.search, { headers: { cookie } });
+  const csrf = /name="csrf" value="([^"]+)"/.exec(await page.text())?.[1]; assert.ok(csrf);
+  const done = await request(next.pathname + next.search, post({ csrf, password: secret, host: 'gemini', decision: 'allow' }, { origin: issuer, cookie }));
+  assert.equal(done.status, 200);
+  assert.equal(done.headers.get('location'), null);
+  assert.match(done.headers.get('content-security-policy') ?? '', /form-action 'none'/);
+  const html = await done.text();
+  const target = /http-equiv="refresh" content="0;url=([^"]+)"/.exec(html)?.[1];
+  assert.ok(target);
+  const back = new URL(target!.replace(/&amp;/g, '&'));
+  assert.equal(back.origin + back.pathname, relay);
+  assert.equal(back.searchParams.get('state'), 'g-state');
+  assert.equal(back.searchParams.get('iss'), issuer);
+  const code = back.searchParams.get('code')!;
+  const tok = await request('/token', post({ grant_type: 'authorization_code', client_id: meta.client_id, client_secret: meta.client_secret, code, code_verifier: verifier, redirect_uri: relay, resource }));
+  assert.equal(tok.status, 200);
+}));
+
+test('ChatGPT-style request without offline_access still receives a rotating refresh token', () => harness(async ({ request }) => {
+  const clientId = await register(request);
+  const { code } = await authorize(request, clientId, 'gpt-b', callbackA, 'mcp');
+  const res = await token(request, clientId, code);
+  assert.equal(res.status, 200);
+  const issued = await res.json() as { refresh_token?: string; scope: string };
+  assert.ok(issued.refresh_token && issued.refresh_token.length >= 32);
+  assert.ok(issued.scope.split(' ').includes('offline_access'));
+  const rotated = await request('/token', post({ grant_type: 'refresh_token', client_id: clientId, refresh_token: issued.refresh_token! }));
+  assert.equal(rotated.status, 200);
+  const next = await rotated.json() as { refresh_token?: string };
+  assert.ok(next.refresh_token && next.refresh_token !== issued.refresh_token);
+}));
+
+test('confidential client revokes with client_secret_basic; wrong secret is rejected', () => harness(async ({ request }) => {
+  const reg = await request('/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redirect_uris: [callbackA], token_endpoint_auth_method: 'client_secret_basic', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'] }) });
+  const meta = await reg.json() as { client_id: string; client_secret: string };
+  const basic = (sec: string) => 'Basic ' + Buffer.from(`${encodeURIComponent(meta.client_id)}:${encodeURIComponent(sec)}`).toString('base64');
+  const { code } = await authorize(request, meta.client_id, 'gemini');
+  const issued = await (await request('/token', post({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: callbackA, resource }, { authorization: basic(meta.client_secret) }))).json() as { access_token: string; refresh_token: string };
+  const wrong = await request('/revoke', post({ token: issued.refresh_token }, { authorization: basic('y'.repeat(40)) }));
+  assert.equal(wrong.status, 400);
+  const ok = await request('/revoke', post({ token: issued.refresh_token }, { authorization: basic(meta.client_secret) }));
+  assert.equal(ok.status, 200);
+  const after = await request('/token', post({ grant_type: 'refresh_token', refresh_token: issued.refresh_token }, { authorization: basic(meta.client_secret) }));
+  assert.equal(after.status, 400);
+}));
+
+test('rejection logs never echo request bodies (malformed JSON with a credential)', () => harness(async ({ request }) => {
+  const seen: string[] = []; const original = console.warn;
+  console.warn = (...args: unknown[]) => { seen.push(args.map(String).join(' ')); };
+  try {
+    const leak = 'SUPERSECRET' + 'z'.repeat(40);
+    const res = await request('/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: `{"client_secret":"${leak}",` });
+    assert.equal(res.status, 400);
+    const tok = await request('/token', { method: 'POST', headers: { 'content-type': 'application/json' }, body: `{"refresh_token":"${leak}"` });
+    assert.equal(tok.status, 400);
+    assert.ok(seen.length >= 2);
+    assert.ok(seen.every(line => !line.includes('SUPERSECRET')));
+  } finally { console.warn = original; }
+}));

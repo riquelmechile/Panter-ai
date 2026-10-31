@@ -1,4 +1,5 @@
 import { ExternalOAuthVerifier, staticBearerMatch } from './core/oauth.js';
+import { isAdminPrincipal, parseOwnerTrustedHosts } from './core/owner-trust.js';
 import { EmbeddedOAuth } from './core/embedded-oauth.js';
 import { openEngramBridge } from './core/engram-runtime.js';
 import { readFile, chmod, mkdir, lstat, unlink } from 'node:fs/promises';
@@ -127,7 +128,8 @@ if(new Set(Object.values(peerTokens)).size!==Object.keys(peerTokens).length)thro
 function principal(){return principalContext.getStore()??'unknown'}
 function hostPrincipal(){const p=principal();if(!isHost(p))throw new Error('Peer identity required');return p}
 function requireLeader(){if(principal()!=='gpt-a')throw new Error('GPT-A required')}
-function requireAdmin(){if(principal()!=='admin')throw new Error('Admin token required')}
+const ownerTrustedHosts = parseOwnerTrustedHosts(process.env.PANTER_OWNER_TRUSTED_HOSTS);
+function requireAdmin(){if(!isAdminPrincipal(principal(),ownerTrustedHosts))throw new Error('Admin token required')}
 const missionStatus = z.enum(['DRAFT', 'READY', 'RUNNING', 'VERIFYING', 'DONE', 'BLOCKED']);
 const bounded = (max = 2048) => z.string().trim().min(1).max(max);
 

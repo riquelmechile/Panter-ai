@@ -19,12 +19,50 @@ const ALLOWED_SCOPES = new Set(['mcp', 'panter:mesh', 'panter:lead', 'offline_ac
 const secureId = (bytes = 32) => randomBytes(bytes).toString('base64url');
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 const ts = () => Math.floor(Date.now() / 1000);
-function check(ok: unknown, why: string): asserts ok { if (!ok) throw new Error(why); }
+/** Errors raised by check() carry fixed, operator-safe messages (never request data). */
+class OAuthCheckError extends Error {}
+function check(ok: unknown, why: string): asserts ok { if (!ok) throw new OAuthCheckError(why); }
 function eq(a: string, b: string): boolean {
   return timingSafeEqual(Buffer.from(hash(a), 'hex'), Buffer.from(hash(b), 'hex'));
 }
 function validString(value: unknown, max = 256): value is string { return typeof value === 'string' && value.length > 0 && value.length <= max; }
 function escapeHtml(s: string) { return s.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!); }
+/** RFC 6749 §2.3.1 HTTP Basic client credentials (form-urlencoded id/secret). Empty when absent/malformed. */
+function basicClient(req: IncomingMessage): { id: string; secret: string } {
+  const h = req.headers.authorization;
+  if (!h?.startsWith('Basic ')) return { id: '', secret: '' };
+  try {
+    const raw = Buffer.from(h.slice(6).trim(), 'base64').toString('utf8'); const i = raw.indexOf(':');
+    if (i < 1) return { id: '', secret: '' };
+    return { id: decodeURIComponent(raw.slice(0, i).replace(/\+/g, ' ')), secret: decodeURIComponent(raw.slice(i + 1).replace(/\+/g, ' ')) };
+  } catch { return { id: '', secret: '' }; }
+}
+/** Operator-visible reason for a rejected OAuth step. Messages are fixed strings from check(); never secrets. */
+function logOAuthReject(stage: string, err: unknown) {
+  // Only fixed check() messages are logged. Other errors (e.g. JSON.parse, which quotes
+  // part of the request body) may contain credentials, so only their class is recorded.
+  const reason = err instanceof OAuthCheckError ? err.message : err instanceof Error ? `unexpected ${err.name}` : 'unknown';
+  console.warn(`[oauth] ${stage} rejected: ${reason}`);
+}
+/**
+ * Gemini web returns through Google-owned relay callbacks (/r/ and /a/) that then
+ * navigate to gemini.google.com. Chrome enforces the consent page's form-action CSP
+ * over the whole redirect chain after a POST, so a 302 to the relay is blocked and
+ * Gemini never receives the code. Answer with a no-script HTML handoff instead,
+ * decoupling the form submission from the cross-origin navigation (same approach as
+ * DevZana). Only these exact Google relay hosts qualify; the URI itself was already
+ * validated against the configured callback allowlist.
+ */
+const GEMINI_RELAY_HOSTS = new Set(['oauth-redirect.googleusercontent.com', 'oauth-redirect-sandbox.googleusercontent.com', 'oauth-redirect-test.googleusercontent.com']);
+function isGeminiRelay(uri: string): boolean {
+  try { const u = new URL(uri); return u.protocol === 'https:' && GEMINI_RELAY_HOSTS.has(u.hostname) && (u.pathname.startsWith('/r/') || u.pathname.startsWith('/a/')); } catch { return false; }
+}
+function geminiHandoff(res: ServerResponse, uri: string) {
+  const target = escapeHtml(uri);
+  const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer"><meta http-equiv="refresh" content="0;url=${target}"><title>Continuar conexión con Gemini</title></head><body style="font:16px system-ui;background:#111827;color:white;max-width:460px;margin:8vh auto;padding:20px"><h2>Completar conexión con Gemini</h2><p>Si el navegador no vuelve automáticamente, usa el enlace.</p><p><a rel="noreferrer noopener" style="color:#93c5fd" href="${target}">Continuar a Gemini</a></p></body></html>`;
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'" });
+  res.end(html);
+}
 function bearer(req: IncomingMessage) { const h = req.headers.authorization; return h?.startsWith('Bearer ') ? h.slice(7) : ''; }
 function reply(res: ServerResponse, status: number, data: object, headers: Record<string, string> = {}) {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers });
@@ -42,7 +80,8 @@ async function body(req: IncomingMessage): Promise<URLSearchParams | Record<stri
   const raw = Buffer.concat(parts).toString('utf8');
   const contentType = String(req.headers['content-type'] ?? '').split(';')[0]?.trim();
   if (contentType === 'application/json') {
-    const parsed: unknown = JSON.parse(raw);
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); } catch { throw new OAuthCheckError('Malformed JSON body'); }
     check(parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed), 'Invalid JSON');
     return parsed as Record<string, unknown>;
   }
@@ -76,7 +115,9 @@ function queryRedirect(uri: string, values: Record<string, string>) {
   return url.toString();
 }
 
-type Client = { id: string; name: string; redirectUris: string[]; createdAt: number };
+type Client = { id: string; name: string; redirectUris: string[]; createdAt: number; secretDigest?: string; authMethod?: ClientAuthMethod };
+type ClientAuthMethod = 'none' | 'client_secret_basic' | 'client_secret_post';
+const CLIENT_AUTH_METHODS: readonly ClientAuthMethod[] = ['none', 'client_secret_basic', 'client_secret_post'];
 type Pending = { id: string; clientId: string; redirectUri: string; challenge: string; state: string; requestedScopes: string[]; csrfDigest: string; expiresAt: number; failures: number; sourceDigest?: string };
 type Grant = { clientId: string; host: Host; redirectUri: string; scopes: string[]; approvedAt: number; revoked: boolean };
 type Code = { digest: string; clientId: string; host: Host; redirectUri: string; challenge: string; scopes: string[]; expiresAt: number; consumed: boolean };
@@ -136,7 +177,7 @@ export class EmbeddedOAuth {
   authorizationServerMetadata() {
     // RFC 9207: both consent outcomes return the exact `iss` in the redirect.
     // ChatGPT needs this advertised to bind its stable OAuth callback.
-    return { issuer: this.issuer, authorization_response_iss_parameter_supported: true, authorization_endpoint: this.issuer + '/authorize', token_endpoint: this.issuer + '/token', registration_endpoint: this.issuer + '/register', revocation_endpoint: this.issuer + '/revoke', response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], token_endpoint_auth_methods_supported: ['none'], code_challenge_methods_supported: ['S256'], scopes_supported: [...ALLOWED_SCOPES] };
+    return { issuer: this.issuer, authorization_response_iss_parameter_supported: true, authorization_endpoint: this.issuer + '/authorize', token_endpoint: this.issuer + '/token', registration_endpoint: this.issuer + '/register', revocation_endpoint: this.issuer + '/revoke', response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], token_endpoint_auth_methods_supported: [...CLIENT_AUTH_METHODS], code_challenge_methods_supported: ['S256'], scopes_supported: [...ALLOWED_SCOPES] };
   }
   challenge() {
     return `Bearer realm="panter-ai", resource_metadata="${this.issuer}/.well-known/oauth-protected-resource", scope="mcp"`;
@@ -166,19 +207,22 @@ export class EmbeddedOAuth {
   private async register(raw: URLSearchParams | Record<string, unknown>) {
     check(!(raw instanceof URLSearchParams), 'JSON registration required');
     const input = raw as Record<string, unknown>;
-    check(Array.isArray(input.redirect_uris) && input.redirect_uris.length > 0 && input.redirect_uris.length <= 5, 'Redirect URIs required');
+    check(Array.isArray(input.redirect_uris) && input.redirect_uris.length > 0 && input.redirect_uris.length <= 10, 'Redirect URIs required');
     const redirectUris = input.redirect_uris.map(x => validateRedirect(String(x)));
     check(redirectUris.every(u => this.callbacks.has(u)), 'Unapproved redirect URI');
-    check(input.token_endpoint_auth_method === undefined || input.token_endpoint_auth_method === 'none', 'Public clients only');
+    const authMethod = (input.token_endpoint_auth_method ?? 'none') as ClientAuthMethod;
+    check(CLIENT_AUTH_METHODS.includes(authMethod), 'Unsupported client authentication');
     check(input.grant_types === undefined || (Array.isArray(input.grant_types) && input.grant_types.every(x => x === 'authorization_code' || x === 'refresh_token') && input.grant_types.includes('authorization_code')), 'Unsupported grants');
     check(input.response_types === undefined || (Array.isArray(input.response_types) && input.response_types.length === 1 && input.response_types[0] === 'code'), 'Unsupported response type');
     const name = typeof input.client_name === 'string' ? input.client_name.slice(0, 120) : 'MCP client';
     return this.change(d => {
       d.clients=d.clients.filter(c=>c.createdAt>ts()-86400||d.grants.some(g=>g.clientId===c.id));
       check(d.clients.length < 100, 'Registration capacity reached');
-      const client: Client = { id: 'pc_' + secureId(24), name, redirectUris, createdAt: ts() };
+      // Confidential clients (e.g. Gemini) get a one-time-displayed secret; only its digest is stored.
+      const secret = authMethod === 'none' ? '' : 'ps_' + secureId(32);
+      const client: Client = { id: 'pc_' + secureId(24), name, redirectUris, createdAt: ts(), ...(secret ? { secretDigest: hash(secret), authMethod } : {}) };
       d.clients.push(client);
-      return { client_id: client.id, client_name: client.name, redirect_uris: client.redirectUris, token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], client_id_issued_at: client.createdAt };
+      return { client_id: client.id, client_name: client.name, redirect_uris: client.redirectUris, token_endpoint_auth_method: authMethod, ...(secret ? { client_secret: secret, client_secret_expires_at: 0 } : {}), grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], client_id_issued_at: client.createdAt };
     });
   }
   private async authorize(query: URLSearchParams, clientIp: string) {
@@ -233,8 +277,13 @@ export class EmbeddedOAuth {
       check(decision === 'allow' && isHost(host), 'Choose one approved host');
       const existing = d.grants.find(g => g.clientId === p.clientId && !g.revoked);
       check(!existing || existing.host === host, 'Client cannot switch host without revocation');
-      check(host === 'gpt-a' || !p.requestedScopes.includes('panter:lead'), 'Leader scope restricted');
-      const scopes = [...new Set([...p.requestedScopes, 'mcp', 'panter:mesh'])];
+      // Clients such as Gemini request every advertised scope. The leader scope is
+      // never granted to a non-coordinator host: drop it instead of failing consent.
+      const requested = host === 'gpt-a' ? p.requestedScopes : p.requestedScopes.filter(s => s !== 'panter:lead');
+      // Operator-approved connections always get a rotating refresh token. ChatGPT does not
+      // request offline_access and would otherwise be disconnected when the 1h access token
+      // expires; refresh rotation and replay-family revocation still apply.
+      const scopes = [...new Set([...requested, 'mcp', 'panter:mesh', 'offline_access'])];
       if (host === 'gpt-a') scopes.push('panter:lead');
       if (!existing) d.grants.push({ clientId: p.clientId, host, redirectUri: p.redirectUri, scopes: [...new Set(scopes)], approvedAt: ts(), revoked: false });
       const code = secureId(32);
@@ -253,9 +302,13 @@ export class EmbeddedOAuth {
     if (refresh) d.tokens.push({ digest: hash(refresh), familyId: family, clientId, host, scopes, kind: 'refresh', expiresAt: now + REFRESH_TTL, revoked: false, resource: this.resource });
     return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TTL, scope: scopes.join(' '), ...(refresh ? { refresh_token: refresh } : {}) };
   }
-  private async exchange(input: URLSearchParams | Record<string, unknown>) {
-    const grant = field(input, 'grant_type'); const clientId = field(input, 'client_id');
+  private async exchange(input: URLSearchParams | Record<string, unknown>, basic: { id: string; secret: string } = { id: '', secret: '' }) {
+    const grant = field(input, 'grant_type'); const bodyId = field(input, 'client_id');
+    check(!(basic.id && bodyId && basic.id !== bodyId), 'Conflicting client credentials');
+    const clientId = basic.id || bodyId; const secret = basic.secret || field(input, 'client_secret');
     check(validString(clientId), 'client_id required');
+    const authed = await this.read(d => d.clients.find(c => c.id === clientId));
+    if (authed?.secretDigest) check(secret.length >= 32 && eq(hash(secret), authed.secretDigest), 'Invalid client secret');
     if (grant === 'authorization_code') {
       const code = field(input, 'code'), verifier = field(input, 'code_verifier'), redirectUri = field(input, 'redirect_uri');
       check(/^[A-Za-z0-9_-]{43,128}$/.test(verifier), 'Invalid PKCE verifier');
@@ -291,7 +344,7 @@ export class EmbeddedOAuth {
         return this.issue(d, clientId, token.host, requested.length > 0 ? requested : token.scopes, token.familyId);
       });
     }
-    throw new Error('Unsupported grant_type');
+    throw new OAuthCheckError('Unsupported grant_type');
   }
   /** Only expose this through the authenticated operator MCP, never over public OAuth. */
   listClients(){
@@ -323,16 +376,16 @@ export class EmbeddedOAuth {
     }
     if (req.method === 'POST' && path === '/register') {
       try { this.throttled(`register:${rateLimitIdentity(this.clientIdentity(req))}`, 20); const registered = await this.register(await body(req)); reply(res, 201, registered); }
-      catch (err) { reply(res, 400, { error: 'invalid_client_metadata', error_description: err instanceof Error ? err.message : 'Invalid request' }); }
+      catch (err) { logOAuthReject('register', err); reply(res, 400, { error: 'invalid_client_metadata', error_description: err instanceof Error ? err.message : 'Invalid request' }); }
       return true;
     }
     if (req.method === 'GET' && path === '/authorize') {
       try {
         this.throttled(`authorize:${rateLimitIdentity(this.clientIdentity(req))}`,60);
         const { id, csrf } = await this.authorize(params(req.url ?? ''),this.clientIdentity(req));
-        res.setHeader('Set-Cookie', `${this.consentCookie}=${csrf}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=600`);
+        res.setHeader('Set-Cookie', `${this.consentCookie}=${csrf}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600`);
         redirect(res, `/oauth/consent?sid=${encodeURIComponent(id)}`);
-      } catch { reply(res, 400, { error: 'invalid_request' }); }
+      } catch (err) { logOAuthReject('authorize', err); reply(res, 400, { error: 'invalid_request' }); }
       return true;
     }
     if (path === '/oauth/consent' && req.method === 'GET') {
@@ -349,7 +402,7 @@ export class EmbeddedOAuth {
         const ageMinutes=Math.max(0,Math.floor((ts()-client.createdAt)/60));
         const html = `<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Panter-ai · Autorizar conexión</title><style>body{font:16px system-ui;max-width:460px;margin:8vh auto;padding:20px;background:#111827;color:white}main{background:#1f2937;border-radius:12px;padding:24px}input,select,button{display:block;width:100%;padding:10px;margin:12px 0;box-sizing:border-box}.warning{border:1px solid #f4b400;padding:12px;color:#fff}</style><main><h2>Autorizar conexión a Panter-ai</h2><p class="warning"><strong>Cliente NO VERIFICADO.</strong> El nombre y callback pueden ser declarados por otra persona. Una URL de redirección conocida no demuestra que sea tu sesión de ChatGPT o Claude. Confirma la solicitud desde la aplicación que tú abriste; si no la iniciaste, pulsa Denegar.</p><p>Nombre declarado (no verificado): ${escapeHtml(client.name)}</p><p>Identificador de registro: ${escapeHtml(client.id)}</p><p>Registrado hace aproximadamente ${ageMinutes} minutos</p><p>Destino de redirección: ${escapeHtml(pending.redirectUri)}</p><form method="post" action="/oauth/consent?sid=${encodeURIComponent(id)}"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><label>Host autorizado<select name="host">${options}</select></label><label>Clave del operador<input name="password" type="password" required autocomplete="off"></label><button name="decision" value="allow">Autorizar</button><button name="decision" value="deny">Denegar</button></form></main></html>`;
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff', 'content-security-policy': `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${callbackOrigin}; base-uri 'none'; frame-ancestors 'none'` }); res.end(html);
-      } catch { reply(res, 400, { error: 'invalid_request' }); }
+      } catch (err) { logOAuthReject('consent-page', err); reply(res, 400, { error: 'invalid_request' }); }
       return true;
     }
     if (path === '/oauth/consent' && req.method === 'POST') {
@@ -367,14 +420,14 @@ export class EmbeddedOAuth {
         this.throttled(`consent:${id}`, 6);
         const payload = await body(req);
         const result = await this.approve(id, field(payload, 'csrf'), field(payload, 'password'), field(payload, 'host'), field(payload, 'decision'));
-        res.setHeader('Set-Cookie', `${this.consentCookie}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0`);
-        redirect(res, result.uri);
-      } catch { reply(res, 403, { error: 'access_denied' }); }
+        res.setHeader('Set-Cookie', `${this.consentCookie}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`);
+        if (isGeminiRelay(result.uri)) geminiHandoff(res, result.uri); else redirect(res, result.uri);
+      } catch (err) { logOAuthReject('consent-submit', err); reply(res, 403, { error: 'access_denied' }); }
       return true;
     }
     if (path === '/token' && req.method === 'POST') {
-      try { this.throttled(`token:${rateLimitIdentity(this.clientIdentity(req))}`, 100); const result = await this.exchange(await body(req)); reply(res, 'error' in result ? 400 : 200, result); }
-      catch { reply(res, 400, { error: 'invalid_grant' }); }
+      try { this.throttled(`token:${rateLimitIdentity(this.clientIdentity(req))}`, 100); const result = await this.exchange(await body(req), basicClient(req)); reply(res, 'error' in result ? 400 : 200, result); }
+      catch (err) { logOAuthReject('token', err); reply(res, 400, { error: 'invalid_grant' }); }
       return true;
     }
     if (path === '/revoke' && req.method === 'POST') {
@@ -384,8 +437,12 @@ export class EmbeddedOAuth {
         // Rate-limit the endpoint and avoid rewriting the full ledger for misses.
         this.throttled(`revoke:${rateLimitIdentity(this.clientIdentity(req))}`,100);
         this.throttled('revoke:global',5000);
-        const input = await body(req); const clientId = field(input, 'client_id'); const token = field(input, 'token');
+        const input = await body(req); const basic = basicClient(req); const bodyId = field(input, 'client_id');
+        check(!(basic.id && bodyId && basic.id !== bodyId), 'Conflicting client credentials');
+        const clientId = basic.id || bodyId; const token = field(input, 'token');
         check(/^pc_[A-Za-z0-9_-]{24,64}$/.test(clientId)&&token.length>=32&&token.length<=200,'Invalid revocation request');
+        const owner = await this.read(d => d.clients.find(c => c.id === clientId));
+        if (owner?.secretDigest) { const sec = basic.secret || field(input, 'client_secret'); check(sec.length >= 32 && eq(hash(sec), owner.secretDigest), 'Invalid client secret'); }
         const digest=hash(token);
         const matchingFamily=await this.read(d=>d.tokens.find(t=>t.digest===digest&&t.clientId===clientId&&!t.revoked)?.familyId??null);
         if(matchingFamily)await this.change(d=>{
@@ -393,7 +450,7 @@ export class EmbeddedOAuth {
           if(found)for(const row of d.tokens)if(row.familyId===found.familyId)row.revoked=true;
         });
         reply(res, 200, {});
-      } catch { reply(res, 400, { error: 'invalid_request' }); }
+      } catch (err) { logOAuthReject('revoke', err); reply(res, 400, { error: 'invalid_request' }); }
       return true;
     }
     return false;
