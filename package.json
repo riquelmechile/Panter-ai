@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Independent open-source MCP control plane for host-powered development.",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "scripts": {
     "dev": "npm run build:ui && tsx watch src/server.ts",
