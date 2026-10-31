@@ -60,3 +60,13 @@ Se introduce `src/runner/readonly_ipc.py`, prototipo Python 3.12 stdlib **no des
 - **No bloqueante 3 — restauración de umask:** la creación de `socket.socket()` y la instalación de señales están dentro de `try/finally`, que restaura `umask` si la asignación de socket falla. Test con fallo simulado del constructor Python.
 
 **Sigue pendiente:** este prototipo continúa en modo `READ_ONLY`, no enlaza grants ni ejecuta Git/servicios. UID distintos, ACL reales, verificación de symlinks/openat2 y los cuatro gates de auditoría del PR #25 son requisitos previos a activar un ejecutor; la corrección P1 no concede capacidad de ejecución.
+
+## Fase 2 — Canonicalidad de firmas Ed25519 (corte posterior al PR #27)
+
+Se implementa el **gate pre-servicio 3** del PR #25 sin ampliar permisos de ejecución:
+
+- Las firmas Ed25519 de 64 bytes deben tener una representación **base64url sin padding estrictamente canónica** (86 caracteres); el verificador decodifica y exige que su re-encodificación produzca exactamente el mismo texto. Node acepta algunas representaciones alternativas de los bits terminales; el runner las rechaza incluso cuando decodifican a los mismos 64 bytes y la verificación Ed25519 sería válida.
+- El ledger anti-replay calcula ahora el digest de `grantPayload` seguido de **los 64 bytes decodificados y verificados** de la firma, nunca del texto aportado por el cliente.
+- Pruebas de dos representaciones equivalentes en bytes: solo la canónica es aceptada, la otra no reserva ni consume el grant; el original sigue siendo de un uso. Otra prueba lee la base SQLite y comprueba el digest esperado de bytes y su diferencia respecto del antiguo digest textual.
+
+**Compatibilidad y precaución:** si existieran registros `runner-grants.sqlite` de pruebas antiguas con digest de texto, no se convierten ni se eliminan automáticamente. Ante un ID existente y distinto digest, la reserva sigue fallando cerrado; cualquier reconciliación debe ser explícita y auditada. Esta biblioteca todavía no es un ejecutor, no tiene signer en producción, y no debe conectarse a un servicio de efectos. **Siguen pendientes** los gates 1 (cola de crash), 2 (rotación/sellado y rendimiento) y 4 (efectos inciertos/atestación externa).
