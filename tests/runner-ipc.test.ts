@@ -231,7 +231,7 @@ test('readiness probe waits for listen(), not just an already-bound socket pathn
     'conn,_=s.accept()',
     'conn.close()',
     's.close()',
-  ].join('\\n');
+  ].join('\n');
   const cp=spawn('python3',['-B','-c',code,sock],{stdio:['pipe','pipe','pipe']});
   let output='',errors='';
   cp.stdout.setEncoding('utf8');
