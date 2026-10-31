@@ -26,11 +26,28 @@ function launch(socketPath:string, uid:number) {
 async function waitForSocket(path:string, cp:ChildProcessWithoutNullStreams, logs:()=>unknown) {
   const limit=Date.now()+8000;
   while(Date.now()<limit){
-    if(existsSync(path))return;
-    if(cp.exitCode!==null)throw new Error('Server exited: '+JSON.stringify(logs()));
+    if(cp.exitCode!==null||cp.signalCode!==null)
+      throw new Error('Server exited: '+JSON.stringify(logs()));
+    // bind() creates the socket pathname BEFORE listen(). Checking existsSync
+    // alone races with Python startup, causing intermittent ECONNREFUSED.
+    if(existsSync(path)){
+      try{
+        await new Promise<void>((resolve,reject)=>{
+          const client=connect({path});
+          client.setTimeout(500,()=>client.destroy(new Error('probe timeout')));
+          client.once('connect',()=>{client.destroy();resolve();});
+          client.once('error',reject);
+        });
+        return; // Linux accept queue is listening: no request bytes are sent.
+      }catch(error){
+        const code=(error as NodeJS.ErrnoException).code;
+        if(code!=='ECONNREFUSED'&&code!=='ENOENT'&&code!=='ECONNRESET')
+          throw error;
+      }
+    }
     await delay(25);
   }
-  throw new Error('Unix socket did not start: '+JSON.stringify(logs()));
+  throw new Error('Unix socket did not become listen-ready: '+JSON.stringify(logs()));
 }
 async function stopServer(server:ReturnType<typeof launch>) {
   if(server.cp.exitCode===null && !server.cp.killed)server.cp.kill('SIGTERM');
@@ -199,4 +216,38 @@ test('umask is restored even when Python socket allocation fails',()=>{
   ].join('\n');
   const result=spawnSync('python3',['-B','-c',script],{cwd:process.cwd(),encoding:'utf8',timeout:8000});
   assert.equal(result.status,0,result.stderr);
+});
+
+test('readiness probe waits for listen(), not just an already-bound socket pathname',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'panter-ipc-bind-race-'));
+  const sock=join(dir,'bound.sock');
+  const code=[
+    'import socket,sys,time',
+    's=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)',
+    's.bind(sys.argv[1])',
+    'print("BOUND",flush=True)',
+    'time.sleep(0.35)',
+    's.listen(1)',
+    'conn,_=s.accept()',
+    'conn.close()',
+    's.close()',
+  ].join('\\n');
+  const cp=spawn('python3',['-B','-c',code,sock],{stdio:['pipe','pipe','pipe']});
+  let output='',errors='';
+  cp.stdout.setEncoding('utf8');
+  cp.stderr.setEncoding('utf8');
+  cp.stderr.on('data',(x:string)=>{errors+=x;});
+  let bound!:()=>void;
+  const ready=new Promise<void>(resolve=>{bound=resolve;});
+  cp.stdout.on('data',(x:string)=>{output+=x;if(output.includes('BOUND'))bound();});
+  try{
+    await ready;
+    assert.equal(existsSync(sock),true,'bound pathname exists before listening');
+    await waitForSocket(sock,cp,()=>({output,errors}));
+    const code=await new Promise<number|null>(resolve=>cp.once('close',resolve));
+    assert.equal(code,0,errors);
+  }finally{
+    if(cp.exitCode===null)cp.kill('SIGKILL');
+    rmSync(dir,{recursive:true,force:true});
+  }
 });
