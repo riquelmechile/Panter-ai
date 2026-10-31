@@ -94,3 +94,15 @@ El siguiente PR incremental corrige el fallo detectado por Claude, manteniendo e
 - Los tests cubren reintento completo, recuperación del recibo ausente, alteración de evidencia/recibo y rechazo de symlink.
 
 **Límite:** este código solo completa la *captura de evidencia* de crash de forma idempotente bajo supuesto de **un escritor**. No resuelve una carrera con escritores concurrentes, ni reanuda el diario, ni declara un efecto seguro o finalizado. Siguen pendientes autorización de reconciliación del gate 1, rotación/sellado del gate 2 y resolución de efectos inciertos del gate 4, además de sandbox/ACL/UID. El ejecutor permanece deshabilitado.
+
+### Corrección P1 de Claude en PR #33 — publicación atómica de evidencia
+
+La cuarentena ya no crea archivos finales `.bin` o `.json` antes de escribir sus datos:
+
+- Crea un temporal privado `.pending-<random>` en el mismo directorio con `O_CREAT|O_EXCL|O_NOFOLLOW` y modo `0400`.
+- Escribe hasta completar todos los bytes, ejecuta `fsync` del descriptor y **solo después** publica mediante `linkSync(temporal, nombreFinal)`, operación atómica sin sustitución (si existe final, `EEXIST` exige verificar UID, permisos, tamaño y bytes).
+- Ejecuta `fsync` del directorio después de publicar, borra el temporal y vuelve a sincronizar el directorio. Los temporales huérfanos por crash se ignoran sin sobrescribir ni borrar evidencia.
+- Mantiene el rechazo de archivos finales vacíos o truncados: no se consideran producto legítimo del nuevo esquema y nunca se sustituyen silenciosamente.
+- Tests cubren reintentos con temporales huérfanos, ausencia de temporales al finalizar correctamente y rechazo de archivos finales `.bin`/`.json` de longitud cero o parcial.
+
+El diario fuente sigue intacto, el resultado permanece `OUTCOME_UNKNOWN` y **no se autoriza reanudar efectos**. Siguen pendientes sellado externo, rotación, reconciliación y pruebas del ejecutor.

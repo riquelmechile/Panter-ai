@@ -173,3 +173,10 @@ La interfaz read-only no ejecuta código, no hace cambios en producción y no re
 - [x] Rechazar evidencia parcial/alterada, recibos falsificados, symlinks y recibos huérfanos; original permanece fail-closed.
 - [ ] Gate 1: reconciliación de efectos y reanudación controlada del diario; gate 2: rotación/sellado; gate 4: recuperación OUTCOME_UNKNOWN y verificación externa.
 - [ ] No permitir escritor concurrente, socket ejecutor, servicio o despliegue hasta pruebas y aprobación independiente.
+
+### Corrección P1 PR #33 — publicación durable no-replace
+
+- [x] Crear archivos temporales privados, completar escritura y fsync antes de publicar con hard link atómico que no pisa rutas finales.
+- [x] Sincronizar directorio tras publicación y tras retirar temporal; admitir temporales huérfanos sin alterar la evidencia.
+- [x] Tests: bin/json definitivos de 0 bytes o parciales se rechazan, temporal huérfano no bloquea reintento, ruta final contiene archivos íntegros.
+- [ ] Revisión independiente de Claude sobre SHA nuevo antes del merge; sigue prohibido instalar o habilitar ejecutor.
