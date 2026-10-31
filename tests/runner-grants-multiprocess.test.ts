@@ -81,7 +81,8 @@ test('two OS processes concurrently initialize a new WAL and reserve the same on
   }
 });
 test('two OS processes concurrently initialize panter.sqlite and retain both commits', async()=>{
-  for(let iteration=0;iteration<3;iteration++){
+  // Repeated first-open races caught a SQLITE_BUSY failure in GitHub CI on 2026-10-31.
+  for(let iteration=0;iteration<15;iteration++){
     const dir=mkdtempSync(join(tmpdir(),'panter-two-process-'));
     try {
       const results=await racePair([{kind:'sqlite',dir},{kind:'sqlite',dir}]);

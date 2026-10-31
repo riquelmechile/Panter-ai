@@ -14,6 +14,23 @@ type LedgerRow = { payload: string; revision: number };
 type SqliteRow = { user_version: number };
 const digest = (s: string) => createHash('sha256').update(s).digest('hex');
 
+/**
+ * A competing process may receive SQLITE_BUSY while the very first opener
+ * transitions an empty DB into WAL mode. Retry only idempotent *startup*
+ * operations; never re-run a user mutation after an ambiguous commit.
+ */
+function retrySqliteStartup(work:()=>void):void {
+  const gate=new Int32Array(new SharedArrayBuffer(4));
+  for(let attempt=0;attempt<20;attempt++){
+    try {work();return;}
+    catch(error) {
+      const message=error instanceof Error?error.message:String(error);
+      if(!/database is locked|database is busy|SQLITE_BUSY/i.test(message)||attempt===19)throw error;
+      Atomics.wait(gate,0,0,20+attempt*15);
+    }
+  }
+}
+
 export class SqliteLedger {
   private readonly db: DatabaseSync;
   readonly filename: string;
@@ -25,9 +42,12 @@ export class SqliteLedger {
     chmodSync(this.filename, 0o600);
     // Initial WAL initialization may contend with another opener.
     this.db.exec('PRAGMA busy_timeout=10000');
-    this.db.exec('PRAGMA journal_mode=WAL');
+    retrySqliteStartup(()=>{
+      const mode=this.db.prepare('PRAGMA journal_mode=WAL').get() as {journal_mode:string};
+      if(mode.journal_mode.toLowerCase()!=='wal')throw new Error('SQLite WAL could not be enabled');
+    });
     this.db.exec('PRAGMA synchronous=FULL');
-    this.migrate(path);
+    retrySqliteStartup(()=>this.migrate(path));
   }
   static open(dir: string): SqliteLedger { return new SqliteLedger(dir); }
   private migrate(dir: string): void {
