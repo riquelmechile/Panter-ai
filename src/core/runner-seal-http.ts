@@ -89,7 +89,7 @@ export class AsyncSegmentedRunnerAudit {
       const latest=await remote.latest();
       if(latest!==null){
         const end=latest.claim?.segment;
-        if(!Number.isSafeInteger(end)||end<1||end>10_000)throw new SegmentIntegrityError();
+        if(typeof end!=='number'||!Number.isSafeInteger(end)||end<1||end>10_000)throw new SegmentIntegrityError();
         for(let i=1;i<=end;i++){
           const receipt=await remote.get(i);
           if(!receipt)throw new SegmentIntegrityError();
