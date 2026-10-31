@@ -60,7 +60,7 @@ test('two OS processes concurrently initialize a new WAL and reserve the same on
     leaseGeneration:1,repository:'riquelmechile/Panter-ai',
     candidateSha:sha,operation:'workspace.prepare',effectClass:'WORKTREE_WRITE',
   };
-  for(let iteration=0;iteration<4;iteration++){
+  for(let iteration=0;iteration<15;iteration++){
     const dir=mkdtempSync(join(tmpdir(),'runner-two-process-'));
     try {
       const claims:RunnerGrant={

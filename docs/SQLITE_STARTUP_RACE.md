@@ -15,3 +15,7 @@ La prueba del ledger principal se amplió a **15 carreras de dos procesos reales
 ## Activación
 
 Es un cambio de inicialización, no despliegue de runner ni autorización para ejecutar tareas. Se requiere CI verde en el SHA, revisión independiente de Claude, pruebas en Oracle ARM64 y gate de rollback antes de aplicar a servicio actual. El PR #37 de conciliación de efectos depende de un entorno SQLite robusto y su CI anterior demostró esta deuda preexistente.
+
+## Revisión #41: grants y presupuesto de startup
+
+El helper compartido `src/core/sqlite-startup.ts` controla la inicialización WAL y la creación transaccional e idempotente de tablas de `SqliteLedger` y `RunnerGrantLedger`. Identifica `SQLITE_BUSY` por `errcode` numérico (también extendido, byte bajo = 5), no por regex. Un solo deadline de 15 s abarca WAL + esquema; `busy_timeout=1000` durante bootstrap y `10000` después. Nunca se repiten reservas ni mutaciones de negocio. Ambos tests multiproceso ejecutan 15 carreras reales. El futuro `RunnerOutcomeLedger` de #37 también debe consumir este helper.
