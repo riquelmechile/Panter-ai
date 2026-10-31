@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AuditIntegrityError, RunnerAuditJournal, type RunnerAuditEvent } from '../src/core/runner-journal.js';
+import { AuditIntegrityError, RunnerAuditJournal, quarantineRunnerAuditTail, type RunnerAuditEvent } from '../src/core/runner-journal.js';
 
 const digest='c'.repeat(64);
 const event=():RunnerAuditEvent=>({
@@ -51,5 +51,54 @@ test('symlink journal path is denied',()=>{
     writeFileSync(join(dir,'target'),'{}',{mode:0o600});
     symlinkSync(join(dir,'target'),join(dir,'runner-audit.jsonl'));
     assert.throws(()=>new RunnerAuditJournal(dir),AuditIntegrityError);
+  }finally{rmSync(dir,{recursive:true,force:true})}
+});
+
+test('crash-truncated final record is quarantined byte-for-byte; active journal stays locked',()=>{
+  const dir=mkdtempSync(join(tmpdir(),'runner-journal-crash-'));
+  try {
+    const j=new RunnerAuditJournal(dir);
+    const prior=j.append(event());
+    const fragment=Buffer.from('{"seq":2,"requestId":"INCOMPLETE_SECRET_CANARY');
+    appendFileSync(j.path,fragment);
+    assert.throws(()=>new RunnerAuditJournal(dir),AuditIntegrityError);
+    const before=readFileSync(j.path);
+    const evidence=quarantineRunnerAuditTail(dir);
+    assert.equal(evidence.status,'OUTCOME_UNKNOWN');
+    assert.equal(evidence.prefixEntries,1);
+    assert.equal(evidence.prefixLastHash,prior.hash);
+    assert.equal(evidence.tailBytes,fragment.length);
+    assert.deepEqual(readFileSync(evidence.quarantinedFile),fragment);
+    assert.deepEqual(readFileSync(j.path),before);
+    assert.equal(statSync(evidence.quarantinedFile).mode&0o777,0o400);
+    assert.equal(statSync(evidence.receiptFile).mode&0o777,0o400);
+    const receipt=JSON.parse(readFileSync(evidence.receiptFile,'utf8'));
+    assert.equal(receipt.originalSha256,evidence.originalSha256);
+    assert.ok(!JSON.stringify(receipt).includes('INCOMPLETE_SECRET_CANARY'));
+    assert.throws(()=>new RunnerAuditJournal(dir),AuditIntegrityError);
+    assert.throws(()=>j.append(event()),AuditIntegrityError);
+    // Exact evidence names prevent repeated silent quarantines.
+    assert.throws(()=>quarantineRunnerAuditTail(dir),AuditIntegrityError);
+  }finally{rmSync(dir,{recursive:true,force:true})}
+});
+test('internally tampered entries are not quarantinable as a crash tail',()=>{
+  const dir=mkdtempSync(join(tmpdir(),'runner-journal-interior-'));
+  try{
+    const j=new RunnerAuditJournal(dir);
+    j.append(event());
+    const original=readFileSync(j.path,'utf8');
+    writeFileSync(j.path,original.replace('"RESERVED"','"SUCCEEDED"')+'{"partial":true');
+    assert.throws(()=>quarantineRunnerAuditTail(dir),AuditIntegrityError);
+    assert.equal(readFileSync(j.path,'utf8').includes('"SUCCEEDED"'),true);
+  }finally{rmSync(dir,{recursive:true,force:true})}
+});
+test('clean journal and unrelated malformed complete record are not crash-tail candidates',()=>{
+  const dir=mkdtempSync(join(tmpdir(),'runner-journal-clean-'));
+  try{
+    const j=new RunnerAuditJournal(dir);
+    j.append(event());
+    assert.throws(()=>quarantineRunnerAuditTail(dir),AuditIntegrityError);
+    appendFileSync(j.path,'{"malformed":true}\n');
+    assert.throws(()=>quarantineRunnerAuditTail(dir),AuditIntegrityError);
   }finally{rmSync(dir,{recursive:true,force:true})}
 });
