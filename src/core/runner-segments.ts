@@ -170,8 +170,9 @@ export class SegmentedRunnerAudit {
   }
   private recover():void{
     const files=readdirSync(this.root);
-    if(files.some(f=>!/^segment-\d{8}\.jsonl$/.test(f)))throw new SegmentIntegrityError();
-    const indices=files.map(f=>Number(f.slice(8,16))).sort((a,b)=>a-b);
+    if(files.some(f=>!/^segment-\d{8}\.jsonl$/.test(f)&&f!=='seal-checkpoint.json'))throw new SegmentIntegrityError();
+    const indices=files.filter(f=>/^segment-\d{8}\.jsonl$/.test(f))
+      .map(f=>Number(f.slice(8,16))).sort((a,b)=>a-b);
     if(indices.some((z,i)=>z!==i+1))throw new SegmentIntegrityError();
     const latest=this.authority.latest();
     if(latest!==null&&(!keys(latest,['keyId','claim','signature'])||!validClaim(latest.claim)))throw new SegmentIntegrityError();

@@ -37,6 +37,16 @@ function verifyStagedPrefix(folder:string,rows:RunnerAuditEvent[],expected:numbe
   const names=readdirSync(folder).sort();
   let index=0;
   for(const name of names){
+    if(name==='seal-checkpoint.json'){
+      // Only the one recognized sidecar is allowed. open() already verified
+      // its signed receipt chain against the latest remote seal; this check
+      // additionally rejects symlinks, foreign owners and unsafe permissions.
+      const sidecar=lstatSync(join(folder,name));
+      if(!sidecar.isFile()||sidecar.isSymbolicLink()||
+        sidecar.uid!==process.getuid?.()||(sidecar.mode&0o077)!==0)
+        throw new SegmentIntegrityError();
+      continue;
+    }
     if(!/^segment-\d{8}\.jsonl$/.test(name))throw new SegmentIntegrityError();
     const file=join(folder,name);
     const fd=openSync(file,constants.O_RDONLY|NOFOLLOW|constants.O_NONBLOCK);

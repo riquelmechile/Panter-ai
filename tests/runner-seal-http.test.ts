@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {createHash,generateKeyPairSync,randomUUID,sign} from 'node:crypto';
-import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
+import {appendFileSync,mkdtempSync,readFileSync,rmSync,unlinkSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {AsyncSegmentedRunnerAudit,HttpSegmentSealAuthority} from '../src/core/runner-seal-http.js';
@@ -157,5 +157,34 @@ test('signed but wrong segment claim cannot poison cache; valid retry seals norm
     assert.equal(active.state().activeSegment,1);
     assert.equal(active.state().sealed,0);
     assert.equal((await active.sealCurrent()).sealed,1);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test('verified local checkpoint replaces repeated remote GET scan, and tampering fails closed',async()=>{
+  const root=mkdtempSync(join(tmpdir(),'runner-http-checkpoint-'));
+  try{
+    const {remote,bucket}=service();
+    const first=await AsyncSegmentedRunnerAudit.open(root,remote,pins,650);
+    for(let i=0;i<12;i++)await first.append(event());
+    await first.sealCurrent();
+    const checkpoint=join(root,'seal-checkpoint.json');
+    assert.ok(JSON.parse(readFileSync(checkpoint,'utf8')).receipts.length>2);
+    let reads=0;
+    const counted={latest:()=>remote.latest(),get:(n:number)=>{reads++;return remote.get(n);},
+      seal:(claim:any,payload:Buffer)=>remote.seal(claim,payload)};
+    const second=await AsyncSegmentedRunnerAudit.open(root,counted,pins,650);
+    assert.equal(reads,0,'cached receipts must be independently reverified against signed latest');
+    assert.equal(second.state().entries,12);
+    const bytes=readFileSync(checkpoint);
+    const corrupted=Buffer.from(bytes.toString().replace('"keyId":"test-external"','"keyId":"evil"'));
+    assert.notDeepEqual(corrupted,bytes);
+    unlinkSync(checkpoint);
+    appendFileSync(checkpoint,corrupted,{mode:0o600});
+    await assert.rejects(()=>AsyncSegmentedRunnerAudit.open(root,remote,pins,650),SegmentIntegrityError);
+    unlinkSync(checkpoint);
+    reads=0;
+    const recovered=await AsyncSegmentedRunnerAudit.open(root,counted,pins,650);
+    assert.ok(reads>0,'missing checkpoint should refetch history');
+    assert.equal(recovered.state().entries,12);
   }finally{rmSync(root,{recursive:true,force:true});}
 });
