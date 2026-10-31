@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {generateKeyPairSync,randomUUID,sign} from 'node:crypto';
-import {appendFileSync,mkdtempSync,readFileSync,rmSync} from 'node:fs';
+import {createHash,generateKeyPairSync,randomUUID,sign} from 'node:crypto';
+import {appendFileSync,existsSync,mkdtempSync,readFileSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {RunnerAuditJournal,AuditIntegrityError} from '../src/core/runner-journal.js';
@@ -46,7 +46,7 @@ test('offline legacy snapshot is copied to sealed segments, original unchanged a
     assert.equal(report.segmentEntries,7);
     assert.ok(report.sealedSegments>=2);
     assert.deepEqual(readFileSync(old.path),original);
-    assert.equal(JSON.parse(readFileSync(join(target,'cutover-staging.json'),'utf8')).externalSealDigest,
+    assert.equal(JSON.parse(readFileSync(join(target,'cutover-staging-'+report.legacySha256+'.json'),'utf8')).externalSealDigest,
       report.externalSealDigest);
     assert.deepEqual(await stageLegacyAuditCutover(source,target,remote,pins,650),report);
     assert.deepEqual(readFileSync(old.path),original);
@@ -98,5 +98,24 @@ test('forged final latest seal refuses publishing cutover staging manifest',asyn
     };
     await assert.rejects(()=>stageLegacyAuditCutover(source,target,remote,pins,650),SegmentIntegrityError);
     assert.equal(remote.seals.size,1);
+  }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test('manifest filenames are versioned by immutable legacy SHA and retain earlier snapshot evidence',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'runner-cutover-versioned-'));
+  try{
+    const source=join(dir,'legacy'),target=join(dir,'staging'),remote=new FakeRemote();
+    const old=new RunnerAuditJournal(source);old.append(event());
+    const one=await stageLegacyAuditCutover(source,target,remote,pins,650);
+    const firstPath=join(target,'cutover-staging-'+one.legacySha256+'.json');
+    const firstBytes=readFileSync(firstPath);
+    assert.equal(one.legacySha256,createHash('sha256').update(readFileSync(old.path)).digest('hex'));
+    old.append(event());
+    const two=await stageLegacyAuditCutover(source,target,remote,pins,650);
+    assert.notEqual(two.legacySha256,one.legacySha256);
+    assert.equal(two.legacyEntries,2);
+    assert.ok(existsSync(join(target,'cutover-staging-'+two.legacySha256+'.json')));
+    assert.deepEqual(readFileSync(firstPath),firstBytes);
+    assert.deepEqual(await stageLegacyAuditCutover(source,target,remote,pins,650),two);
   }finally{rmSync(dir,{recursive:true,force:true});}
 });
