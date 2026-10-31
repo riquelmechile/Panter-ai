@@ -67,7 +67,9 @@ function verifyStagedPrefix(folder:string,rows:RunnerAuditEvent[],expected:numbe
   if(index!==expected)throw new SegmentIntegrityError();
 }
 function publishManifest(root:string,data:Buffer):void{
-  const path=join(root,'cutover-staging.json');
+  const manifest=JSON.parse(data.toString('utf8')) as RunnerAuditStagingReceipt;
+  if(!/^[0-9a-f]{64}$/.test(manifest.legacySha256))throw new SegmentIntegrityError();
+  const path=join(root,'cutover-staging-'+manifest.legacySha256+'.json');
   function validate():boolean{
     if(!existsSync(path))return false;
     let s:ReturnType<typeof lstatSync>;
@@ -139,6 +141,8 @@ export async function stageLegacyAuditCutover(
     legacyLastHash:before.lastHash,segmentEntries:state.entries,sealedSegments:state.sealed,
     lastHash:state.lastHash,externalSealDigest:segmentSealDigest(verifiedLatest),segmentDirectory:'segments',
   };
+  // The evidence name is content-addressed by the verified original snapshot.
+  // Never replace an earlier snapshot manifest after legacy bytes have changed.
   publishManifest(root,Buffer.from(JSON.stringify(receipt)+'\n'));
   // Last verification closes the obvious race before returning (not a writer lock).
   if(snapshotRunnerAudit(legacyDir).sha256!==before.sha256)throw new AuditIntegrityError();
