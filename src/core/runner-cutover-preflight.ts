@@ -133,6 +133,21 @@ export async function inspectLegacyCutoverEvidence(
     const rows=outcome.listAllReadonly();
     if(rows.some(r=>!['SUCCEEDED','FAILED','NO_EFFECT'].includes(r.state)))
       throw new SegmentIntegrityError();
+    // No event may disappear between journals. Each grant reservation must
+    // have independently reconciled, terminal outcome evidence. A missing row
+    // is UNKNOWN, not proof of NO_EFFECT. Quarantined rows always block.
+    const terminal=new Map(rows.map(row=>[row.operationId,row]));
+    const reserved=new Set<string>();
+    for(const row of before.rows){
+      if(row.status==='QUARANTINED')throw new SegmentIntegrityError();
+      if(row.status==='RESERVED'){
+        if(reserved.has(row.requestId)||!terminal.has(row.requestId))
+          throw new SegmentIntegrityError();
+        reserved.add(row.requestId);
+      }else if(row.status!=='DENIED'&&!terminal.has(row.requestId)){
+        throw new SegmentIntegrityError();
+      }
+    }
     count=rows.length;
   }finally{outcome.close();}
   const verified=await inspectAllSegments(join(staging,'segments'),remote,pinned,manifest.sealedSegments);

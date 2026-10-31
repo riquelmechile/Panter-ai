@@ -5,7 +5,7 @@ import {appendFileSync,chmodSync,mkdtempSync,readFileSync,rmSync,writeFileSync} 
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {RunnerAuditJournal} from '../src/core/runner-journal.js';
-import {RunnerOutcomeLedger,type OutcomeIntent,OutcomeRejected} from '../src/core/runner-outcomes.js';
+import {RunnerOutcomeLedger,outcomeClaimPayload,type OutcomeIntent,type OutcomeClaim} from '../src/core/runner-outcomes.js';
 import {stageLegacyAuditCutover} from '../src/core/runner-audit-cutover.js';
 import {inspectLegacyCutoverEvidence} from '../src/core/runner-cutover-preflight.js';
 import {SegmentIntegrityError,segmentSealPayload,segmentSealDigest,
@@ -13,6 +13,8 @@ import {SegmentIntegrityError,segmentSealPayload,segmentSealDigest,
 import type {AsyncSealAuthority} from '../src/core/runner-seal-http.js';
 
 const pair=generateKeyPairSync('ed25519');
+const reconciliation=generateKeyPairSync('ed25519');
+const outcomeKeys=new Map([['independent',reconciliation.publicKey]]);
 const pinned=new Map([['offline-test',pair.publicKey]]);
 const event=()=>({requestId:randomUUID(),operation:'git.inspect' as const,
   grantDigest:'a'.repeat(64),status:'RESERVED' as const,outputDigest:'b'.repeat(64)});
@@ -38,9 +40,25 @@ class FakeRemote implements AsyncSealAuthority{
 async function fixture(){
   const tmp=mkdtempSync(join(tmpdir(),'runner-cutover-readonly-'));
   const root=join(tmp,'runner'),legacy=join(tmp,'legacy'),staging=join(tmp,'staging');
-  const ledger=new RunnerOutcomeLedger(join(root,'outcomes'));ledger.close();
+  let ledger=new RunnerOutcomeLedger(join(root,'outcomes'));
   const old=new RunnerAuditJournal(legacy);
-  old.append(event());old.append(event());
+  const events=[event(),event()];
+  for(const e of events){
+    old.append(e);
+    ledger.prepare({...intent(),operationId:e.requestId});
+  }
+  // The first writer is fenced; the read-only preflight must not promote epochs.
+  ledger.close();
+  ledger=new RunnerOutcomeLedger(join(root,'outcomes'));
+  for(const e of events){
+    const snapshot=ledger.get(e.requestId)!;
+    const claim:OutcomeClaim={domain:'panter.outcome-reconciliation/v1',
+      operationId:e.requestId,intentDigest:snapshot.intentDigest,leaseGeneration:1,
+      outcome:'NO_EFFECT',evidenceDigest:'d'.repeat(64),observedAt:Date.now()};
+    const signature=sign(null,outcomeClaimPayload(claim),reconciliation.privateKey).toString('base64url');
+    assert.equal(ledger.reconcile({keyId:'independent',claim,signature},outcomeKeys).state,'NO_EFFECT');
+  }
+  ledger.close();
   const remote=new FakeRemote();
   const receipt=await stageLegacyAuditCutover(legacy,staging,remote,pinned,650);
   return {tmp,root,legacy,staging,old,remote,receipt};
@@ -53,7 +71,7 @@ test('preflight reads all sealed evidence and empty outcomes without mutating so
     assert.equal(result.status,'EVIDENCE_CONSISTENT_NOT_AUTHORIZED');
     assert.equal(result.permitsCutover,false);
     assert.equal(result.requiresWriterFreeze,true);
-    assert.equal(result.terminalOutcomes,0);
+    assert.equal(result.terminalOutcomes,2);
     assert.equal(result.entries,2);
     assert.equal(result.legacySha256,x.receipt.legacySha256);
     assert.deepEqual(readFileSync(x.old.path),original);
@@ -99,5 +117,15 @@ test('unknown outcomes storage and unsealed active data never allow preflight',a
     await assert.rejects(()=>inspectLegacyCutoverEvidence(x.root,x.legacy,x.staging,x.remote,pinned),SegmentIntegrityError);
     rmSync(join(x.root,'outcomes'),{recursive:true,force:true});
     await assert.rejects(()=>inspectLegacyCutoverEvidence(x.root,x.legacy,x.staging,x.remote,pinned));
+  }finally{rmSync(x.tmp,{recursive:true,force:true});}
+});
+
+// Even if SQLite is empty, a RESERVED audit event must not be treated as no effect.
+test('a reserved journal event without matching terminal outcome blocks preflight',async()=>{
+  const x=await fixture();
+  try{
+    const old=new RunnerAuditJournal(x.legacy);
+    old.append(event());
+    await assert.rejects(()=>inspectLegacyCutoverEvidence(x.root,x.legacy,x.staging,x.remote,pinned),SegmentIntegrityError);
   }finally{rmSync(x.tmp,{recursive:true,force:true});}
 });
