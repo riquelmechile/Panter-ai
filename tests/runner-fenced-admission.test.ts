@@ -5,7 +5,7 @@ import {createHash,generateKeyPairSync,randomUUID,sign} from 'node:crypto';
 import {mkdirSync,mkdtempSync,rmSync,symlinkSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
-import {RunnerWriterFence,WriterFenced} from '../src/core/runner-writer-fence.js';
+import {RunnerWriterFence,WriterFenced,writerDeathPayload,type SignedWriterDeath,type WriterWitnessSnapshot} from '../src/core/runner-writer-fence.js';
 import {RunnerIntegratedAdmission} from '../src/core/runner-integrated-admission.js';
 import {RunnerGrantLedger,grantPayload,pinnedRunnerKeys,type RunnerGrant,type SignedRunnerGrant,type RunnerGrantContext} from '../src/core/runner-grants.js';
 import {RunnerOutcomeLedger,type OutcomeIntent} from '../src/core/runner-outcomes.js';
@@ -60,11 +60,7 @@ test('two independent OS writers race; exactly one claims, no silent reclaim aft
 test('single writer prepares grant, durable intent and off-host signed audit; no effect',async()=>{
   const root=mkdtempSync(join(tmpdir(),'runner-integrated-admission-'));
   try{
-    const fence=RunnerWriterFence.claim(join(root,'fence'));
-    const grants=new RunnerGrantLedger(join(root,'grants'));
-    const outcomes=new RunnerOutcomeLedger(join(root,'outcomes'));
     const remote=new Remote();
-    const journal=await AsyncSegmentedRunnerAudit.open(join(root,'segments'),remote,sealKeys,650);
     const signer=generateKeyPairSync('ed25519');
     const keys=pinnedRunnerKeys({owner:signer.publicKey.export({format:'pem',type:'spki'}).toString()});
     const now=Date.now();
@@ -87,15 +83,15 @@ test('single writer prepares grant, durable intent and off-host signed audit; no
       repository:ctx.repository,candidateSha:ctx.candidateSha,
       missionId:ctx.missionId,workId:ctx.workId,attemptId:ctx.attemptId,
       leaseGeneration:1,operation:'workspace.prepare',grantDigest};
-    const admission=new RunnerIntegratedAdmission(fence,grants,outcomes,journal);
+    const admission=await RunnerIntegratedAdmission.openAtRoot(root,remote,sealKeys,650);
     const result=await admission.prepareSignedIntent(grant,keys,ctx,intent,now);
     assert.equal(result.status,'INTENT_SEALED');
-    assert.equal(outcomes.get(intent.operationId)?.state,'INTENT');
+    assert.equal(admission.getOutcome(intent.operationId)?.state,'INTENT');
     assert.equal(result.sealed,1);
     assert.equal(remote.seals.size,1);
     await assert.rejects(()=>admission.prepareSignedIntent(grant,keys,ctx,intent,now));
-    assert.throws(()=>RunnerWriterFence.claim(join(root,'fence')),WriterFenced);
-    outcomes.close();grants.close();fence.close();
+    assert.throws(()=>RunnerWriterFence.claim(root),WriterFenced);
+    admission.close();
   }finally{rmSync(root,{recursive:true,force:true});}
 });
 
@@ -106,4 +102,43 @@ test('writer fence rejects a symlinked root before SQLite access',()=>{
     mkdirSync(real,{mode:0o700});symlinkSync(real,alias);
     assert.throws(()=>RunnerWriterFence.claim(alias),WriterFenced);
   }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test('signed death proof cannot reclaim live owner, wrong-root, wrong-owner or stale epoch',()=>{
+  const root=mkdtempSync(join(tmpdir(),'runner-fence-proof-live-'));
+  const other=mkdtempSync(join(tmpdir(),'runner-fence-proof-other-'));
+  const key=generateKeyPairSync('ed25519'),pins=new Map([['witness',key.publicKey]]);
+  try{
+    const owner=RunnerWriterFence.claim(root),snapshot=owner.snapshot();
+    const claim={domain:'panter.runner-writer-death/v1' as const,
+      ...snapshot,observedAt:Date.now()};
+    const signed:SignedWriterDeath={keyId:'witness',claim,
+      signature:sign(null,writerDeathPayload(claim),key.privateKey).toString('base64url')};
+    assert.throws(()=>RunnerWriterFence.reclaim(root,signed,pins),WriterFenced);
+    assert.throws(()=>RunnerWriterFence.reclaim(other,signed,pins),WriterFenced);
+    owner.assertCurrent();
+    owner.close();
+  }finally{rmSync(root,{recursive:true,force:true});rmSync(other,{recursive:true,force:true});}
+});
+test('dead OS process can be reclaimed only with fresh independent signature; old epoch is fenced',async()=>{
+  const root=mkdtempSync(join(tmpdir(),'runner-fence-dead-'));
+  const witness=generateKeyPairSync('ed25519');
+  const pinned=new Map([['external-witness',witness.publicKey]]);
+  try{
+    const childProcess=await child(root);
+    await childProcess.ready;
+    childProcess.go();
+    assert.equal(await childProcess.done,'CLAIMED'); // process fully exited
+    const prior=RunnerWriterFence.snapshot(root);
+    const claim={domain:'panter.runner-writer-death/v1' as const,
+      ...prior,observedAt:Date.now()};
+    const signed:SignedWriterDeath={keyId:'external-witness',claim,
+      signature:sign(null,writerDeathPayload(claim),witness.privateKey).toString('base64url')};
+    const newOwner=RunnerWriterFence.reclaim(root,signed,pinned);
+    assert.equal(newOwner.generation,2);
+    newOwner.assertCurrent();
+    assert.throws(()=>RunnerWriterFence.reclaim(root,signed,pinned),WriterFenced);
+    assert.throws(()=>RunnerWriterFence.claim(root),WriterFenced);
+    newOwner.close();
+  }finally{rmSync(root,{recursive:true,force:true});}
 });

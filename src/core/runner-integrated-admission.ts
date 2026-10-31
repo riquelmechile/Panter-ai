@@ -4,20 +4,45 @@
  * durable SQLite writer fence. Any crash is fail-closed; no automatic replay.
  */
 import {createHash,type KeyObject} from 'node:crypto';
+import {join,resolve} from 'node:path';
 import {grantPayload,verifyRunnerGrant,type RunnerGrantContext,
   type SignedRunnerGrant,RunnerGrantLedger} from './runner-grants.js';
 import {RunnerOutcomeLedger,type OutcomeIntent} from './runner-outcomes.js';
-import {AsyncSegmentedRunnerAudit} from './runner-seal-http.js';
+import {AsyncSegmentedRunnerAudit,type AsyncSealAuthority} from './runner-seal-http.js';
 import {RunnerWriterFence,WriterFenced} from './runner-writer-fence.js';
+import type {SignedSegmentSeal} from './runner-segments.js';
 
 const ZERO='0'.repeat(64);
 export class RunnerIntegratedAdmission{
-  constructor(
+  private constructor(
     private readonly fence:RunnerWriterFence,
     private readonly grants:RunnerGrantLedger,
     private readonly outcomes:RunnerOutcomeLedger,
     private readonly audit:AsyncSegmentedRunnerAudit,
   ){}
+  /**
+   * All components are rooted under ONE private directory. No API admits
+   * independently chosen fence/grant/outcome paths.
+   */
+  static async openAtRoot(root:string,remote:AsyncSealAuthority,
+    pinned:ReadonlyMap<string,KeyObject>,segmentLimit=1024*1024):Promise<RunnerIntegratedAdmission>{
+    const dir=resolve(root);
+    const fence=RunnerWriterFence.claim(dir);
+    let grants:RunnerGrantLedger|undefined,outcomes:RunnerOutcomeLedger|undefined;
+    try{
+      grants=new RunnerGrantLedger(join(dir,'grants'));
+      outcomes=new RunnerOutcomeLedger(join(dir,'outcomes'));
+      const audit=await AsyncSegmentedRunnerAudit.open(join(dir,'segments'),remote,pinned,segmentLimit);
+      fence.assertCurrent();
+      return new RunnerIntegratedAdmission(fence,grants,outcomes,audit);
+    }catch(e){
+      outcomes?.close();grants?.close();fence.close();
+      // The durable claim remains; no attempt to recover automatically.
+      throw e;
+    }
+  }
+  getOutcome(id:string){return this.outcomes.get(id);}
+  close():void{this.outcomes.close();this.grants.close();this.fence.close();}
   /** Fail-closed pre-effect admission. NEVER execute or issue an effect permit. */
   async prepareSignedIntent(
     grant:SignedRunnerGrant,publicKeys:ReadonlyMap<string,KeyObject>,
