@@ -131,10 +131,12 @@ export class EmbeddedOAuth {
     return next;
   }
   protectedResourceMetadata() {
-    return { resource: this.resource, authorization_servers: [this.issuer], scopes_supported: [...ALLOWED_SCOPES] };
+    return { resource: this.resource, authorization_servers: [this.issuer], bearer_methods_supported: ['header'], scopes_supported: [...ALLOWED_SCOPES] };
   }
   authorizationServerMetadata() {
-    return { issuer: this.issuer, authorization_endpoint: this.issuer + '/authorize', token_endpoint: this.issuer + '/token', registration_endpoint: this.issuer + '/register', revocation_endpoint: this.issuer + '/revoke', response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], token_endpoint_auth_methods_supported: ['none'], code_challenge_methods_supported: ['S256'], scopes_supported: [...ALLOWED_SCOPES] };
+    // RFC 9207: both consent outcomes return the exact `iss` in the redirect.
+    // ChatGPT needs this advertised to bind its stable OAuth callback.
+    return { issuer: this.issuer, authorization_response_iss_parameter_supported: true, authorization_endpoint: this.issuer + '/authorize', token_endpoint: this.issuer + '/token', registration_endpoint: this.issuer + '/register', revocation_endpoint: this.issuer + '/revoke', response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], token_endpoint_auth_methods_supported: ['none'], code_challenge_methods_supported: ['S256'], scopes_supported: [...ALLOWED_SCOPES] };
   }
   challenge() {
     return `Bearer realm="panter-ai", resource_metadata="${this.issuer}/.well-known/oauth-protected-resource", scope="mcp"`;
@@ -339,10 +341,14 @@ export class EmbeddedOAuth {
         const { pending, client } = await this.consent(id);
         const csrf = cookie(req, this.consentCookie);
         check(csrf.length > 30 && eq(hash(csrf), pending.csrfDigest), 'Invalid consent session');
+        // A registration is not an authorization to redirect to arbitrary origins.
+        // Use ONLY the pending request's exact, previously approved callback origin.
+        check(this.callbacks.has(pending.redirectUri) && client.redirectUris.includes(pending.redirectUri), 'Unapproved consent redirect');
+        const callbackOrigin = new URL(pending.redirectUri).origin;
         const options = hosts.map(h => `<option value="${h}">${h.toUpperCase()}</option>`).join('');
         const ageMinutes=Math.max(0,Math.floor((ts()-client.createdAt)/60));
         const html = `<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Panter-ai · Autorizar conexión</title><style>body{font:16px system-ui;max-width:460px;margin:8vh auto;padding:20px;background:#111827;color:white}main{background:#1f2937;border-radius:12px;padding:24px}input,select,button{display:block;width:100%;padding:10px;margin:12px 0;box-sizing:border-box}.warning{border:1px solid #f4b400;padding:12px;color:#fff}</style><main><h2>Autorizar conexión a Panter-ai</h2><p class="warning"><strong>Cliente NO VERIFICADO.</strong> El nombre y callback pueden ser declarados por otra persona. Una URL de redirección conocida no demuestra que sea tu sesión de ChatGPT o Claude. Confirma la solicitud desde la aplicación que tú abriste; si no la iniciaste, pulsa Denegar.</p><p>Nombre declarado (no verificado): ${escapeHtml(client.name)}</p><p>Identificador de registro: ${escapeHtml(client.id)}</p><p>Registrado hace aproximadamente ${ageMinutes} minutos</p><p>Destino de redirección: ${escapeHtml(pending.redirectUri)}</p><form method="post" action="/oauth/consent?sid=${encodeURIComponent(id)}"><input type="hidden" name="csrf" value="${escapeHtml(csrf)}"><label>Host autorizado<select name="host">${options}</select></label><label>Clave del operador<input name="password" type="password" required autocomplete="off"></label><button name="decision" value="allow">Autorizar</button><button name="decision" value="deny">Denegar</button></form></main></html>`;
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'" }); res.end(html);
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff', 'content-security-policy': `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${callbackOrigin}; base-uri 'none'; frame-ancestors 'none'` }); res.end(html);
       } catch { reply(res, 400, { error: 'invalid_request' }); }
       return true;
     }

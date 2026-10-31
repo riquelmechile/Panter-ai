@@ -12,6 +12,7 @@ const issuer = 'https://panter.example.org';
 const resource = issuer + '/mcp';
 const callbackA = 'https://chatgpt.com/connector_platform_oauth_redirect';
 const callbackB = 'https://claude.ai/api/mcp/auth_callback';
+const callbackC = 'https://claude.com/api/mcp/auth_callback';
 const secret = 'owner-approval-password-32chars-very-private';
 const verifier = 'a'.repeat(64);
 const challenge = createHash('sha256').update(verifier).digest('base64url');
@@ -19,7 +20,7 @@ async function harness(run: (h: { base: string; oauth: EmbeddedOAuth; dir: strin
   const dir = await mkdtemp(join(tmpdir(), 'panter-embedded-oauth-'));
   let server: Server | undefined;
   try {
-    const oauth = await EmbeddedOAuth.open({ dir, resource, redirectUris: [callbackA, callbackB], password: secret, clientIdentity });
+    const oauth = await EmbeddedOAuth.open({ dir, resource, redirectUris: [callbackA, callbackB, callbackC], password: secret, clientIdentity });
     server = createServer(async (req, res) => { if (!await oauth.handle(req, res)) { res.statusCode = 404; res.end(); } });
     await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve));
     const address = server.address(); assert.ok(address && typeof address !== 'string');
@@ -56,9 +57,33 @@ async function token(request: (p: string, init?: RequestInit) => Promise<Respons
 
 test('embedded OAuth discovery, DCR, PKCE, consent, token, restart and no code replay', () => harness(async ({ oauth, dir, request }) => {
   const discovery = await request('/.well-known/oauth-authorization-server');
-  assert.equal(discovery.status, 200); assert.equal((await discovery.json() as { issuer: string }).issuer, issuer);
-  const metadata = await request('/.well-known/oauth-protected-resource/mcp');
-  assert.deepEqual((await metadata.json() as { authorization_servers: string[] }).authorization_servers, [issuer]);
+  assert.equal(discovery.status, 200);
+  const asMetadata = await discovery.json() as {
+    issuer: string;
+    authorization_response_iss_parameter_supported?: boolean;
+    client_id_metadata_document_supported?: boolean;
+    registration_endpoint: string;
+    token_endpoint_auth_methods_supported: string[];
+    code_challenge_methods_supported: string[];
+  };
+  assert.equal(asMetadata.issuer, issuer);
+  assert.equal(asMetadata.authorization_response_iss_parameter_supported, true);
+  assert.equal('client_id_metadata_document_supported' in asMetadata, false, 'Do not advertise unsupported CIMD');
+  assert.equal(asMetadata.registration_endpoint, issuer + '/register');
+  assert.deepEqual(asMetadata.token_endpoint_auth_methods_supported, ['none']);
+  assert.ok(asMetadata.code_challenge_methods_supported.includes('S256'));
+  for (const path of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp']) {
+    const metadata = await request(path);
+    assert.equal(metadata.status, 200);
+    const prm = await metadata.json() as {
+      resource: string;
+      authorization_servers: string[];
+      bearer_methods_supported: string[];
+    };
+    assert.equal(prm.resource, resource);
+    assert.deepEqual(prm.authorization_servers, [asMetadata.issuer]);
+    assert.deepEqual(prm.bearer_methods_supported, ['header']);
+  }
   const clientId = await register(request);
   const { code } = await authorize(request, clientId, 'gpt-a');
   const response = await token(request, clientId, code);
@@ -66,9 +91,102 @@ test('embedded OAuth discovery, DCR, PKCE, consent, token, restart and no code r
   const issued = await response.json() as { access_token: string; refresh_token: string; scope: string };
   assert.equal(await oauth.authenticate('Bearer ' + issued.access_token), 'gpt-a');
   assert.ok(issued.scope.includes('panter:lead'));
-  const reopened = await EmbeddedOAuth.open({ dir, resource, redirectUris: [callbackA, callbackB], password: secret });
+  const reopened = await EmbeddedOAuth.open({ dir, resource, redirectUris: [callbackA, callbackB, callbackC], password: secret });
   assert.equal(await reopened.authenticate('Bearer ' + issued.access_token), 'gpt-a');
   assert.equal((await token(request, clientId, code)).status, 400);
+}));
+
+test('RFC 9207 issuer matches exact metadata on the denied ChatGPT callback', () => harness(async ({ request }) => {
+  const metadata = await (await request('/.well-known/oauth-authorization-server')).json() as {
+    issuer: string;
+    authorization_response_iss_parameter_supported?: boolean;
+  };
+  assert.equal(metadata.authorization_response_iss_parameter_supported, true);
+  const clientId = await register(request);
+  const q = new URLSearchParams({
+    client_id: clientId, redirect_uri: callbackA, response_type: 'code',
+    code_challenge: challenge, code_challenge_method: 'S256',
+    scope: 'mcp offline_access', resource, state: 'denial-state',
+  });
+  const start = await request('/authorize?' + q);
+  assert.equal(start.status, 302);
+  const cookie = start.headers.get('set-cookie')!.split(';')[0]!;
+  const location = start.headers.get('location')!;
+  const consent = await request(location, { headers: { cookie } });
+  assert.equal(consent.status, 200);
+  const csrf = /name="csrf" value="([^"]+)"/.exec(await consent.text())?.[1];
+  assert.ok(csrf);
+  const denied = await request(location, post(
+    { csrf, decision: 'deny', host: 'gpt-a' },
+    { cookie, origin: metadata.issuer }
+  ));
+  assert.equal(denied.status, 302);
+  const callback = new URL(denied.headers.get('location')!);
+  assert.equal(callback.origin + callback.pathname, callbackA);
+  assert.equal(callback.searchParams.get('error'), 'access_denied');
+  assert.equal(callback.searchParams.get('state'), 'denial-state');
+  assert.equal(callback.searchParams.get('iss'), metadata.issuer);
+  assert.equal(callback.searchParams.has('code'), false);
+}));
+
+test('consent CSP permits only the active exact callback origin, never wildcard or other client origins', () => harness(async ({ request }) => {
+  for (const callback of [callbackA, callbackB, callbackC]) {
+    const clientId = await register(request, callback);
+    const q = new URLSearchParams({
+      client_id: clientId, redirect_uri: callback, response_type: 'code',
+      code_challenge: challenge, code_challenge_method: 'S256',
+      scope: 'mcp offline_access', resource, state: 'csp-test-state',
+    });
+    const start = await request('/authorize?' + q);
+    assert.equal(start.status, 302);
+    const location = start.headers.get('location')!;
+    const cookie = start.headers.get('set-cookie')!.split(';')[0]!;
+    const consent = await request(location, { headers: { cookie } });
+    assert.equal(consent.status, 200);
+    const csp = consent.headers.get('content-security-policy') ?? '';
+    const expected = new URL(callback).origin;
+    assert.match(csp, /default-src 'none'/);
+    assert.match(csp, /frame-ancestors 'none'/);
+    assert.match(csp, /base-uri 'none'/);
+    assert.ok(csp.includes(`form-action 'self' ${expected};`), 'Form POST plus cross-origin callback must be allowed');
+    assert.ok(!csp.includes('*'), 'Wildcard CSP sources forbidden');
+    for (const other of [callbackA, callbackB, callbackC]) {
+      if (new URL(other).origin !== expected) assert.ok(!csp.includes(new URL(other).origin), 'Unrelated client callback origin cannot be allowed');
+    }
+    const html = await consent.text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(html)?.[1];
+    assert.ok(csrf);
+    const approved = await request(location, post(
+      { csrf, password: secret, host: callback === callbackA ? 'gpt-a' : 'claude', decision: 'allow' },
+      { origin: issuer, cookie },
+    ));
+    assert.equal(approved.status, 302);
+    const result = new URL(approved.headers.get('location')!);
+    assert.equal(result.origin + result.pathname, callback);
+    assert.equal(result.searchParams.get('iss'), issuer);
+    assert.ok(result.searchParams.get('code'));
+  }
+}));
+
+test('DCR allows both exact Claude callbacks but rejects lookalike URLs', () => harness(async ({ request }) => {
+  const accepted = await request('/register', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ redirect_uris: [callbackB, callbackC], token_endpoint_auth_method: 'none' }),
+  });
+  assert.equal(accepted.status, 201);
+  const client = await accepted.json() as { redirect_uris: string[] };
+  assert.deepEqual(client.redirect_uris, [callbackB, callbackC]);
+  for (const uri of [
+    'https://claude.com/api/mcp/auth_callback/extra',
+    'https://claude.ai.evil.example/api/mcp/auth_callback',
+    'http://claude.com/api/mcp/auth_callback',
+  ]) {
+    const rejected = await request('/register', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ redirect_uris: [uri], token_endpoint_auth_method: 'none' }),
+    });
+    assert.equal(rejected.status, 400);
+  }
 }));
 
 test('two independent ChatGPT apps bind to different authenticated actors', () => harness(async ({ oauth, request }) => {

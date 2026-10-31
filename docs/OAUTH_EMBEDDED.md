@@ -12,8 +12,10 @@ PANTER_ALLOWED_HOSTS=panter.example.org
 PANTER_ALLOWED_ORIGINS=https://chatgpt.com,https://claude.ai,https://claude.com,https://grok.com,https://gemini.google.com
 PANTER_DATA_DIR=/data
 PANTER_CONSENT_PASSWORD=<random secret with 32+ characters>
-PANTER_OAUTH_REDIRECT_URIS=https://chatgpt.com/connector_platform_oauth_redirect,https://claude.ai/api/mcp/auth_callback
+PANTER_OAUTH_REDIRECT_URIS=https://chatgpt.com/connector_platform_oauth_redirect,https://claude.ai/api/mcp/auth_callback,https://claude.com/api/mcp/auth_callback
 ```
+
+**Claude callback variants:** Anthropic currently identifies `https://claude.ai/api/mcp/auth_callback` as its main callback and documents `https://claude.com/api/mcp/auth_callback` for forward compatibility. Both must be configured as **exact** callback URLs in the real environment to work; no domain-wide redirects or wildcards. Panter's consent CSP allows only the origin of the active, DCR-allowlisted redirect URI; the form POST still targets the same-origin consent endpoint. A POST→302 callback navigation needs separate real-browser E2E verification; HTTP tests alone do not prove browser behavior.
 
 **Never commit actual values.** Add other redirect URLs *only after verifying the callback for the real host*. These example redirect URIs are not proof of current eligibility or compatibility of any plan. `/data` must be an owner-private, persistent volume. Use one Panter-ai instance/process; the ledger is an atomic JSON file rather than a multi-replica SQL database. Terminate HTTPS at your trusted proxy; never forward a public TLS-free consent endpoint. Do not expose the `dev-static` mode publicly.
 
