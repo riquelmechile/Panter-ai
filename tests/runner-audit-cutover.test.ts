@@ -77,3 +77,26 @@ test('legacy tail corruption refuses cutover and cannot be silently repaired',as
     assert.equal(remote.seals.size,0);
   }finally{rmSync(dir,{recursive:true,force:true});}
 });
+
+// The final remote receipt must be verified even if the initial anchor was sound.
+test('forged final latest seal refuses publishing cutover staging manifest',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'runner-cutover-forged-latest-'));
+  try{
+    const source=join(dir,'legacy'),target=join(dir,'staging'),remote=new FakeRemote();
+    const old=new RunnerAuditJournal(source);
+    old.append(event());
+    const latest=remote.latest.bind(remote);
+    let reads=0;
+    remote.latest=async()=>{
+      const receipt=await latest();
+      reads++;
+      if(reads>=2&&receipt){
+        const last=receipt.signature.slice(-1);
+        return {...receipt,signature:receipt.signature.slice(0,-1)+(last==='A'?'E':'A')};
+      }
+      return receipt;
+    };
+    await assert.rejects(()=>stageLegacyAuditCutover(source,target,remote,pins,650),SegmentIntegrityError);
+    assert.equal(remote.seals.size,1);
+  }finally{rmSync(dir,{recursive:true,force:true});}
+});

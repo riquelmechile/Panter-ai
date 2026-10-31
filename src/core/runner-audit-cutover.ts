@@ -5,13 +5,13 @@
  * independent writer-freeze barrier, process fencing, and recovery E2E.
  */
 import {createHash,randomBytes} from 'node:crypto';
-import {closeSync,constants,existsSync,fsyncSync,lstatSync,linkSync,mkdirSync,
+import {closeSync,constants,existsSync,fstatSync,fsyncSync,lstatSync,linkSync,mkdirSync,
   openSync,readFileSync,readdirSync,unlinkSync,writeSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import type {KeyObject} from 'node:crypto';
 import {snapshotRunnerAudit,AuditIntegrityError,type RunnerAuditEvent} from './runner-journal.js';
 import {AsyncSegmentedRunnerAudit,type AsyncSealAuthority} from './runner-seal-http.js';
-import {segmentSealDigest,SegmentIntegrityError,type SegmentedEvent} from './runner-segments.js';
+import {inspectSeal,segmentSealDigest,SegmentIntegrityError,type SegmentedEvent} from './runner-segments.js';
 
 const NOFOLLOW=constants.O_NOFOLLOW??0;
 export type RunnerAuditStagingReceipt={
@@ -38,7 +38,22 @@ function verifyStagedPrefix(folder:string,rows:RunnerAuditEvent[],expected:numbe
   let index=0;
   for(const name of names){
     if(!/^segment-\d{8}\.jsonl$/.test(name))throw new SegmentIntegrityError();
-    const raw=readFileSync(join(folder,name),'utf8');
+    const file=join(folder,name);
+    const fd=openSync(file,constants.O_RDONLY|NOFOLLOW|constants.O_NONBLOCK);
+    let raw:string;
+    try{
+      const before=fstatSync(fd);
+      if(!before.isFile()||before.uid!==process.getuid?.()||
+        (before.mode&0o077)!==0||before.size>2*1024*1024)
+        throw new SegmentIntegrityError();
+      const content=readFileSync(fd);
+      const after=fstatSync(fd);
+      if(content.length!==before.size||after.ino!==before.ino||
+        after.size!==before.size||after.mtimeMs!==before.mtimeMs)
+        throw new SegmentIntegrityError();
+      try{raw=new TextDecoder('utf-8',{fatal:true}).decode(content);}
+      catch{throw new SegmentIntegrityError();}
+    }finally{closeSync(fd);}
     if(raw.length&&!raw.endsWith('\n'))throw new SegmentIntegrityError();
     for(const line of raw.split('\n').filter(Boolean)){
       let parsed:unknown;
@@ -115,11 +130,14 @@ export async function stageLegacyAuditCutover(
   if(!latest||latest.claim.segment!==state.sealed||
      latest.claim.lastSequence!==state.entries||latest.claim.lastHash!==state.lastHash)
     throw new SegmentIntegrityError();
+  // The final receipt is a second remote read; verify it independently rather
+  // than trusting the claim fields or hashing unauthenticated signature text.
+  const verifiedLatest=inspectSeal(latest,pinned,latest.claim);
   const receipt:RunnerAuditStagingReceipt={
     domain:'panter.runner-audit-cutover-staging/v1',
     legacySha256:before.sha256,legacyBytes:before.bytes,legacyEntries:before.rows.length,
     legacyLastHash:before.lastHash,segmentEntries:state.entries,sealedSegments:state.sealed,
-    lastHash:state.lastHash,externalSealDigest:segmentSealDigest(latest),segmentDirectory:'segments',
+    lastHash:state.lastHash,externalSealDigest:segmentSealDigest(verifiedLatest),segmentDirectory:'segments',
   };
   publishManifest(root,Buffer.from(JSON.stringify(receipt)+'\n'));
   // Last verification closes the obvious race before returning (not a writer lock).
