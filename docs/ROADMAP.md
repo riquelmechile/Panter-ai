@@ -100,3 +100,13 @@ The checkboxes below are a **historical per-release backlog** and should not be 
 - [x] Sin la variable el comportamiento no cambia (test `owner-trust`). `requireLeader` (gpt-a) y la separación autor/revisor en GitHub no se relajan.
 - [x] Supuesto de seguridad: todas las cuentas conectadas pertenecen al mismo dueño. Si se usa, el registro de clientes (`/register`, `/authorize`, `/oauth/consent`) debe quedar cerrado en el borde (en producción: 403 en el túnel) y abrirse solo para reconectar.
 - [ ] Riesgo aceptado: un token robado de cualquiera de esos hosts tiene poder de operador hasta que se revoque su cliente. Mitigación: revocación por cliente, refresh rotativo con detección de reuso y quitar la variable para volver al modo restringido.
+
+## v0.16 SQLite WAL transaccional — fase 1 Xanxittoo → Panter
+
+- [x] Esquema SQLite versionado (`user_version=1`, `schema_migrations`) y WAL para `state`, `agents`, `mesh`, `harness` y `oauth`; importación transaccional de los JSON, preservando las conexiones OAuth sin volver a registrar los clientes.
+- [x] Lecturas y escrituras desde SQLite, `BEGIN IMMEDIATE` contra pérdidas de actualización entre conexiones, `busy_timeout`, integridad y pruebas de reinicio.
+- [x] Originales JSON conservados únicamente como respaldo anterior al corte; rollback exige detener Panter y restaurar snapshot anterior, nunca apuntar a una versión vieja con JSON desfasados.
+- [ ] Validar release en Oracle con parada controlada, backup y cinco clientes OAuth; las pruebas aisladas no prueban uso continuo en hosts reales.
+- [ ] Migrar estados auxiliares de revisión nativa/Panter-RDD y coordinar transacciones de negocio entre namespaces; no equivale todavía a despliegue horizontal.
+
+Guía: [SQLITE_MIGRATION.md](SQLITE_MIGRATION.md). Node 22 `node:sqlite` aún es experimental; fijar y validar la versión del runtime.
