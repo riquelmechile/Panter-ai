@@ -120,17 +120,29 @@ export function grantPayload(grant: RunnerGrant): Buffer {
     x.operations, x.paths, x.effectClass,
   ]), 'utf8');
 }
+/**
+ * Ed25519 always signs 64 bytes. Node's base64url decoder accepts aliases
+ * with unused trailing bits set; only the single canonical 86-char encoding
+ * is allowed in a signed runner envelope.
+ */
+function decodeCanonicalSignature(value: string): Buffer {
+  if (!/^[A-Za-z0-9_-]{86}$/.test(value)) throw new GrantRejected();
+  const bytes = Buffer.from(value, 'base64url');
+  if (bytes.length !== 64 || bytes.toString('base64url') !== value) throw new GrantRejected();
+  return bytes;
+}
+
 export function verifyRunnerGrant(envelope: unknown, keys: ReadonlyMap<string, KeyObject>, now: number): RunnerGrant {
   if (!ownKeysEqual(envelope, ['keyId','claims','signature']) ||
       typeof envelope.keyId !== 'string' || !KEY_ID.test(envelope.keyId) ||
-      typeof envelope.signature !== 'string' || !/^[A-Za-z0-9_-]{86}$/.test(envelope.signature) ||
+      typeof envelope.signature !== 'string' ||
       !Number.isSafeInteger(now)) throw new GrantRejected();
   const key = keys.get(envelope.keyId);
   if (!key || key.asymmetricKeyType !== 'ed25519') throw new GrantRejected();
   const claims = parseGrant(envelope.claims);
   if (now < claims.notBefore || now >= claims.expiresAt) throw new GrantRejected();
-  const signature = Buffer.from(envelope.signature, 'base64url');
-  if (signature.length !== 64 || !verify(null, grantPayload(claims), key, signature)) throw new GrantRejected();
+  const signature = decodeCanonicalSignature(envelope.signature);
+  if (!verify(null, grantPayload(claims), key, signature)) throw new GrantRejected();
   return claims;
 }
 export function pinnedRunnerKeys(entries: Record<string,string>): ReadonlyMap<string,KeyObject> {
@@ -187,7 +199,8 @@ export class RunnerGrantLedger {
     const claims = verifyRunnerGrant(envelope, keys, now);
     if (!matched(claims, ctx) || !UUID.test(requestId)) throw new GrantRejected();
     const blob = grantPayload(claims);
-    const signature = (envelope as SignedRunnerGrant).signature;
+    // Fingerprint the verified, canonical Ed25519 bytes instead of caller text.
+    const signature = decodeCanonicalSignature((envelope as SignedRunnerGrant).signature);
     const digest = createHash('sha256').update(blob).update(signature).digest('hex');
     this.db.exec('BEGIN IMMEDIATE');
     try {
