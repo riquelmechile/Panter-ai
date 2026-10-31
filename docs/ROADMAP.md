@@ -130,3 +130,13 @@ Guía: [SQLITE_MIGRATION.md](SQLITE_MIGRATION.md). Node 22 `node:sqlite` aún es
 - [ ] Revisión independiente de Claude sobre PR y SHA exacto; instalación/reinicio solo después.
 
 Estado: este primer PR **no pone en marcha** un runner, no da shell, no reinicia servicios ni reemplaza todavía HostOps. Véase [RUNNER_IMPLEMENTATION.md](RUNNER_IMPLEMENTATION.md).
+
+### v0.16 runner — admisión read-only de fase 2
+
+- [x] Adaptador Python stdlib AF_UNIX con `SO_PEERCRED` real; solo responde `runner.status`, ejecución deshabilitada, UID configurado al arranque y mensajes limitados.
+- [x] Tests de admisión UID, parser y path privado en proceso Unix independiente. Planificador puro de directorios por intento y SHA Git, sin invocación de Git.
+- [ ] Provisión de `panter-runner` como usuario Unix distinto al control plane, ACL/grupo estrecho para socket y pruebas con dos UID distintos; **no realizado**.
+- [ ] Integrar grants Ed25519 firmados por Panter, anti-replay y auditoría crash-safe en transporte, sin permitir ningún efecto hasta cerrar los cuatro gates pre-servicio.
+- [ ] Worktrees reales con validación `openat2`, control de symlinks, aislamiento y sandbox de scripts; pruebas adversariales y revisión de Claude antes de producción.
+
+La interfaz read-only no ejecuta código, no hace cambios en producción y no reemplaza todavía HostOps. Se conserva la política de un solo dueño de ADR-001 para la futura capa de autorización.
