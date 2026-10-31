@@ -49,7 +49,9 @@ export class SqliteLedger {
         const file = join(dir, name + '.json');
         if (select.get(name) || !existsSync(file)) continue;
         const source = readFileSync(file, 'utf8');
-        const value: unknown = JSON.parse(source);
+        let value: unknown;
+        try { value = JSON.parse(source); }
+        catch { throw new Error('Malformed legacy JSON: ' + name); }
         if (!value || typeof value !== 'object' || !('version' in value) || value.version !== 1) {
           throw new Error('Invalid legacy ledger: ' + name);
         }

@@ -49,8 +49,14 @@ test('corrupt legacy JSON aborts initial migration, never creates a partial impo
   const dir = await mkdtemp(join(tmpdir(), 'panter-sqlite-invalid-'));
   try {
     await writeFile(join(dir, 'state.json'), '{"version":1,"missions":[{"id":"preserved"}],"work":[]}');
-    await writeFile(join(dir, 'oauth.json'), '{"version":1,broken');
-    assert.throws(() => SqliteLedger.open(dir));
+    const canary = 'PRIVATEKEY_CANARY_DO_NOT_LOG';
+    await writeFile(join(dir, 'oauth.json'), '{"version":1,"client_secret":'+canary+'}');
+    assert.throws(() => SqliteLedger.open(dir), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Malformed legacy JSON: oauth/);
+      assert.ok(!error.message.includes(canary), 'Never include malformed credential fragments in logs');
+      return true;
+    });
     await writeFile(join(dir, 'oauth.json'), '{"version":1,"clients":[],"pending":[],"grants":[],"codes":[],"tokens":[]}');
     const db = SqliteLedger.open(dir);
     assert.equal(db.read<{version:number,missions:Array<{id:string}>,work:unknown[]}>('state', {version:1,missions:[],work:[]}).missions[0]!.id, 'preserved');
