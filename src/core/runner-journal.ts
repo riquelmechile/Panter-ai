@@ -5,7 +5,7 @@
  * resistance; this local hash chain alone is not an immutable audit log.
  */
 import { createHash } from 'node:crypto';
-import { closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from 'node:fs';
+import { closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, statSync, writeSync, fstatSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { RUNNER_OPERATIONS, type RunnerOperation } from './runner-grants.js';
 
@@ -39,9 +39,7 @@ function validateEvent(event: RunnerAuditEvent) {
     !SHA.test(event.grantDigest) || !SHA.test(event.outputDigest) ||
     !['RESERVED','DENIED','SUCCEEDED','FAILED','QUARANTINED'].includes(event.status)) throw new AuditIntegrityError();
 }
-function parseLines(file: string): RunnerAuditLine[] {
-  if (!existsSync(file)) return [];
-  const content=readFileSync(file,'utf8');
+function parseAuditText(content: string): RunnerAuditLine[] {
   if (!content) return [];
   if (!content.endsWith('\n') || Buffer.byteLength(content,'utf8')>16*1024*1024) throw new AuditIntegrityError();
   const lines: RunnerAuditLine[]=[];
@@ -61,6 +59,85 @@ function parseLines(file: string): RunnerAuditLine[] {
     }
   } catch { throw new AuditIntegrityError(); }
   return lines;
+}
+function parseLines(file: string): RunnerAuditLine[] {
+  if (!existsSync(file)) return [];
+  return parseAuditText(readFileSync(file,'utf8'));
+}
+
+/** Evidence-only crash tail quarantine. Does NOT truncate, repair, or resume the journal. */
+export interface QuarantinedRunnerTail {
+  status: 'OUTCOME_UNKNOWN';
+  originalSha256: string;
+  originalBytes: number;
+  prefixEntries: number;
+  prefixLastHash: string;
+  tailSha256: string;
+  tailBytes: number;
+  quarantinedFile: string;
+  receiptFile: string;
+}
+
+export function quarantineRunnerAuditTail(dir: string): QuarantinedRunnerTail {
+  const root=resolve(dir);
+  const owner=statSync(root);
+  if (!owner.isDirectory() || owner.uid!==process.getuid?.() || (owner.mode&0o077)!==0) throw new AuditIntegrityError();
+  const original=join(root,'runner-audit.jsonl');
+  const fd=openSync(original,constants.O_RDONLY|O_NOFOLLOW);
+  let bytes:Buffer;
+  try {
+    const stat=fstatSync(fd);
+    if (!stat.isFile() || stat.uid!==process.getuid?.() || (stat.mode&0o077)!==0 || stat.size>16*1024*1024) {
+      throw new AuditIntegrityError();
+    }
+    bytes=readFileSync(fd);
+    const after=fstatSync(fd);
+    if (after.size!==stat.size || after.mtimeMs!==stat.mtimeMs) throw new AuditIntegrityError();
+  } finally {closeSync(fd);}
+  if (bytes.length===0 || bytes.at(-1)===10) throw new AuditIntegrityError();
+  const lastBreak=bytes.lastIndexOf(10);
+  const prefix=bytes.subarray(0,lastBreak+1);
+  const tail=bytes.subarray(lastBreak+1);
+  if (!tail.length) throw new AuditIntegrityError();
+  let completeText:string;
+  try {completeText=new TextDecoder('utf-8',{fatal:true}).decode(prefix);}
+  catch {throw new AuditIntegrityError();}
+  // The entire complete prefix must validate; internal corruption is never treated
+  // as a recoverable trailing fragment.
+  const validated=parseAuditText(completeText);
+  const fullDigest=createHash('sha256').update(bytes).digest('hex');
+  const tailDigest=createHash('sha256').update(tail).digest('hex');
+  const quarantine=join(root,'quarantine');
+  mkdirSync(quarantine,{mode:0o700,recursive:true});
+  const qstat=lstatSync(quarantine);
+  if (!qstat.isDirectory() || qstat.isSymbolicLink() ||
+      qstat.uid!==process.getuid?.() || (qstat.mode&0o077)!==0) throw new AuditIntegrityError();
+  const prefixName='runner-tail-'+fullDigest;
+  const quarantinedFile=join(quarantine,prefixName+'.bin');
+  const receiptFile=join(quarantine,prefixName+'.json');
+  const report:QuarantinedRunnerTail={
+    status:'OUTCOME_UNKNOWN',originalSha256:fullDigest,originalBytes:bytes.length,
+    prefixEntries:validated.length,prefixLastHash:validated.at(-1)?.hash??ZERO,
+    tailSha256:tailDigest,tailBytes:tail.length,quarantinedFile,receiptFile,
+  };
+  function writeEvidence(target:string,payload:Buffer):void {
+    const evidenceFd=openSync(target,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|O_NOFOLLOW,0o400);
+    try {
+      let offset=0;
+      while(offset<payload.length)offset+=writeSync(evidenceFd,payload,offset,payload.length-offset);
+      fsyncSync(evidenceFd);
+    }finally{closeSync(evidenceFd);}
+  }
+  try {
+    // The raw tail can contain broken UTF-8; preserve exact bytes, never log it.
+    writeEvidence(quarantinedFile,tail);
+    writeEvidence(receiptFile,Buffer.from(JSON.stringify(report)+'\n','utf8'));
+    const dirFd=openSync(quarantine,constants.O_RDONLY|constants.O_DIRECTORY|O_NOFOLLOW);
+    try{fsyncSync(dirFd);}finally{closeSync(dirFd);}
+  }catch{throw new AuditIntegrityError();}
+  // The active journal remains untouched. It still fails closed on construction/
+  // append until an independently reviewed recovery and effect reconciliation.
+  return report;
 }
 export class RunnerAuditJournal {
   readonly path: string;

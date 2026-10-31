@@ -70,3 +70,15 @@ Se implementa el **gate pre-servicio 3** del PR #25 sin ampliar permisos de ejec
 - Pruebas de dos representaciones equivalentes en bytes: solo la canónica es aceptada, la otra no reserva ni consume el grant; el original sigue siendo de un uso. Otra prueba lee la base SQLite y comprueba el digest esperado de bytes y su diferencia respecto del antiguo digest textual.
 
 **Compatibilidad y precaución:** si existieran registros `runner-grants.sqlite` de pruebas antiguas con digest de texto, no se convierten ni se eliminan automáticamente. Ante un ID existente y distinto digest, la reserva sigue fallando cerrado; cualquier reconciliación debe ser explícita y auditada. Esta biblioteca todavía no es un ejecutor, no tiene signer en producción, y no debe conectarse a un servicio de efectos. **Siguen pendientes** los gates 1 (cola de crash), 2 (rotación/sellado y rendimiento) y 4 (efectos inciertos/atestación externa).
+
+## Fase 2 — Corte incremental: cuarentena de cola incompleta tras un crash
+
+Se añade `quarantineRunnerAuditTail(dir)` a `src/core/runner-journal.ts` para tratar **únicamente la observación y preservación** de una entrada terminal truncada, sin alterar el diario de origen:
+
+- Exige raíz y archivo del UID dueño, permisos privados y apertura del diario mediante `O_NOFOLLOW`; rechaza journal íntegro, mayor a 16 MiB, entradas completas alteradas o cualquier manipulación del prefijo.
+- Busca el último salto de línea, verifica toda la cadena de hashes del prefijo completo y guarda **solo los bytes exactos de la cola incompleta** en `quarantine/runner-tail-SHA256(original).bin`, con modo 0400.
+- Crea un recibo JSON 0400 asociado con SHA-256 del archivo original y cola, tamaño, número de registros válidos y último hash encadenado; sincroniza evidencia y directorio con `fsync`.
+- El recibo declara **`OUTCOME_UNKNOWN`**. La función no limpia ni trunca el diario, no devuelve el servicio a modo escritura, no confía en la cola ni intenta reconstruir efectos. `RunnerAuditJournal` sigue rechazando la lectura/append hasta que exista un protocolo posterior de reconciliación y cierre explícito de incertidumbre.
+- Pruebas de interrupción con bytes truncados, preservación exacta/solo lectura, reinicio fail-closed, evidencia determinista, rechazo de manipulación de registros interiores, diario limpio y reintento.
+
+**Alcance del gate 1:** la **detección y cuarentena** queda implementada; su **reanudación segura** después de reconciliar efectos sigue pendiente y **bloquea la puesta en servicio**. Gate 2 (rotación y sellado externo) y gate 4 (efectos inciertos) tampoco están cerrados. Esta utilidad offline no activa ningún ejecutor ni se despliega en Oracle.
