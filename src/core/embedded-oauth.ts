@@ -248,8 +248,10 @@ export class EmbeddedOAuth {
       check(decision === 'allow' && isHost(host), 'Choose one approved host');
       const existing = d.grants.find(g => g.clientId === p.clientId && !g.revoked);
       check(!existing || existing.host === host, 'Client cannot switch host without revocation');
-      check(host === 'gpt-a' || !p.requestedScopes.includes('panter:lead'), 'Leader scope restricted');
-      const scopes = [...new Set([...p.requestedScopes, 'mcp', 'panter:mesh'])];
+      // Clients such as Gemini request every advertised scope. The leader scope is
+      // never granted to a non-coordinator host: drop it instead of failing consent.
+      const requested = host === 'gpt-a' ? p.requestedScopes : p.requestedScopes.filter(s => s !== 'panter:lead');
+      const scopes = [...new Set([...requested, 'mcp', 'panter:mesh'])];
       if (host === 'gpt-a') scopes.push('panter:lead');
       if (!existing) d.grants.push({ clientId: p.clientId, host, redirectUri: p.redirectUri, scopes: [...new Set(scopes)], approvedAt: ts(), revoked: false });
       const code = secureId(32);

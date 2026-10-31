@@ -36,8 +36,8 @@ async function register(request: (p: string, init?: RequestInit) => Promise<Resp
   const result = await request('/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redirect_uris: [callback], token_endpoint_auth_method: 'none', response_types: ['code'], grant_types: ['authorization_code', 'refresh_token'] }) });
   assert.equal(result.status, 201); return (await result.json() as { client_id: string }).client_id;
 }
-async function authorize(request: (p: string, init?: RequestInit) => Promise<Response>, clientId: string, host: string, callback = callbackA) {
-  const q = new URLSearchParams({ client_id: clientId, redirect_uri: callback, response_type: 'code', code_challenge: challenge, code_challenge_method: 'S256', scope: 'mcp offline_access', resource, state: 'opaque-state' });
+async function authorize(request: (p: string, init?: RequestInit) => Promise<Response>, clientId: string, host: string, callback = callbackA, scope = 'mcp offline_access') {
+  const q = new URLSearchParams({ client_id: clientId, redirect_uri: callback, response_type: 'code', code_challenge: challenge, code_challenge_method: 'S256', scope, resource, state: 'opaque-state' });
   const start = await request('/authorize?' + q); assert.equal(start.status, 302);
   const next = new URL(start.headers.get('location')!, issuer);
   const setCookie = start.headers.get('set-cookie')!;
@@ -489,4 +489,14 @@ test('confidential DCR (Gemini-style client_secret_basic/post) issues a secret a
   }
   const bad = await request('/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redirect_uris: [callbackA], token_endpoint_auth_method: 'private_key_jwt' }) });
   assert.equal(bad.status, 400);
+}));
+
+test('a non-coordinator host that requests every advertised scope (Gemini) is granted without panter:lead', () => harness(async ({ request }) => {
+  const clientId = await register(request);
+  const { code } = await authorize(request, clientId, 'gemini', callbackA, 'mcp offline_access panter:mesh panter:lead');
+  const res = await token(request, clientId, code);
+  assert.equal(res.status, 200);
+  const issued = await res.json() as { scope: string };
+  assert.ok(!issued.scope.split(' ').includes('panter:lead'));
+  assert.ok(issued.scope.split(' ').includes('panter:mesh'));
 }));
