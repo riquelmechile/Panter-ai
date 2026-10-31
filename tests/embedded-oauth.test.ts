@@ -40,7 +40,12 @@ async function authorize(request: (p: string, init?: RequestInit) => Promise<Res
   const q = new URLSearchParams({ client_id: clientId, redirect_uri: callback, response_type: 'code', code_challenge: challenge, code_challenge_method: 'S256', scope: 'mcp offline_access', resource, state: 'opaque-state' });
   const start = await request('/authorize?' + q); assert.equal(start.status, 302);
   const next = new URL(start.headers.get('location')!, issuer);
-  const consentCookie = start.headers.get('set-cookie')!.split(';')[0]!;
+  const setCookie = start.headers.get('set-cookie')!;
+  // The consent cookie is set on /authorize, which the AI client reaches through a cross-site
+  // navigation, then followed by a redirect to /oauth/consent. Browsers withhold SameSite=Strict
+  // cookies on that redirect chain, so the consent page must use Lax (double-submit CSRF still holds).
+  assert.match(setCookie, /SameSite=Lax/); assert.match(setCookie, /HttpOnly/); assert.match(setCookie, /Secure/);
+  const consentCookie = setCookie.split(';')[0]!;
   const page = await request(next.pathname + next.search, { headers: { cookie: consentCookie } });
   assert.equal(page.status, 200);
   const html = await page.text(); const csrf = /name="csrf" value="([^"]+)"/.exec(html)?.[1]; assert.ok(csrf);

@@ -330,7 +330,7 @@ export class EmbeddedOAuth {
       try {
         this.throttled(`authorize:${rateLimitIdentity(this.clientIdentity(req))}`,60);
         const { id, csrf } = await this.authorize(params(req.url ?? ''),this.clientIdentity(req));
-        res.setHeader('Set-Cookie', `${this.consentCookie}=${csrf}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=600`);
+        res.setHeader('Set-Cookie', `${this.consentCookie}=${csrf}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600`);
         redirect(res, `/oauth/consent?sid=${encodeURIComponent(id)}`);
       } catch { reply(res, 400, { error: 'invalid_request' }); }
       return true;
@@ -367,7 +367,7 @@ export class EmbeddedOAuth {
         this.throttled(`consent:${id}`, 6);
         const payload = await body(req);
         const result = await this.approve(id, field(payload, 'csrf'), field(payload, 'password'), field(payload, 'host'), field(payload, 'decision'));
-        res.setHeader('Set-Cookie', `${this.consentCookie}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0`);
+        res.setHeader('Set-Cookie', `${this.consentCookie}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`);
         redirect(res, result.uri);
       } catch { reply(res, 403, { error: 'access_denied' }); }
       return true;
