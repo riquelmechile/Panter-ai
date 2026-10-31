@@ -19,7 +19,9 @@ const ALLOWED_SCOPES = new Set(['mcp', 'panter:mesh', 'panter:lead', 'offline_ac
 const secureId = (bytes = 32) => randomBytes(bytes).toString('base64url');
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 const ts = () => Math.floor(Date.now() / 1000);
-function check(ok: unknown, why: string): asserts ok { if (!ok) throw new Error(why); }
+/** Errors raised by check() carry fixed, operator-safe messages (never request data). */
+class OAuthCheckError extends Error {}
+function check(ok: unknown, why: string): asserts ok { if (!ok) throw new OAuthCheckError(why); }
 function eq(a: string, b: string): boolean {
   return timingSafeEqual(Buffer.from(hash(a), 'hex'), Buffer.from(hash(b), 'hex'));
 }
@@ -37,7 +39,10 @@ function basicClient(req: IncomingMessage): { id: string; secret: string } {
 }
 /** Operator-visible reason for a rejected OAuth step. Messages are fixed strings from check(); never secrets. */
 function logOAuthReject(stage: string, err: unknown) {
-  console.warn(`[oauth] ${stage} rejected: ${err instanceof Error ? err.message : 'unknown'}`);
+  // Only fixed check() messages are logged. Other errors (e.g. JSON.parse, which quotes
+  // part of the request body) may contain credentials, so only their class is recorded.
+  const reason = err instanceof OAuthCheckError ? err.message : err instanceof Error ? `unexpected ${err.name}` : 'unknown';
+  console.warn(`[oauth] ${stage} rejected: ${reason}`);
 }
 /**
  * Gemini web returns through Google-owned relay callbacks (/r/ and /a/) that then
@@ -75,7 +80,8 @@ async function body(req: IncomingMessage): Promise<URLSearchParams | Record<stri
   const raw = Buffer.concat(parts).toString('utf8');
   const contentType = String(req.headers['content-type'] ?? '').split(';')[0]?.trim();
   if (contentType === 'application/json') {
-    const parsed: unknown = JSON.parse(raw);
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); } catch { throw new OAuthCheckError('Malformed JSON body'); }
     check(parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed), 'Invalid JSON');
     return parsed as Record<string, unknown>;
   }
@@ -338,7 +344,7 @@ export class EmbeddedOAuth {
         return this.issue(d, clientId, token.host, requested.length > 0 ? requested : token.scopes, token.familyId);
       });
     }
-    throw new Error('Unsupported grant_type');
+    throw new OAuthCheckError('Unsupported grant_type');
   }
   /** Only expose this through the authenticated operator MCP, never over public OAuth. */
   listClients(){
@@ -431,8 +437,12 @@ export class EmbeddedOAuth {
         // Rate-limit the endpoint and avoid rewriting the full ledger for misses.
         this.throttled(`revoke:${rateLimitIdentity(this.clientIdentity(req))}`,100);
         this.throttled('revoke:global',5000);
-        const input = await body(req); const clientId = field(input, 'client_id'); const token = field(input, 'token');
+        const input = await body(req); const basic = basicClient(req); const bodyId = field(input, 'client_id');
+        check(!(basic.id && bodyId && basic.id !== bodyId), 'Conflicting client credentials');
+        const clientId = basic.id || bodyId; const token = field(input, 'token');
         check(/^pc_[A-Za-z0-9_-]{24,64}$/.test(clientId)&&token.length>=32&&token.length<=200,'Invalid revocation request');
+        const owner = await this.read(d => d.clients.find(c => c.id === clientId));
+        if (owner?.secretDigest) { const sec = basic.secret || field(input, 'client_secret'); check(sec.length >= 32 && eq(hash(sec), owner.secretDigest), 'Invalid client secret'); }
         const digest=hash(token);
         const matchingFamily=await this.read(d=>d.tokens.find(t=>t.digest===digest&&t.clientId===clientId&&!t.revoked)?.familyId??null);
         if(matchingFamily)await this.change(d=>{

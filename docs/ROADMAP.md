@@ -80,3 +80,13 @@ The checkboxes below are a **historical per-release backlog** and should not be 
 - [ ] Integrate actual ChatGPT host-native child launch and verify independent execution evidence and throughput.
 - [ ] Wire full official Gentle AI Go RDD v2 consent/transition/fix/validation/acknowledgement on a trusted Git runner; current bridge is read-only.
 - [ ] Add multi-process transactional storage and isolate correction worktrees before production.
+
+## v0.15.x embedded OAuth — contrato con clientes reales (PR #18)
+
+- [x] Cookie de consentimiento `SameSite=Lax` (Secure, HttpOnly, 10 min): ChatGPT llega a `/authorize` por navegación cross-site y los navegadores no envían cookies `Strict` en esa cadena. El CSRF de doble envío y la verificación de Origin del POST se mantienen.
+- [x] Clientes confidenciales: `/register` acepta `none`, `client_secret_basic` y `client_secret_post`; el secreto se entrega una vez y solo se guarda su hash. `/token` y `/revoke` aceptan credenciales por HTTP Basic (RFC 6749 §2.3.1) o en el cuerpo y exigen el secreto a los clientes confidenciales. PKCE S256 sigue siendo obligatorio para todos.
+- [x] Gemini: hasta 10 `redirect_uris` (Gemini registra 6 relays `/r/` y `/a/` de Google) y entrega HTML sin scripts tras el consentimiento para los hosts relay exactos de Google, porque Chrome aplica el `form-action` CSP a toda la cadena del POST. ChatGPT, Claude y Grok siguen con 302.
+- [x] `panter:lead` solo se concede a `gpt-a`; si otro host lo pide, se descarta en vez de fallar el consentimiento.
+- [x] Toda conexión aprobada recibe `offline_access` y refresh rotativo (ChatGPT no lo solicita); reuso detectado revoca la familia.
+- [x] Logs `[oauth] <etapa> rejected: <motivo>` con mensajes fijos únicamente; los errores no controlados (p. ej. JSON malformado) se registran solo por clase, nunca con fragmentos del cuerpo.
+- [ ] Validación sostenida en los cinco hosts reales (renovación de GPT-A/GPT-B tras la primera hora, revocación desde Gemini).

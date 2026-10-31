@@ -542,3 +542,31 @@ test('ChatGPT-style request without offline_access still receives a rotating ref
   const next = await rotated.json() as { refresh_token?: string };
   assert.ok(next.refresh_token && next.refresh_token !== issued.refresh_token);
 }));
+
+test('confidential client revokes with client_secret_basic; wrong secret is rejected', () => harness(async ({ request }) => {
+  const reg = await request('/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redirect_uris: [callbackA], token_endpoint_auth_method: 'client_secret_basic', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'] }) });
+  const meta = await reg.json() as { client_id: string; client_secret: string };
+  const basic = (sec: string) => 'Basic ' + Buffer.from(`${encodeURIComponent(meta.client_id)}:${encodeURIComponent(sec)}`).toString('base64');
+  const { code } = await authorize(request, meta.client_id, 'gemini');
+  const issued = await (await request('/token', post({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: callbackA, resource }, { authorization: basic(meta.client_secret) }))).json() as { access_token: string; refresh_token: string };
+  const wrong = await request('/revoke', post({ token: issued.refresh_token }, { authorization: basic('y'.repeat(40)) }));
+  assert.equal(wrong.status, 400);
+  const ok = await request('/revoke', post({ token: issued.refresh_token }, { authorization: basic(meta.client_secret) }));
+  assert.equal(ok.status, 200);
+  const after = await request('/token', post({ grant_type: 'refresh_token', refresh_token: issued.refresh_token }, { authorization: basic(meta.client_secret) }));
+  assert.equal(after.status, 400);
+}));
+
+test('rejection logs never echo request bodies (malformed JSON with a credential)', () => harness(async ({ request }) => {
+  const seen: string[] = []; const original = console.warn;
+  console.warn = (...args: unknown[]) => { seen.push(args.map(String).join(' ')); };
+  try {
+    const leak = 'SUPERSECRET' + 'z'.repeat(40);
+    const res = await request('/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: `{"client_secret":"${leak}",` });
+    assert.equal(res.status, 400);
+    const tok = await request('/token', { method: 'POST', headers: { 'content-type': 'application/json' }, body: `{"refresh_token":"${leak}"` });
+    assert.equal(tok.status, 400);
+    assert.ok(seen.length >= 2);
+    assert.ok(seen.every(line => !line.includes('SUPERSECRET')));
+  } finally { console.warn = original; }
+}));
