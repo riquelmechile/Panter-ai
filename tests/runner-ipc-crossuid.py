@@ -8,6 +8,7 @@ or use sockets outside the disposable private temp directory.
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import stat
 import subprocess
@@ -91,7 +92,13 @@ def main() -> None:
         os.chown(folder, RUNNER_UID, IPC_GID)
         os.chmod(folder, 0o710)
         target = Path(folder) / 'runner.sock'
-        argv = [sys.executable, '-B', 'src/runner/readonly_ipc.py',
+        # Checkout files may be unreadable to a different UID on hosted CI.
+        # Copy only the status-only server into an isolated runner-owned path.
+        script = Path(folder) / 'readonly_ipc.py'
+        shutil.copyfile(Path(__file__).resolve().parents[1] / 'src/runner/readonly_ipc.py', script)
+        os.chown(script, RUNNER_UID, IPC_GID)
+        os.chmod(script, 0o500)
+        argv = [sys.executable, '-B', str(script),
                 '--socket', str(target), '--allow-uid', str(CONTROL_UID),
                 '--socket-gid', str(IPC_GID)]
         server = subprocess.Popen(argv, preexec_fn=lambda: set_identity(RUNNER_UID, IPC_GID),
