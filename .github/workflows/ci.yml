@@ -18,6 +18,11 @@ jobs:
       - run: npm run check
       - run: npm run build
       - run: npm test
+      # Only trusted pushes on the ephemeral GitHub-hosted runner use root for
+      # cross-UID kernel tests. No sudo on untrusted pull_request events.
+      - name: Cross-UID AF_UNIX kernel gate (ephemeral CI only)
+        if: github.event_name == 'push'
+        run: sudo -n python3 -B tests/runner-ipc-crossuid.py
       - run: npm run smoke:http
       - run: npm run smoke:oauth
       - run: npm run smoke:embedded
