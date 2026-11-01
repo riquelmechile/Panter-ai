@@ -135,7 +135,8 @@ Estado: este primer PR **no pone en marcha** un runner, no da shell, no reinicia
 
 - [x] Adaptador Python stdlib AF_UNIX con `SO_PEERCRED` real; solo responde `runner.status`, ejecución deshabilitada, UID configurado al arranque y mensajes limitados.
 - [x] Tests de admisión UID, parser y path privado en proceso Unix independiente. Planificador puro de directorios por intento y SHA Git, sin invocación de Git.
-- [ ] Provisión de `panter-runner` como usuario Unix distinto al control plane, ACL/grupo estrecho para socket y pruebas con dos UID distintos; **no realizado**.
+- [x] Contrato AF_UNIX **read-only y opt-in** para dos UID distintos: padre privado controlado `0710`, socket `0660`, `SO_PEERCRED` obligatorio; prueba con dos UID reales y un tercero denegado en Ubuntu efímero de CI (PR #57). No hay ejecución de grants ni procesos.
+- [ ] **Producción pendiente**: provisionar `panter-runner` y control plane como usuarios Unix separados en Oracle, configurar grupo/ACL/socket por operador, probar arranque, reinicios y revocación con dos UID reales del host y auditar alcance de permisos; sin despliegue autorizado.
 - [ ] Integrar grants Ed25519 firmados por Panter, anti-replay y auditoría crash-safe en transporte, sin permitir ningún efecto hasta cerrar los cuatro gates pre-servicio.
 - [ ] Worktrees reales con validación `openat2`, control de symlinks, aislamiento y sandbox de scripts; pruebas adversariales y revisión de Claude antes de producción.
 
