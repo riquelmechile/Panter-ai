@@ -35,7 +35,7 @@ test('a real authenticated poll sees only actor queue pointers, never claiming w
     instruction: 'secret task for claude', idempotencyKey: 'claude-one',
   });
   const first = await m.workforcePoll('grok', bridge);
-  assert.equal(first.status, 'READY');
+  assert.equal(first.status, 'CANDIDATE');
   assert.equal(first.next?.workId, grok.id);
   assert.ok(!JSON.stringify(first).includes('secret'));
   assert.ok(!JSON.stringify(first).includes(claude.id));
