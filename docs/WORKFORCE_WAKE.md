@@ -1,4 +1,4 @@
-# Workforce / Wake Gateway — fase 1 (sin activación externa)
+# Workforce / Wake Gateway — fases 1–2C (sin activación externa)
 
 Panter-ai es Xanxittoo 2.0. GPT-A es el único orquestador; GPT-B, Claude,
 Grok y Gemini son los cuatro trabajadores. Kimi no forma parte del contrato.
@@ -56,7 +56,7 @@ Cloudflare.** Revisar PR y CI SHA exacto antes de merge y E2E antes de producci�
 ## Fase 2A: long-poll por actor (sin wake externo)
 
 - `panter_workforce_wait(protocolEra,waitSeconds)` mantiene una llamada MCP
-  autenticada abierta un máximo de **20 segundos**, con **una espera por
+  autenticada abierta un máximo configurable de **3.600 segundos**, con **una espera por
   trabajador** (cuatro en total). No hace inferencia, no reclama tareas, no
   mantiene una sesión de modelo viva por sí mismo y no crea otra cola.
 - El servidor registra primero el listener por identidad y después consulta
@@ -66,7 +66,7 @@ Cloudflare.** Revisar PR y CI SHA exacto antes de merge y E2E antes de producci�
 - Al expirar el tiempo devuelve `TIMED_OUT`; un cliente puede repetir la
   operación respetando sus límites y permisos. Desregistra el listener tanto
   en éxito como al fallar. Una sesión desconectada sin cancelación explícita
-  puede ocupar el único slot de ese actor hasta su vencimiento (máx. 20 s).
+  puede ocupar el único slot de ese actor hasta su vencimiento (máx. 3.600 s).
 - Una modificación de perfil o un resultado ajeno no constituye Work para
   ese worker. `autonomousWakeVerified` sigue siendo `false`.
 - Este adaptador **no implementa** todavía el método estándar MCP
@@ -77,8 +77,29 @@ Cloudflare.** Revisar PR y CI SHA exacto antes de merge y E2E antes de producci�
   instancias sin bus de eventos compartido.
 
 
-## Fase 2B
-La compatibilidad mediante herramientas no equivale a los métodos wire MCP Tasks 2026. Los resultados íntegros se conservan en el backend y el ACK del trabajador es compacto. El rearme se registra en SQLite. El soporte autónomo de los hosts requiere E2E verificadas.
+## Fase 2B — persistencia, bridge y resultado silencioso
+
+- `panter_workforce_task_bridge` implementa `arm/get/cancel` como herramientas
+  MCP autenticadas por actor con referencias a trabajo del ledger Mesh. El
+  `protocolEra` es declarado por la llamada, **no negociado ni verificado
+  por el host**: se registra compatibilidad de esquema, no un Task nativo.
+- `panter_mesh_complete` conserva el resultado íntegro en SQLite, crea una
+  intención durable de rearme y devuelve solo receipt compactado.
+  `panter_workforce_result_get` permite a GPT-A recuperar el resultado con
+  autenticación; no existe acceso cross-worker. Los eventos solo contienen
+  una referencia opaca.
+- Persisten los registros de transporte y rearm en el ledger Mesh SQLite ya
+  utilizado, sin cola paralela. El rearme es una solicitud registrada, no un
+  relanzamiento de inferencia ni una garantía de ejecución futura.
+- El SDK MCP v2 ya soporta `subscriptions/listen` 2026 para notificaciones
+  generales de recursos; este PR no inventa una suscripción a tareas que el
+  SDK no implemente. La extensión `io.modelcontextprotocol/tasks` 2026
+  sigue en Draft y **su wire nativo queda pendiente** de integración real.
+
+**Límites verificados:** la CI prueba las operaciones del backend y los
+smokes MCP HTTP/OAuth. No se ejecutaron cuentas de hosts reales ni una
+prueba de recepción de Task nativo por GPT-B, Claude, Grok o Gemini.
+Ninguno de esos hosts se declara `WAKE_VERIFIED`.
 
 
 ### Fase 2C — cadena compacta de trabajo
