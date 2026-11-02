@@ -367,9 +367,10 @@ export class AutomaticHarness {
       if(work?.state==='FAILED'||work?.state==='OUTCOME_UNKNOWN')
         return {...common,status:'REMOTE_OUTCOME_NEEDS_RECONCILIATION',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
       if(work?.state==='COMPLETED'){
-        const response=inbox.messages.find(m=>m.kind==='RESULT'&&m.workId===phase.remoteWorkId);
+        // Result is persisted in the Mesh ledger and never echoed via inbox.
+        const persisted=await this.mesh.resultGet('gpt-a',phase.remoteWorkId);
         let result:unknown;
-        try{result=JSON.parse(response?.text??'');}catch{result=null;}
+        try{result=JSON.parse(persisted.result??'');}catch{result=null;}
         if(!result||typeof result!=='object'||!('summary' in result)||!('evidence' in result))
           return {...common,status:'REMOTE_RESULT_NEEDS_STRUCTURED_EVIDENCE',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
         await this.report(runId,phase.id,result as {summary:string;evidence:string[];runId?:string;candidateSha?:string;discoveredPaths?:string[]});

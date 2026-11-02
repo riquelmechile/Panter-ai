@@ -60,7 +60,8 @@ test('a bound reviewer receives only its assigned MCP skills with frozen evidenc
   const work=await m.claim('claude',w.id);
   await m.complete('claude',w.id,work.attemptId!,work.leaseGeneration,'Findings attached');
   const inbox=await m.inbox('gpt-a');
-  assert.equal(inbox.messages.at(-1)?.text,'Findings attached');
+  assert.equal(JSON.parse(inbox.messages.at(-1)!.text).resultAvailable,true);
+  assert.equal((await m.resultGet('gpt-a',w.id)).result,'Findings attached');
 }));
 
 test('implementers need narrow scopes and cannot reserve overlapping files',()=>withMesh(async m=>{

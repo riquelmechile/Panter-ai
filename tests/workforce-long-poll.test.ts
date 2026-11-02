@@ -70,8 +70,8 @@ test('immediate wait sees queued work and does not allocate a live listener', ()
 
 test('unprivileged coordinator and invalid waits cannot allocate listeners or claim', () => fixture(async (m, live) => {
   await assert.rejects(live.wait('gpt-a', 'UNKNOWN', 20), /Only authenticated workers/);
-  for (const ms of [-1, 20001, 1.2, NaN])
-    await assert.rejects(live.wait('grok','UNKNOWN',ms), /0..20000/);
+  for (const ms of [-1, 3600001, 1.2, NaN])
+    await assert.rejects(live.wait('grok','UNKNOWN',ms), /0..3600000/);
   await assert.rejects(live.wait('grok','unsupported' as 'UNKNOWN',0), /protocol era/);
   assert.equal(m.events.listenerCount('grok'), 0);
   assert.equal(m.events.listenerCount('gpt-a'), 0);
@@ -86,4 +86,15 @@ test('profile-only change does not claim work or return a false candidate', () =
   assert.equal(got.status, 'EMPTY');
   assert.equal(got.autonomousWakeVerified, false);
   assert.equal(m.events.listenerCount('gpt-b'), 0);
+}));
+
+
+test('a stopped host aborts its listener immediately, cleans the slot and can re-arm', () => fixture(async (_mesh, live) => {
+  const controller = new AbortController();
+  const pending = live.wait('grok','2026-07-28',3600000,controller.signal);
+  controller.abort();
+  await assert.rejects(pending,/cancelled/);
+  assert.equal(_mesh.events.listenerCount('grok'),0);
+  const next=await live.wait('grok','2026-07-28',0);
+  assert.equal(next.status,'EMPTY');
 }));

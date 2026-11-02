@@ -22,7 +22,8 @@ test('shared notification never contains actor ids, receipts or instructions', (
   assert.ok(changed.length >= 3);
   for (const change of changed) { assert.match(change, /panter:\/\/mesh\/changed/); assert.doesNotMatch(change, /grok|private|receipt|m-test/); }
   const inbox = await mesh.inbox('gpt-a');
-  assert.equal(inbox.messages[0]?.text, 'private result 43');
+  assert.equal(JSON.parse(inbox.messages[0]!.text).resultAvailable,true);
+  assert.equal((await mesh.resultGet('gpt-a',work.id)).result,'private result 43');
 }));
 
 test('actor-specific revision cursors do not skip another host messages', () => harness(async mesh => {

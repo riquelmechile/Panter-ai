@@ -388,7 +388,8 @@ export class MeshEngine {
       const digest = sha(JSON.stringify({ id, attemptId, generation, result, success }));
       if (w.state === 'COMPLETED' || w.state === 'FAILED') {
         check(w.attemptId === attemptId && w.leaseGeneration === generation && w.receiptDigest === digest, 'Conflicting terminal receipt');
-        return w;
+        return {workId:w.id,state:w.state,receiptDigest:w.receiptDigest,completedAt:w.completedAt,
+          resultAvailable:true,rearmPending:(d.rearmIntents??[]).some(i=>i.workId===id&&i.status==='PENDING')};
       }
       check(w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
       check(Date.parse(w.leaseUntil!) > Date.now(), 'Lease expired');
