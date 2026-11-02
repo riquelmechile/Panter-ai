@@ -67,7 +67,7 @@ try{
  assert.equal(pointer.workId,work.id);
  assert.ok(!JSON.stringify(payload).includes('Private internal analysis'));
  const cancelled=await gemini.request({method:'tasks/cancel',params:{taskId}},taskSchema);
- assert.equal(cancelled.status,'cancelled');
+ assert.equal(cancelled.status,'completed'); // An already delivered listener is terminal.
  assert.equal(unpack(await gemini.callTool({name:'panter_mesh_pending',arguments:{}}))[0].workId,work.id);
  console.log('PASS MCP 2025 Tasks get/list/result/cancel + OAuth actor isolation + durable Work unaffected');
 }finally{
