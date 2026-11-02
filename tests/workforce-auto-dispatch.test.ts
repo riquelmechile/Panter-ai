@@ -4,11 +4,16 @@ import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {MeshEngine} from '../src/core/mesh.js';
+import {WorkforceLongPoll} from '../src/core/workforce-long-poll.js';
 
-async function fixture(run:(mesh:MeshEngine)=>Promise<void>){
+async function fixture(run:(mesh:MeshEngine,live:WorkforceLongPoll)=>Promise<void>){
   const dir=await mkdtemp(join(tmpdir(),'panter-auto-wake-'));
-  try{await run(await MeshEngine.open(dir));}
-  finally{await rm(dir,{recursive:true,force:true});}
+  try{
+    const mesh=await MeshEngine.open(dir);
+    const live=new WorkforceLongPoll(mesh);
+    mesh.setStandingListenerCheck(host=>live.isListening(host));
+    await run(mesh,live);
+  } finally{await rm(dir,{recursive:true,force:true});}
 }
 const role='reviewer' as const;
 const task={missionId:'mission-wake',role,instruction:'review an isolated candidate',idempotencyKey:'wake-one'};
@@ -20,6 +25,8 @@ test('GPT-A auto routing fails closed with no authenticated standing peer',()=>f
   await m.setProfile('gpt-a',{host:'gpt-a',actorId:'gpt-a-primary',roles:['orchestrator'],
     modelRequest:'host-native',effortRequest:'max',coordinationMode:'AUTO'},0);
   await m.setProfile('gpt-a',profile('grok'),0);
+  // A worker can self-report a fresh LONG_POLL route without holding a live wait.
+  await m.workforcePoll('grok',{protocolEra:'2026-07-28',deliveryMode:'LONG_POLL'});
   const status=await m.delegateAuto('gpt-a',task);
   assert.equal(status.status,'LOCAL_FALLBACK_REQUIRED');
   assert.equal(status.autonomousWakeVerified,false);
@@ -27,24 +34,31 @@ test('GPT-A auto routing fails closed with no authenticated standing peer',()=>f
   await assert.rejects(m.delegateAuto('grok',task),/Only GPT-A/);
 }));
 
-test('GPT-A routes to available host automatically, receives durable silent results and rearms',()=>fixture(async m=>{
+test('GPT-A routes only to real live listeners, returns silent results and rearms',()=>fixture(async (m,live)=>{
   await m.setProfile('gpt-a',{host:'gpt-a',actorId:'gpt-a-primary',roles:['orchestrator'],
     modelRequest:'host-native',effortRequest:'max',coordinationMode:'AUTO'},0);
   await m.setProfile('gpt-a',profile('grok'),0);
   await m.setProfile('gpt-a',profile('claude'),0);
-  await m.workforcePoll('grok',{protocolEra:'2026-07-28',deliveryMode:'LONG_POLL'});
-  await m.workforcePoll('claude',{protocolEra:'2026-07-28',deliveryMode:'LONG_POLL'});
+  const grokWait=live.wait('grok','2026-07-28',5000);
+  const claudeWait=live.wait('claude','2026-07-28',5000);
+  // Synchronize with initial recorded poll before routing.
+  await m.workforceStatus('gpt-a');
   const first=await m.delegateAuto('gpt-a',task);
   assert.equal(first.status,'DELEGATED');
   if(first.status!=='DELEGATED')throw Error('Expected delegation');
   assert.equal(first.selectedHost,'claude','deterministic tie break');
+  assert.equal((await claudeWait).next?.workId,first.work.id,
+    'active authenticated listener received its own opaque work pointer');
   assert.equal(first.autonomousWakeVerified,false);
   const replay=await m.delegateAuto('gpt-a',task);
   assert.equal(replay.status,'DELEGATED');
   if(replay.status==='DELEGATED') assert.equal(replay.work.id,first.work.id,'idempotent retry');
   const second=await m.delegateAuto('gpt-a',{...task,idempotencyKey:'wake-two'});
   assert.equal(second.status,'DELEGATED');
-  if(second.status==='DELEGATED')assert.equal(second.selectedHost,'grok','least loaded peer selected');
+  if(second.status==='DELEGATED'){
+    assert.equal(second.selectedHost,'grok','remaining live listener selected');
+    assert.equal((await grokWait).next?.workId,second.work.id);
+  }
   const claimed=await m.pickup('claude',300);
   assert.equal(claimed.status,'CLAIMED');
   if(claimed.status!=='CLAIMED')throw Error('Expected claim');
