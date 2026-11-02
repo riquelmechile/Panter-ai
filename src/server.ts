@@ -11,6 +11,7 @@ import { ClientAddressPolicy } from './core/trusted-proxy.js';
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { MeshEngine, HOSTS, isHost } from './core/mesh.js';
+import { WorkforceLongPoll } from './core/workforce-long-poll.js';
 import { createServer } from 'node:http';
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
@@ -81,6 +82,7 @@ async function execute<T>(work: () => Promise<T>) {
 const store = await PanterStore.open(dataDir);
 const agents = await AgentEngine.open(dataDir, store);
 const mesh = await MeshEngine.open(dataDir);
+const workforceLongPoll = new WorkforceLongPoll(mesh);
 const nativeSubagentReview = await NativeSubagentReview.open(dataDir);
 const githubGate = new GitHubDeliveryGate({
   allowedRepositories:(process.env.PANTER_GITHUB_ALLOWED_REPOS??'').split(',').map(x=>x.trim()).filter(Boolean),
@@ -347,6 +349,15 @@ const handler = createMcpHandler(() => {
       pollIntervalSeconds:z.number().int().min(60).max(86400).optional(),
     }).strict(),
   },async x=>execute(()=>mesh.workforcePoll(hostPrincipal(),x)));
+  // Actor-bound, single-process long-poll fallback: one bounded waiter per worker.
+  // Not a provider wake and not the MCP Tasks 2026 extension.
+  server.registerTool('panter_workforce_wait',{
+    description:'Authenticated worker waits up to 20s for its own oldest QUEUED candidate. No claim, no wake guarantee and no second queue.',
+    inputSchema:z.object({
+      protocolEra:z.enum(['2026-07-28','2025-11-25','UNKNOWN']),
+      waitSeconds:z.number().int().min(0).max(20).default(15),
+    }).strict(),
+  },async x=>execute(()=>workforceLongPoll.wait(hostPrincipal(), x.protocolEra, x.waitSeconds * 1000)));
   server.registerTool('panter_workforce_status',{
     description:'GPT-A read-only four-worker presence, claims, receipts and unverified wake-route reports. No invented READY or wake proof.',
     inputSchema:z.object({}),annotations:{readOnlyHint:true},

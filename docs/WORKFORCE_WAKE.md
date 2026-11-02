@@ -52,3 +52,26 @@ actual y su capacidad de wake permanecen desconocidas.
 
 **No se instala ni se activa un servicio. No modifica Xanxittoo, Oracle o
 Cloudflare.** Revisar PR y CI SHA exacto antes de merge y E2E antes de producción.
+
+## Fase 2A: long-poll por actor (sin wake externo)
+
+- `panter_workforce_wait(protocolEra,waitSeconds)` mantiene una llamada MCP
+  autenticada abierta un máximo de **20 segundos**, con **una espera por
+  trabajador** (cuatro en total). No hace inferencia, no reclama tareas, no
+  mantiene una sesión de modelo viva por sí mismo y no crea otra cola.
+- El servidor registra primero el listener por identidad y después consulta
+  el ledger Mesh; cuando se persiste una delegación, el evento posterior al
+  commit despierta únicamente la espera de ese actor. Recupera el candidato
+  desde SQLite, nunca desde un evento con instrucciones.
+- Al expirar el tiempo devuelve `TIMED_OUT`; un cliente puede repetir la
+  operación respetando sus límites y permisos. Desregistra el listener tanto
+  en éxito como al fallar. Una sesión desconectada sin cancelación explícita
+  puede ocupar el único slot de ese actor hasta su vencimiento (máx. 20 s).
+- Una modificación de perfil o un resultado ajeno no constituye Work para
+  ese worker. `autonomousWakeVerified` sigue siendo `false`.
+- Este adaptador **no implementa** todavía el método estándar MCP
+  `subscriptions/listen` ni la extensión `io.modelcontextprotocol/tasks`;
+  la notificación genérica ya existente permanece independiente. No afirmar
+  compatibilidad Task wire basada en esta herramienta.
+- El listener de esta fase es **local a una réplica**: no sirve para varias
+  instancias sin bus de eventos compartido.
