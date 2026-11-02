@@ -1,4 +1,5 @@
 import { SqliteLedger } from './sqlite-ledger.js';
+import { summarizeWorkforce, validateRouteReport, type WorkerHost, type WorkerObservation, type WorkerRouteReport } from './workforce-readiness.js';
 /** Original, provider-independent collaboration ledger for authenticated MCP hosts. */
 import { createHash, randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
@@ -14,7 +15,7 @@ export type MeshMessage = { id: string; missionId: string; from: Host; to: Host;
 export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string} };
 export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
-type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
+type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
 const hosts = new Set<string>(HOSTS);
 const roles = new Set<MeshRole>(['orchestrator', 'explorer', 'architect', 'implementer', 'verifier', 'reviewer']);
 export function isHost(x: string): x is Host { return hosts.has(x); }
@@ -49,6 +50,7 @@ export class MeshEngine {
       if (data.specialistBindings !== undefined) check(Array.isArray(data.specialistBindings), 'Invalid specialist binding ledger');
       data.specialistBindings ??= [];
       data.reviews ??= [];
+      data.workforce ??= {};
     };
     normalize(parsed);
     // Persist upgrades inside a transaction; subsequent reads cannot lose historical cursors.
@@ -115,6 +117,30 @@ export class MeshEngine {
     });
   }
   profiles() { return this.read(d => d.profiles); }
+  /** Authenticated worker poll; never claims work or changes its authorization. */
+  workforcePoll(caller: Host, report: WorkerRouteReport) {
+    check(caller !== 'gpt-a', 'Only workers may poll');
+    validateRouteReport(report);
+    return this.write(d => {
+      const registry = d.workforce ??= {};
+      const presence = registry[caller as WorkerHost] ??= {};
+      presence.lastPollAt = iso();
+      presence.reportedRoute = { ...report };
+      const next = d.works.filter(w => w.target === caller && w.state === 'QUEUED')
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))[0];
+      return {
+        status: next ? 'READY' as const : 'EMPTY' as const,
+        next: next ? { workId: next.id, missionId: next.missionId, role: next.role } : null,
+        presenceEvidence: 'AUTHENTICATED_MCP_CALL' as const,
+        routeEvidence: 'REPORTED_UNVERIFIED' as const,
+        autonomousWakeVerified: false as const,
+      };
+    });
+  }
+  workforceStatus(caller: Host) {
+    check(caller === 'gpt-a', 'Only GPT-A may inspect Workforce');
+    return this.read(d => summarizeWorkforce(d.profiles, d.workforce ?? {}, d.works));
+  }
   specialistBindings() { return this.read(d => d.specialistBindings ?? []); }
   /** GPT-A configures many specialist definitions independently of the five hosts. */
   bindSpecialist(caller:Host, input:{agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:string[]}, expectedRevision:number) {
@@ -260,6 +286,10 @@ export class MeshEngine {
         return { ...w, instruction: '', result: null };
       }
       w.state = 'RUNNING'; w.leaseGeneration++; w.attemptId = randomUUID();
+      if (caller !== 'gpt-a') {
+        const presence = (d.workforce ??= {})[caller as WorkerHost] ??= {};
+        presence.lastClaimAt = iso();
+      }
       w.leaseUntil = new Date(Date.now() + leaseSeconds * 1000).toISOString();
       this.notify(d, 'gpt-a');
       return w;
@@ -289,6 +319,10 @@ export class MeshEngine {
       check(Date.parse(w.leaseUntil!) > Date.now(), 'Lease expired');
       w.state = success ? 'COMPLETED' : 'FAILED'; w.result = result; w.receiptDigest = digest;
       w.completedAt = iso(); w.leaseUntil = null;
+      if (caller !== 'gpt-a') {
+        const presence = (d.workforce ??= {})[caller as WorkerHost] ??= {};
+        presence.lastReceiptAt = w.completedAt;
+      }
       const revision = this.notify(d, 'gpt-a');
       d.messages.push({ id: randomUUID(), missionId: w.missionId, from: caller, to: 'gpt-a', workId: id, kind: 'RESULT', text: result, createdAt: iso(), inboxRevision: revision });
       return w;
