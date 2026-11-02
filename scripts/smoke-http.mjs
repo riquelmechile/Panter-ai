@@ -5,6 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import {z} from 'zod/v4';
 
 const dataDir = await mkdtemp(join(tmpdir(), 'panter-mcp-smoke-'));
 const port = String(21000 + Math.floor(Math.random() * 20000));
@@ -60,6 +61,17 @@ try {
   const changed = await gpt.callTool({ name: 'panter_mesh_profile_set', arguments: { host: 'grok', actorId: 'actor-grok-smoke', modelRequest: 'host-default', effortRequest: 'high', roles: ['reviewer'], expectedRevision: 0 } });
   assert.ok(!changed.isError, JSON.stringify(changed.content));
   await Promise.race([event, sleep(7000).then(() => { throw new Error('No subscriptions/listen update delivered'); })]);
+  // Actual SDK custom native Tasks-method exercise, not just bridge tool calls.
+  const startedListener = await grok.callTool({name:'panter_workforce_task_bridge',
+    arguments:{action:'arm',protocolEra:'2026-07-28',ttlSeconds:120}});
+  assert.ok(!startedListener.isError,JSON.stringify(startedListener.content));
+  const taskId = JSON.parse(startedListener.content.find(c=>c.type==='text').text).taskId;
+  const wireSchema=z.object({taskId:z.string(),status:z.string(),ttlMs:z.number().nullable()}).passthrough();
+  const armedWire=await grok.request({method:'tasks/get',params:{taskId}},wireSchema);
+  assert.equal(armedWire.status,'working');
+  await assert.rejects(gpt.request({method:'tasks/get',params:{taskId}},wireSchema));
+  const listenTool=await grok.callTool({name:'panter_workforce_listen',arguments:{waitSeconds:0}});
+  assert.ok(!listenTool.isError);
   const inbox = await gpt.callTool({ name: 'panter_mesh_inbox', arguments: { since: 0 } });
   assert.ok(inbox.content?.some(c => c.type === 'text' && c.text.includes('revision')), 'No durable inbox response');
   // Real cross-actor MCP round trip: GPT-A -> Grok -> GPT-A.
@@ -69,6 +81,9 @@ try {
   } });
   assert.ok(!delegated.isError, JSON.stringify(delegated.content));
   const work = JSON.parse(delegated.content.find(c => c.type === 'text').text);
+  const deliveredWire=await grok.request({method:'tasks/get',params:{taskId}},wireSchema);
+  assert.equal(deliveredWire.status,'completed');
+  assert.ok(!JSON.stringify(deliveredWire).includes('Review the candidate safely'));
   const pending = await grok.callTool({ name: 'panter_mesh_pending', arguments: {} });
   assert.ok(JSON.parse(pending.content.find(c => c.type === 'text').text).some(w => w.workId === work.id));
   const claimed = await grok.callTool({ name: 'panter_mesh_claim', arguments: { workId: work.id, leaseSeconds: 60 } });
@@ -79,6 +94,11 @@ try {
     result: 'Independent security review complete', success: true,
   } });
   assert.ok(!completed.isError, JSON.stringify(completed.content));
+  const nativeCancel=await grok.request({method:'tasks/cancel',params:{taskId}},z.object({}).passthrough());
+  assert.ok(nativeCancel);
+  const stillCompleted=await gpt.callTool({name:'panter_workforce_result_get',arguments:{workId:work.id}});
+  assert.ok(!stillCompleted.isError);
+
   const returned = await gpt.callTool({ name: 'panter_mesh_inbox', arguments: { since: 0 } });
   const inboxPayload = JSON.parse(returned.content.find(c => c.type === 'text').text);
   assert.ok(inboxPayload.messages.some(m => m.workId === work.id && m.kind === 'RESULT' && m.text === 'Independent security review complete'));
