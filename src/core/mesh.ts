@@ -349,7 +349,7 @@ export class MeshEngine {
   }
 
   pending(caller: Host) { return this.read(d => d.works.filter(w => w.target === caller && w.state === 'QUEUED').map(w => ({ workId: w.id, missionId: w.missionId, role: w.role, createdAt: w.createdAt }))); }
-  async claim(caller: Host, workId: string, leaseSeconds = 300) {
+  async claim(caller: Host, workId: string, leaseSeconds = 300, requireQueued = false) {
     check(leaseSeconds >= 30 && leaseSeconds <= 3600, 'Invalid lease');
     const offered=await this.read(d=>d.works.find(w=>w.id===workId&&w.target===caller)??null);
     if(offered?.role==='implementer'&&this.writeGuard)
@@ -357,6 +357,7 @@ export class MeshEngine {
     return this.write(d => {
       const w = d.works.find(w => w.id === workId && w.target === caller);
       check(w, 'Work not found');
+      if(requireQueued)check(w.state==='QUEUED','Work is not claimable');
       const expired = w.state === 'RUNNING' && Date.parse(w.leaseUntil ?? '') <= Date.now();
       check(w.state === 'QUEUED' || w.state === 'RUNNING', 'Work is not claimable');
       if (w.state === 'RUNNING' && !expired) return w;
@@ -387,7 +388,7 @@ export class MeshEngine {
       .sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.workId.localeCompare(b.workId));
     for(const candidate of candidates.slice(0,32)){
       try{
-        const work=await this.claim(caller,candidate.workId,leaseSeconds);
+        const work=await this.claim(caller,candidate.workId,leaseSeconds,true);
         if(work.state!=='RUNNING')return {status:'OUTCOME_UNKNOWN' as const,workId:work.id};
         return {status:'CLAIMED' as const,work};
       }catch(error){

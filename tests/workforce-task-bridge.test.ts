@@ -118,3 +118,14 @@ test('complete-and-rearm commits result exactly once and creates host-owned list
  await assert.rejects(restarted.completeAndRearm('claude',w.id,c.work!.attemptId!,c.work!.leaseGeneration,
    'full raw findings',true,'2025-11-25'),/Work not found/);
 }));
+
+test('concurrent standing pickups never obtain two execution claims for one work',()=>fixture(async m=>{
+ await m.setProfile('gpt-a',grok,0);
+ const w=await m.delegate('gpt-a',{missionId:'parallel',target:'grok',role:'reviewer',
+   instruction:'Do not execute twice',idempotencyKey:'single'});
+ const outcomes=await Promise.all([m.pickup('grok'),m.pickup('grok')]);
+ assert.deepEqual(outcomes.map(x=>x.status).sort(),['CLAIMED','EMPTY']);
+ const claim=outcomes.find(x=>x.status==='CLAIMED')!;
+ assert.equal(claim.work?.id,w.id);
+ assert.equal((await m.pending('grok')).length,0);
+}));
