@@ -15,7 +15,9 @@ export type MeshMessage = { id: string; missionId: string; from: Host; to: Host;
 export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string} };
 export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
-type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
+export type WorkforceTaskBridge = {taskId:string;host:WorkerHost;protocolEra:'2025-11-25'|'2026-07-28';status:'ARMED'|'DELIVERED'|'CANCELLED'|'EXPIRED';createdAt:string;expiresAt:string;workId:string|null};
+export type WorkforceRearmIntent = {workId:string;host:WorkerHost;status:'PENDING'|'ACKED';createdAt:string;acknowledgedAt?:string};
+type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
 const hosts = new Set<string>(HOSTS);
 const roles = new Set<MeshRole>(['orchestrator', 'explorer', 'architect', 'implementer', 'verifier', 'reviewer']);
 export function isHost(x: string): x is Host { return hosts.has(x); }
@@ -51,6 +53,8 @@ export class MeshEngine {
       data.specialistBindings ??= [];
       data.reviews ??= [];
       data.workforce ??= {};
+      data.taskBridges ??= [];
+      data.rearmIntents ??= [];
     };
     normalize(parsed);
     // Persist upgrades inside a transaction; subsequent reads cannot lose historical cursors.
@@ -139,7 +143,83 @@ export class MeshEngine {
   }
   async workforceStatus(caller: Host) {
     check(caller === 'gpt-a', 'Only GPT-A may inspect Workforce');
-    return this.read(d => summarizeWorkforce(d.profiles, d.workforce ?? {}, d.works));
+    return this.read(d => summarizeWorkforce(d.profiles, d.workforce ?? {}, d.works).map(view=>{
+      const active=(d.taskBridges??[]).filter(t=>t.host===view.host&&
+        (t.status==='ARMED'||t.status==='DELIVERED')&&Date.parse(t.expiresAt)>Date.now());
+      return {...view,bridgeListeners:active.map(t=>({taskId:t.taskId,status:t.status,
+        protocolEra:t.protocolEra,expiresAt:t.expiresAt})),
+        pendingRearmIntents:(d.rearmIntents??[]).filter(i=>i.host===view.host&&i.status==='PENDING').length};
+    }));
+  }
+  /** Task bridge is a compat TOOL (not native tasks/get wire). No second work queue:
+   * listener rows are actor-bound transport pointers to QUEUED Mesh work.
+   */
+  async taskBridgeArm(caller:Host, protocolEra:'2025-11-25'|'2026-07-28', ttlSeconds=3600) {
+    check(caller!=='gpt-a','Only workers may arm task bridge');
+    check(['2025-11-25','2026-07-28'].includes(protocolEra),'Unsupported protocol era');
+    check(Number.isInteger(ttlSeconds)&&ttlSeconds>=60&&ttlSeconds<=86400,'Invalid task bridge TTL');
+    return this.write(d=>{
+      const host=caller as WorkerHost;
+      const entries=d.taskBridges??=[];
+      const now=Date.now();
+      for(const item of entries) if(item.host===host&&item.status==='ARMED'&&Date.parse(item.expiresAt)<=now)
+        item.status='EXPIRED';
+      let task=entries.find(item=>item.host===host&&item.protocolEra===protocolEra&&item.status==='ARMED');
+      if(!task){
+        const offered=d.works.filter(w=>w.target===host&&w.state==='QUEUED')
+          .sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.id.localeCompare(b.id))[0];
+        task={taskId:randomUUID(),host,protocolEra,status:offered?'DELIVERED':'ARMED',
+          createdAt:iso(),expiresAt:new Date(now+ttlSeconds*1000).toISOString(),workId:offered?.id??null};
+        (d.taskBridges??=[]).push(task);
+      }
+      // A terminal result already committed before this transaction is never replayed:
+      // ack a rearm intent ONLY after the replacement listener has been stored.
+      for(const intent of d.rearmIntents??[]) if(intent.host===host&&intent.status==='PENDING'){
+        intent.status='ACKED'; intent.acknowledgedAt=iso();
+      }
+      return {taskId:task.taskId,status:task.status,protocolEra:task.protocolEra,
+        expiresAt:task.expiresAt,workId:task.workId,delivery:'SCHEMA_BRIDGE_ONLY' as const,
+        autonomousWakeVerified:false as const};
+    });
+  }
+  async taskBridgeGet(caller:Host,taskId:string){
+    check(caller!=='gpt-a','Only workers may retrieve task bridge');
+    return this.read(d=>{
+      const t=(d.taskBridges??[]).find(x=>x.taskId===taskId&&x.host===caller);
+      check(t,'Task not found');
+      const expired=Date.parse(t.expiresAt)<=Date.now();
+      const consumed=t.status==='DELIVERED'&&
+        !d.works.some(w=>w.id===t.workId&&w.target===caller&&w.state==='QUEUED');
+      return {taskId:t.taskId,status:expired?'EXPIRED':consumed?'CONSUMED':t.status,
+        protocolEra:t.protocolEra,workId:(expired||consumed)?null:t.workId,
+        delivery:'SCHEMA_BRIDGE_ONLY' as const,autonomousWakeVerified:false as const};
+    });
+  }
+  async taskBridgeCancel(caller:Host,taskId:string){
+    check(caller!=='gpt-a','Only workers may cancel task bridge');
+    return this.write(d=>{
+      const t=(d.taskBridges??[]).find(x=>x.taskId===taskId&&x.host===caller);
+      check(t,'Task not found');
+      // Cancellation only invalidates this listener; never cancels authoritative Work.
+      if(t.status==='ARMED'||t.status==='DELIVERED')t.status='CANCELLED';
+      return {taskId:t.taskId,status:t.status,workCancelled:false as const};
+    });
+  }
+  async rearmStatus(caller:Host){
+    return this.read(d=>(d.rearmIntents??[]).filter(i=>caller==='gpt-a'||i.host===caller)
+      .map(i=>({workId:i.workId,host:i.host,status:i.status,createdAt:i.createdAt,acknowledgedAt:i.acknowledgedAt??null})));
+  }
+  /** Full result stays in the durable Mesh ledger; GPT-A explicitly retrieves it.
+   * No worker can read another actor's result via this tool.
+   */
+  async resultGet(caller:Host,workId:string){
+    check(caller==='gpt-a','Only GPT-A may read Workforce results');
+    return this.read(d=>{
+      const w=d.works.find(w=>w.id===workId&&w.from==='gpt-a');
+      check(w&&['COMPLETED','FAILED'].includes(w.state),'Work result not found');
+      return {workId:w.id,missionId:w.missionId,host:w.target,state:w.state,
+        result:w.result,receiptDigest:w.receiptDigest,completedAt:w.completedAt};
+    });
   }
   specialistBindings() { return this.read(d => d.specialistBindings ?? []); }
   /** GPT-A configures many specialist definitions independently of the five hosts. */
@@ -204,6 +284,9 @@ export class MeshEngine {
       }
       const w: MeshWork = { id: randomUUID(), missionId: input.missionId, from: 'gpt-a', target: input.target, role: input.role, instruction: input.instruction, idempotencyKey: input.idempotencyKey, specialist: input.specialist, state: 'QUEUED', attemptId: null, leaseGeneration: 0, leaseUntil: null, result: null, receiptDigest: null, createdAt: iso(), completedAt: null };
       d.works.push(w);
+      // Bind the oldest active transport listener to the authoritative queued work.
+      const bridge=(d.taskBridges??[]).find(t=>t.host===w.target&&t.status==='ARMED'&&Date.parse(t.expiresAt)>Date.now());
+      if(bridge){bridge.status='DELIVERED';bridge.workId=w.id;}
       this.notify(d, input.target);
       this.notify(d, 'gpt-a');
       return w;
@@ -268,7 +351,7 @@ export class MeshEngine {
   }
 
   pending(caller: Host) { return this.read(d => d.works.filter(w => w.target === caller && w.state === 'QUEUED').map(w => ({ workId: w.id, missionId: w.missionId, role: w.role, createdAt: w.createdAt }))); }
-  async claim(caller: Host, workId: string, leaseSeconds = 300) {
+  async claim(caller: Host, workId: string, leaseSeconds = 300, requireQueued = false) {
     check(leaseSeconds >= 30 && leaseSeconds <= 3600, 'Invalid lease');
     const offered=await this.read(d=>d.works.find(w=>w.id===workId&&w.target===caller)??null);
     if(offered?.role==='implementer'&&this.writeGuard)
@@ -276,6 +359,7 @@ export class MeshEngine {
     return this.write(d => {
       const w = d.works.find(w => w.id === workId && w.target === caller);
       check(w, 'Work not found');
+      if(requireQueued)check(w.state==='QUEUED','Work is not claimable');
       const expired = w.state === 'RUNNING' && Date.parse(w.leaseUntil ?? '') <= Date.now();
       check(w.state === 'QUEUED' || w.state === 'RUNNING', 'Work is not claimable');
       if (w.state === 'RUNNING' && !expired) return w;
@@ -295,6 +379,45 @@ export class MeshEngine {
       return w;
     });
   }
+  /** A standing worker obtains a real fenced claim, without enumerating IDs.
+   * No inference takes place here; the host executes the returned instructions.
+   */
+  async pickup(caller:Host,leaseSeconds=300) {
+    check(caller!=='gpt-a','Only workers may pick up delegated work');
+    check(Number.isInteger(leaseSeconds)&&leaseSeconds>=30&&leaseSeconds<=3600,'Invalid lease');
+    // Snapshot candidates only; claim() still validates authority and CAS under SQLite.
+    const candidates=(await this.pending(caller))
+      .sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.workId.localeCompare(b.workId));
+    for(const candidate of candidates.slice(0,32)){
+      try{
+        const work=await this.claim(caller,candidate.workId,leaseSeconds,true);
+        if(work.state!=='RUNNING')return {status:'OUTCOME_UNKNOWN' as const,workId:work.id};
+        return {status:'CLAIMED' as const,work};
+      }catch(error){
+        // Concurrent worker already took this candidate; retry the next.
+        if(error instanceof Error && /Work is not claimable|Work not found/.test(error.message))continue;
+        // A permission failure must never be treated as an empty queue or bypassed.
+        throw error;
+      }
+    }
+    return {status:'EMPTY' as const};
+  }
+  /** Commit terminal receipt first, then separately arm a transport listener.
+   * A rearm failure leaves a durable PENDING intent and never retries the work.
+   */
+  async completeAndRearm(caller:Host,id:string,attemptId:string,generation:number,result:string,
+    success:boolean,protocolEra:'2025-11-25'|'2026-07-28'){
+    check(caller!=='gpt-a','Only workers may complete delegated work');
+    const receipt=await this.complete(caller,id,attemptId,generation,result,success);
+    try {
+      const listener=await this.taskBridgeArm(caller,protocolEra);
+      return {receipt,rearm:{status:'ACKED' as const,taskId:listener.taskId,
+        delivery:'SCHEMA_BRIDGE_ONLY' as const}};
+    }catch {
+      // Preserve the successful terminal ACK; operator can inspect/retry rearm.
+      return {receipt,rearm:{status:'PENDING_RETRY' as const}};
+    }
+  }
   async heartbeat(caller: Host, id: string, attemptId: string, generation: number, leaseSeconds = 300) {
     return this.write(d => {
       const w = d.works.find(w => w.id === id && w.target === caller);
@@ -313,7 +436,8 @@ export class MeshEngine {
       const digest = sha(JSON.stringify({ id, attemptId, generation, result, success }));
       if (w.state === 'COMPLETED' || w.state === 'FAILED') {
         check(w.attemptId === attemptId && w.leaseGeneration === generation && w.receiptDigest === digest, 'Conflicting terminal receipt');
-        return w;
+        return {workId:w.id,state:w.state,receiptDigest:w.receiptDigest,completedAt:w.completedAt,
+          resultAvailable:true,rearmPending:(d.rearmIntents??[]).some(i=>i.workId===id&&i.status==='PENDING')};
       }
       check(w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
       check(Date.parse(w.leaseUntil!) > Date.now(), 'Lease expired');
@@ -324,8 +448,13 @@ export class MeshEngine {
         presence.lastReceiptAt = w.completedAt;
       }
       const revision = this.notify(d, 'gpt-a');
-      d.messages.push({ id: randomUUID(), missionId: w.missionId, from: caller, to: 'gpt-a', workId: id, kind: 'RESULT', text: result, createdAt: iso(), inboxRevision: revision });
-      return w;
+      // Only the receipt pointer enters the inbox, never worker result text.
+      d.messages.push({ id: randomUUID(), missionId: w.missionId, from: caller, to: 'gpt-a', workId: id, kind: 'RESULT', text: JSON.stringify({workId:id,state:w.state,receiptDigest:digest,resultAvailable:true}), createdAt: iso(), inboxRevision: revision });
+      if(caller!=='gpt-a'&&!(d.rearmIntents??[]).some(x=>x.workId===id))
+        (d.rearmIntents??=[]).push({workId:id,host:caller as WorkerHost,status:'PENDING',createdAt:iso()});
+      // Compact terminal receipt: result remains in SQLite for GPT-A.
+      return {workId:w.id,state:w.state,receiptDigest:w.receiptDigest,completedAt:w.completedAt,
+        resultAvailable:true,rearmPending:(d.rearmIntents??[]).some(i=>i.workId===id&&i.status==='PENDING')};
     });
   }
   /** Operator-only ledger view; does not expose credentials and cannot stop a worker. */
@@ -372,7 +501,7 @@ export class MeshEngine {
           generation:w.leaseGeneration,result,operatorEvidence:input.evidence}));
         const revision=this.notify(d,'gpt-a');
         d.messages.push({id:randomUUID(),missionId:w.missionId,from:w.target,to:'gpt-a',
-          workId:w.id,kind:'RESULT',text:result,createdAt:iso(),inboxRevision:revision});
+          workId:w.id,kind:'RESULT',text:JSON.stringify({workId:w.id,state:w.state,receiptDigest:w.receiptDigest,resultAvailable:true}),createdAt:iso(),inboxRevision:revision});
       }else{
         w.state='ABORTED_NO_EFFECTS';w.result=null;w.receiptDigest=null;
         this.notify(d,'gpt-a');

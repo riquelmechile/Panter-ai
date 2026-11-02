@@ -11,6 +11,7 @@ import { ClientAddressPolicy } from './core/trusted-proxy.js';
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { MeshEngine, HOSTS, isHost } from './core/mesh.js';
+import { WorkforceLongPoll } from './core/workforce-long-poll.js';
 import { createServer } from 'node:http';
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
@@ -81,6 +82,7 @@ async function execute<T>(work: () => Promise<T>) {
 const store = await PanterStore.open(dataDir);
 const agents = await AgentEngine.open(dataDir, store);
 const mesh = await MeshEngine.open(dataDir);
+const workforceLongPoll = new WorkforceLongPoll(mesh);
 const nativeSubagentReview = await NativeSubagentReview.open(dataDir);
 const githubGate = new GitHubDeliveryGate({
   allowedRepositories:(process.env.PANTER_GITHUB_ALLOWED_REPOS??'').split(',').map(x=>x.trim()).filter(Boolean),
@@ -347,15 +349,81 @@ const handler = createMcpHandler(() => {
       pollIntervalSeconds:z.number().int().min(60).max(86400).optional(),
     }).strict(),
   },async x=>execute(()=>mesh.workforcePoll(hostPrincipal(),x)));
+  // Actor-bound, single-process long-poll fallback: one bounded waiter per worker.
+  // Not a provider wake and not the MCP Tasks 2026 extension.
+  server.registerTool('panter_workforce_wait',{
+    description:'Authenticated worker holds a live MCP wait up to 3600s for its own QUEUED candidate. No claim/wake authority; requires a live host session.',
+    inputSchema:z.object({
+      protocolEra:z.enum(['2026-07-28','2025-11-25','UNKNOWN']),
+      waitSeconds:z.number().int().min(0).max(3600).default(300),
+    }).strict(),
+  },async (x,ctx)=>execute(()=>workforceLongPoll.wait(hostPrincipal(), x.protocolEra, x.waitSeconds * 1000,ctx.mcpReq.signal)));
   server.registerTool('panter_workforce_status',{
     description:'GPT-A read-only four-worker presence, claims, receipts and unverified wake-route reports. No invented READY or wake proof.',
     inputSchema:z.object({}),annotations:{readOnlyHint:true},
   },async()=>execute(()=>mesh.workforceStatus(hostPrincipal())));
+  // Task schema bridge (NOT extension-native tasks/get): transport pointers only.
+  // Client must re-arm after a terminal receipt; no server-side model execution.
+  server.registerTool('panter_workforce_pickup',{
+    description:'Standing worker claims its next QUEUED authorized work with a fenced attempt. No arbitrary work ID required.',
+    inputSchema:z.object({leaseSeconds:z.number().int().min(30).max(3600).default(300)}).strict()
+  },async x=>execute(()=>mesh.pickup(hostPrincipal(),x.leaseSeconds)));
+  server.registerTool('panter_workforce_complete_and_rearm',{
+    description:'Persist terminal result and receipt first, then arm the next schema bridge listener; failure is a durable rearm retry, never a work replay.',
+    inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),
+      result:z.string().max(50000),success:z.boolean().default(true),
+      protocolEra:z.enum(['2025-11-25','2026-07-28'])}).strict()
+  },async x=>execute(()=>mesh.completeAndRearm(hostPrincipal(),x.workId,x.attemptId,
+    x.leaseGeneration,x.result,x.success,x.protocolEra)));
+  server.registerTool('panter_workforce_task_bridge',{
+    description:'Compatibility task listener arm/get/cancel for authenticated host, backed by Mesh SQLite. This tool is not native MCP Tasks wire.',
+    inputSchema:z.object({
+      action:z.enum(['arm','get','cancel']),
+      protocolEra:z.enum(['2025-11-25','2026-07-28']).optional(),
+      taskId:z.string().uuid().optional(),
+      ttlSeconds:z.number().int().min(60).max(86400).optional(),
+    }).strict()
+  },async x=>execute(async()=>{
+    const actor=hostPrincipal();
+    if(x.action==='arm'){
+      if(!x.protocolEra||x.taskId)throw Error('Arm requires protocol era and no taskId');
+      return mesh.taskBridgeArm(actor,x.protocolEra,x.ttlSeconds);
+    }
+    if(!x.taskId||x.protocolEra||x.ttlSeconds!==undefined)throw Error('Get/cancel require taskId only');
+    return x.action==='get'?mesh.taskBridgeGet(actor,x.taskId):mesh.taskBridgeCancel(actor,x.taskId);
+  }));
+  server.registerTool('panter_workforce_rearm_status',{
+    description:'Actor-visible pending and acknowledged terminal rearm intents. No credentials or result payloads.',
+    inputSchema:z.object({}),annotations:{readOnlyHint:true}
+  },async()=>execute(()=>mesh.rearmStatus(hostPrincipal())));
+  server.registerTool('panter_workforce_result_get',{
+    description:'GPT-A retrieves complete terminal result from authoritative backend, not worker chat output.',
+    inputSchema:z.object({workId:z.uuid()}).strict(),annotations:{readOnlyHint:true}
+  },async x=>execute(()=>mesh.resultGet(hostPrincipal(),x.workId)));
   server.registerTool('panter_mesh_claim',{description:'Claim actor-owned work with a fenced attempt and obtain instructions.',inputSchema:z.object({workId:z.uuid(),leaseSeconds:z.number().int().min(30).max(3600).default(300)})},async x=>execute(()=>mesh.claim(hostPrincipal(),x.workId,x.leaseSeconds)));
   server.registerTool('panter_mesh_heartbeat',{description:'Renew exact worker lease.',inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),leaseSeconds:z.number().int().min(30).max(3600).default(300)})},async x=>execute(()=>mesh.heartbeat(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.leaseSeconds)));
-  server.registerTool('panter_mesh_complete',{description:'Submit fenced terminal receipt; result is automatically delivered to GPT-A inbox.',inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),result:z.string().max(50000),success:z.boolean().default(true)})},async x=>execute(()=>mesh.complete(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.result,x.success)));
+  server.registerTool('panter_mesh_complete',{description:'Persist terminal result in backend, enqueue compact GPT-A receipt, create durable rearm intent; return only compact ack.',inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),result:z.string().max(50000),success:z.boolean().default(true)})},async x=>execute(()=>mesh.complete(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.result,x.success)));
   server.registerTool('panter_mesh_message',{description:'Send actor-bound A2A question, answer or progress update to collaborator or GPT-A.',inputSchema:z.object({missionId:bounded(120),to:hostEnum,workId:z.uuid(),kind:z.enum(['QUESTION','ANSWER','UPDATE']),text:bounded(10000)})},async x=>execute(()=>mesh.message(hostPrincipal(),x)));
-  server.registerTool('panter_mesh_inbox',{description:'Retrieve only the authenticated actor inbox; since is a durable per-actor revision cursor.',inputSchema:z.object({since:z.number().int().nonnegative().default(0)}),annotations:{readOnlyHint:true}},async x=>execute(()=>mesh.inbox(hostPrincipal(),x.since)));
+  // Compact receipts for routine GPT-A orchestration: full result is fetched explicitly.
+  server.registerTool('panter_workforce_receipts',{
+    description:'Authenticated inbox with compact terminal receipt pointers. GPT-A retrieves full result only when necessary.',
+    inputSchema:z.object({since:z.number().int().nonnegative().default(0)}),annotations:{readOnlyHint:true}
+  },async x=>execute(()=>mesh.inbox(hostPrincipal(),x.since)));
+  // Compatibility for preexisting connected clients that expect terminal RESULT text.
+  // Workers still receive compact ACK on complete; only GPT-A can dereference results.
+  server.registerTool('panter_mesh_inbox',{
+    description:'Legacy actor inbox. GPT-A RESULT messages include text for existing clients; use panter_workforce_receipts for compact operation.',
+    inputSchema:z.object({since:z.number().int().nonnegative().default(0)}),annotations:{readOnlyHint:true}
+  },async x=>execute(async()=>{
+    const actor=hostPrincipal(),inbox=await mesh.inbox(actor,x.since);
+    if(actor!=='gpt-a')return inbox;
+    const messages=await Promise.all(inbox.messages.map(async m=>{
+      if(m.kind!=='RESULT'||!m.workId)return m;
+      const full=await mesh.resultGet('gpt-a',m.workId);
+      return {...m,text:full.result??m.text};
+    }));
+    return {...inbox,messages};
+  }));
 
   // The catalog is centrally stored in MCP: hosts receive only a frozen,
   // relevant packet after assignment. Skills do not grant execution rights.

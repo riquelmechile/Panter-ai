@@ -117,8 +117,22 @@ Guía: [SQLITE_MIGRATION.md](SQLITE_MIGRATION.md). Node 22 `node:sqlite` aún es
   Peek actor-bound `panter_workforce_next`, estado agregado `panter_workforce_status`,
   presencia MCP observada, reports de transporte no verificados y receipts del
   Mesh SQLite existente. Tests negativos multi-actor y stale. [Contrato](WORKFORCE_WAKE.md).
-- [ ] Puente real Tasks 2026/2025, Task Bridge/long-poll, listeners y wake
-  webhook/scheduled por host, incluyendo prueba recepción de señal→claim→receipt.
+- [x] Fase 2A: `panter_workforce_wait`, espera actor-bound (0–3600 s),
+  listener antes de peek, evento tras commit, abort/cancel y límite concurrente;
+  respaldo para sesión viva, **no** activación de host cerrado.
+- [x] Fases 2B/2C: `panter_workforce_task_bridge` (herramienta de
+  compatibilidad, no wire oficial), `pickup` con claim cercado único,
+  `complete_and_rearm` con intención SQLite durable, ACK silencioso,
+  `panter_workforce_receipts` compacto y resultado íntegro recuperable por
+  GPT-A. Tests de carreras, reinicio y protocolos sin privilegios añadidos.
+- [ ] MCP Tasks **wire nativo** 2026/2025: negociación real, `tasks/get`,
+  `tasks/update`, `tasks/cancel`, Task result protocol, test con cliente
+  oficial y host; no confundir con bridge. `subscriptions/listen` de recursos
+  ya lo sirve el SDK v2, pero no es un wake externo de modelo.
+- [ ] Pruebas E2E por cuenta y modalidad de permiso preautorizado,
+  señal→claim→receipt→rearm bajo identidad del actor, sin inventar wake.
+- [ ] Cualquier alternativa webhook/scheduled solo con autorización y soporte
+  host observado; **no depender** de Gmail/GitHub/Slack como requisito.
 - [ ] Registro de disponibilidad con prueba real de wake por superficie y
   Scheduler automático sin falsos `CONNECTED` ni elevación de privilegios.
 - [ ] E2E real entre las cuentas existentes GPT-A, GPT-B, Claude, Grok y Gemini.
