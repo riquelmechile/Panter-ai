@@ -111,6 +111,19 @@ The checkboxes below are a **historical per-release backlog** and should not be 
 
 Guía: [SQLITE_MIGRATION.md](SQLITE_MIGRATION.md). Node 22 `node:sqlite` aún es experimental; fijar y validar la versión del runtime.
 
+## v0.16 Xanxittoo 2.0 — Workforce/Wake Gateway (fase 1)
+
+- [x] GPT-A orquestador y cuatro peers GPT-B, Claude, Grok y Gemini, sin Kimi.
+  Peek actor-bound `panter_workforce_next`, estado agregado `panter_workforce_status`,
+  presencia MCP observada, reports de transporte no verificados y receipts del
+  Mesh SQLite existente. Tests negativos multi-actor y stale. [Contrato](WORKFORCE_WAKE.md).
+- [ ] Puente real Tasks 2026/2025, Task Bridge/long-poll, listeners y wake
+  webhook/scheduled por host, incluyendo prueba recepción de señal→claim→receipt.
+- [ ] Registro de disponibilidad con prueba real de wake por superficie y
+  Scheduler automático sin falsos `CONNECTED` ni elevación de privilegios.
+- [ ] E2E real entre las cuentas existentes GPT-A, GPT-B, Claude, Grok y Gemini.
+  Ningún proceso de host ni credencial se configura por este primer PR.
+
 ## v0.16 runner aislado: primer corte de implementación
 
 - [x] ADR-001 aprobado: runner separado, grants firmados, sandbox, worktrees y auditabilidad.
