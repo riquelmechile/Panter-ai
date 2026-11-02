@@ -14,7 +14,7 @@ const v1TaskSchema=z.object({
  ttl:z.number().int().nonnegative().nullable(),pollInterval:z.number().int().nonnegative().optional()
 }).passthrough();
 const v2TaskSchema=z.object({
- taskId:z.string(),status:stateSchema,createdAt:z.string(),lastUpdatedAt:z.string(),
+ resultType:z.literal('complete'),taskId:z.string(),status:stateSchema,createdAt:z.string(),lastUpdatedAt:z.string(),
  ttlMs:z.number().int().nonnegative().nullable(),pollIntervalMs:z.number().int().nonnegative().optional()
 }).passthrough();
 
@@ -22,8 +22,8 @@ function legacy(t:BridgeTask):z.output<typeof v1TaskSchema>{
  return {taskId:t.taskId,status:t.status,createdAt:t.createdAt,lastUpdatedAt:t.lastUpdatedAt,
   ttl:t.ttlMs,pollInterval:t.pollIntervalMs};
 }
-function modern(t:BridgeTask):z.output<typeof v2TaskSchema>{
- const base={taskId:t.taskId,status:t.status,createdAt:t.createdAt,
+export function modern(t:BridgeTask):z.output<typeof v2TaskSchema>{
+ const base={resultType:'complete' as const,taskId:t.taskId,status:t.status,createdAt:t.createdAt,
   lastUpdatedAt:t.lastUpdatedAt,ttlMs:t.ttlMs,pollIntervalMs:t.pollIntervalMs};
  if(t.status==='completed')return {...base,result:{
    content:[{type:'text',text:JSON.stringify({status:t.workId?'CANDIDATE':'CONSUMED',workId:t.workId})}]
@@ -38,12 +38,12 @@ export function registerTaskWire(server:McpServer,mesh:MeshEngine,actor:()=>Host
      {params:taskIdSchema,result:v2TaskSchema},
      async params=>modern(await mesh.wireTaskGet(actor(),params.taskId,'2026-07-28')));
    server.server.setRequestHandler('tasks/cancel',
-     {params:taskIdSchema,result:z.object({}).passthrough()},
+     {params:taskIdSchema,result:z.object({resultType:z.literal('complete')}).passthrough()},
      async params=>{
        const task=await mesh.wireTaskGet(actor(),params.taskId,'2026-07-28');
        // An already-completed task remains terminal even if cancel is requested.
        if(task.status==='working')await mesh.taskBridgeCancel(actor(),params.taskId);
-       return {};
+       return {resultType:'complete' as const};
      });
    return;
  }
