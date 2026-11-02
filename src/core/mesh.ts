@@ -205,7 +205,7 @@ export class MeshEngine {
       check(item,'Task not found');
       const expired=Date.parse(item.expiresAt)<=Date.now();
       const isQueued=item.status==='DELIVERED'&&d.works.some(w=>w.id===item.workId&&w.target===caller&&w.state==='QUEUED');
-      const status=expired||item.status==='EXPIRED'?'failed':item.status==='CANCELLED'?'cancelled':
+      const status:'failed'|'cancelled'|'completed'|'working'=expired||item.status==='EXPIRED'?'failed':item.status==='CANCELLED'?'cancelled':
         item.status==='DELIVERED'?'completed':'working';
       const createdAt=item.createdAt;
       const ttlMs=Math.max(0,Date.parse(item.expiresAt)-Date.parse(createdAt));
