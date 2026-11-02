@@ -12,8 +12,10 @@ should not manually select a peer. Backend selection is deterministic:
 
 1. Reuse an existing `(missionId, idempotencyKey)` work item. Never reroute it.
 2. Consider only configured peers with the requested role, an authenticated
-   poll within the previous 120 seconds, and a reported standing
-   `LONG_POLL` or Tasks/bridge delivery route.
+   poll within the previous 120 seconds, and a **currently active** server-owned
+   long-poll waiter for that same actor. Self-reported LONG_POLL or Tasks
+   metadata alone is never sufficient for automatic remote routing.
+   A disconnected peer is not treated as standing or ready.
 3. Choose the fewest outstanding QUEUED/RUNNING/OUTCOME_UNKNOWN tasks;
    break ties by host name. Specialist-specific selection still uses the
    existing pinned agent/skill binding workflow.
@@ -33,6 +35,13 @@ before arming its next transport handle. GPT-A sees the compact receipt through
 `panter_workforce_result_get`.
 
 ## Proof levels and limits
+
+The current live-listener proof is **process-local**. When a worker is
+attached to a different server replica, this version refuses auto-routing
+rather than trusting only a shared SQLite presence record. An actor that just
+finished its long-poll must re-enter listening before GPT-A may select it
+again. This conservative safety boundary is intentional until distributed
+listener registration has a verifiable lease and acknowledgement.
 
 A recently authenticated poll proves a call happened, not that an app can
 be cold-started or that it will stay connected. An active long-poll refreshes
