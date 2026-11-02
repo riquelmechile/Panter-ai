@@ -8,9 +8,9 @@ actual y su capacidad de wake permanecen desconocidas.
 ## Integrado
 
 - `panter_workforce_next` permite que el **actor autenticado** consulte solo
-  el Work `QUEUED` más antiguo que le corresponde. Retorna el identificador,
+  el Work `QUEUED` más antiguo que le corresponde como **candidato**. Retorna el identificador,
   misión y rol, jamás instrucciones, resultados o datos de otro actor.
-  No reclama ni renueva leases, no eleva grants y nunca reintenta
+  La elegibilidad y los grants se vuelven a verificar en `claim`. No reclama ni renueva leases, no eleva grants y nunca reintenta
   `RUNNING` o `OUTCOME_UNKNOWN`.
 - `panter_workforce_status` es de solo lectura para GPT-A. Muestra exactamente
   cuatro trabajadores, las rutas **reportadas** por cada actor, presencia
