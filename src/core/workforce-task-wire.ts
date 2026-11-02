@@ -40,8 +40,9 @@ export function registerTaskWire(server:McpServer,mesh:MeshEngine,actor:()=>Host
    server.server.setRequestHandler('tasks/cancel',
      {params:taskIdSchema,result:z.object({}).passthrough()},
      async params=>{
-       await mesh.wireTaskGet(actor(),params.taskId,'2026-07-28');
-       await mesh.taskBridgeCancel(actor(),params.taskId);
+       const task=await mesh.wireTaskGet(actor(),params.taskId,'2026-07-28');
+       // An already-completed task remains terminal even if cancel is requested.
+       if(task.status==='working')await mesh.taskBridgeCancel(actor(),params.taskId);
        return {};
      });
    return;
@@ -52,8 +53,8 @@ export function registerTaskWire(server:McpServer,mesh:MeshEngine,actor:()=>Host
  server.server.setRequestHandler('tasks/cancel',
    {params:taskIdSchema,result:v1TaskSchema},
    async params=>{
-     await mesh.wireTaskGet(actor(),params.taskId,'2025-11-25');
-     await mesh.taskBridgeCancel(actor(),params.taskId);
+     const task=await mesh.wireTaskGet(actor(),params.taskId,'2025-11-25');
+     if(task.status==='working')await mesh.taskBridgeCancel(actor(),params.taskId);
      return legacy(await mesh.wireTaskGet(actor(),params.taskId,'2025-11-25'));
    });
  server.server.setRequestHandler('tasks/list',{
