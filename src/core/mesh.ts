@@ -322,6 +322,59 @@ export class MeshEngine {
     });
   }
 
+  /** Select a recently authenticated standing worker without requiring GPT-A to
+   * name a host. A reported route is NOT proof of cold-start wake. If there is
+   * no suitable live peer, GPT-A must use its native local/subagent path.
+   * Existing work is authoritative: an idempotent retry cannot reroute it.
+   */
+  async delegateAuto(caller:Host,input:{missionId:string;role:MeshRole;instruction:string;idempotencyKey:string}) {
+    check(caller==='gpt-a','Only GPT-A can delegate');
+    check(input.missionId.length>0&&input.missionId.length<=120,'Invalid mission');
+    check(roles.has(input.role)&&input.role!=='orchestrator','Invalid role');
+    check(input.instruction.trim().length>0&&input.instruction.length<=50000,'Invalid instruction');
+    check(input.idempotencyKey.length>0&&input.idempotencyKey.length<=160,'Invalid idempotency');
+    const choice=await this.read(d=>{
+      const replay=d.works.find(w=>w.missionId===input.missionId&&w.idempotencyKey===input.idempotencyKey);
+      if(replay)return {replay};
+      if(d.profiles.some(p=>p.host==='gpt-a'&&p.coordinationMode==='GPT_A_ONLY'))
+        return {reason:'GPT_A_ONLY' as const};
+      const now=Date.now();
+      const eligible=d.profiles.filter(p=>{
+        if(p.host==='gpt-a'||!p.roles.includes(input.role))return false;
+        const observation=d.workforce?.[p.host as WorkerHost];
+        const age=now-Date.parse(observation?.lastPollAt??'');
+        // A stored bridge listener alone does not prove the host is online.
+        // Restrict AUTO routing to an authenticated recent poll from a standing route.
+        return Number.isFinite(age)&&age>=0&&age<=120000&&
+          ['LONG_POLL','TASKS_2025','TASKS_2026','TASK_BRIDGE_2025']
+            .includes(observation?.reportedRoute?.deliveryMode??'');
+      }).map(p=>({
+        host:p.host,
+        load:d.works.filter(w=>w.target===p.host&&
+          ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state)).length
+      })).sort((a,b)=>a.load-b.load||a.host.localeCompare(b.host));
+      return eligible.length?{target:eligible[0]!.host}:{reason:'NO_FRESH_STANDBY_PEER' as const};
+    });
+    if('replay' in choice&&choice.replay){
+      check(choice.replay.role===input.role&&choice.replay.instruction===input.instruction,
+        'Idempotency conflict');
+      return {status:'DELEGATED' as const,selectedHost:choice.replay.target,
+        work:choice.replay,selectionEvidence:'IDEMPOTENT_REPLAY' as const,
+        autonomousWakeVerified:false as const};
+    }
+    if(!('target' in choice)||!choice.target){
+      return {status:'LOCAL_FALLBACK_REQUIRED' as const,
+        reason:('reason' in choice?choice.reason:null)??'NO_FRESH_STANDBY_PEER',
+        autonomousWakeVerified:false as const};
+    }
+    // delegate() retains actor/role/grant checks, overlap fencing, and durable
+    // SQLite idempotency. A disconnect after selection remains queued work.
+    const work=await this.delegate(caller,{...input,target:choice.target});
+    return {status:'DELEGATED' as const,selectedHost:work.target,work,
+      selectionEvidence:'AUTHENTICATED_RECENT_POLL' as const,
+      autonomousWakeVerified:false as const};
+  }
+
   /** Atomic 4R / blind-Judgment-Day fanout: exactly one frozen candidate and
    * one durable ledger commit for all review delegations. Native Pi's provider
    * judgment authority is NOT emulated; a controller must evaluate results.
