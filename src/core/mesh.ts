@@ -118,7 +118,7 @@ export class MeshEngine {
   }
   profiles() { return this.read(d => d.profiles); }
   /** Authenticated worker poll; never claims work or changes its authorization. */
-  workforcePoll(caller: Host, report: WorkerRouteReport) {
+  async workforcePoll(caller: Host, report: WorkerRouteReport) {
     check(caller !== 'gpt-a', 'Only workers may poll');
     validateRouteReport(report);
     return this.write(d => {
@@ -137,7 +137,7 @@ export class MeshEngine {
       };
     });
   }
-  workforceStatus(caller: Host) {
+  async workforceStatus(caller: Host) {
     check(caller === 'gpt-a', 'Only GPT-A may inspect Workforce');
     return this.read(d => summarizeWorkforce(d.profiles, d.workforce ?? {}, d.works));
   }
