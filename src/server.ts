@@ -393,7 +393,26 @@ const handler = createMcpHandler(() => {
   server.registerTool('panter_mesh_heartbeat',{description:'Renew exact worker lease.',inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),leaseSeconds:z.number().int().min(30).max(3600).default(300)})},async x=>execute(()=>mesh.heartbeat(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.leaseSeconds)));
   server.registerTool('panter_mesh_complete',{description:'Persist terminal result in backend, enqueue compact GPT-A receipt, create durable rearm intent; return only compact ack.',inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),result:z.string().max(50000),success:z.boolean().default(true)})},async x=>execute(()=>mesh.complete(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.result,x.success)));
   server.registerTool('panter_mesh_message',{description:'Send actor-bound A2A question, answer or progress update to collaborator or GPT-A.',inputSchema:z.object({missionId:bounded(120),to:hostEnum,workId:z.uuid(),kind:z.enum(['QUESTION','ANSWER','UPDATE']),text:bounded(10000)})},async x=>execute(()=>mesh.message(hostPrincipal(),x)));
-  server.registerTool('panter_mesh_inbox',{description:'Retrieve only the authenticated actor inbox; since is a durable per-actor revision cursor.',inputSchema:z.object({since:z.number().int().nonnegative().default(0)}),annotations:{readOnlyHint:true}},async x=>execute(()=>mesh.inbox(hostPrincipal(),x.since)));
+  // Compact receipts for routine GPT-A orchestration: full result is fetched explicitly.
+  server.registerTool('panter_workforce_receipts',{
+    description:'Authenticated inbox with compact terminal receipt pointers. GPT-A retrieves full result only when necessary.',
+    inputSchema:z.object({since:z.number().int().nonnegative().default(0)}),annotations:{readOnlyHint:true}
+  },async x=>execute(()=>mesh.inbox(hostPrincipal(),x.since)));
+  // Compatibility for preexisting connected clients that expect terminal RESULT text.
+  // Workers still receive compact ACK on complete; only GPT-A can dereference results.
+  server.registerTool('panter_mesh_inbox',{
+    description:'Legacy actor inbox. GPT-A RESULT messages include text for existing clients; use panter_workforce_receipts for compact operation.',
+    inputSchema:z.object({since:z.number().int().nonnegative().default(0)}),annotations:{readOnlyHint:true}
+  },async x=>execute(async()=>{
+    const actor=hostPrincipal(),inbox=await mesh.inbox(actor,x.since);
+    if(actor!=='gpt-a')return inbox;
+    const messages=await Promise.all(inbox.messages.map(async m=>{
+      if(m.kind!=='RESULT'||!m.workId)return m;
+      const full=await mesh.resultGet('gpt-a',m.workId);
+      return {...m,text:full.result??m.text};
+    }));
+    return {...inbox,messages};
+  }));
 
   // The catalog is centrally stored in MCP: hosts receive only a frozen,
   // relevant packet after assignment. Skills do not grant execution rights.
