@@ -149,7 +149,8 @@ export class MeshEngine {
     return this.read(d => summarizeWorkforce(d.profiles, d.workforce ?? {}, d.works).map(view=>{
       const active=(d.taskBridges??[]).filter(t=>t.host===view.host&&
         (t.status==='ARMED'||t.status==='DELIVERED')&&Date.parse(t.expiresAt)>Date.now());
-      return {...view,bridgeListeners:active.map(t=>({taskId:t.taskId,status:t.status,
+      return {...view,liveListenerObserved:this.standingListenerCheck?.(view.host)===true,
+        bridgeListeners:active.map(t=>({taskId:t.taskId,status:t.status,
         protocolEra:t.protocolEra,expiresAt:t.expiresAt})),
         pendingRearmIntents:(d.rearmIntents??[]).filter(i=>i.host===view.host&&i.status==='PENDING').length};
     }));
