@@ -188,8 +188,10 @@ export class MeshEngine {
       const t=(d.taskBridges??[]).find(x=>x.taskId===taskId&&x.host===caller);
       check(t,'Task not found');
       const expired=Date.parse(t.expiresAt)<=Date.now();
-      return {taskId:t.taskId,status:expired?'EXPIRED':t.status,
-        protocolEra:t.protocolEra,workId:expired?null:t.workId,
+      const consumed=t.status==='DELIVERED'&&
+        !d.works.some(w=>w.id===t.workId&&w.target===caller&&w.state==='QUEUED');
+      return {taskId:t.taskId,status:expired?'EXPIRED':consumed?'CONSUMED':t.status,
+        protocolEra:t.protocolEra,workId:(expired||consumed)?null:t.workId,
         delivery:'SCHEMA_BRIDGE_ONLY' as const,autonomousWakeVerified:false as const};
     });
   }

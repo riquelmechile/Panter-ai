@@ -120,3 +120,5 @@ Ninguno de esos hosts se declara `WAKE_VERIFIED`.
   `panter_workforce_result_get` antes de retirar el legacy.
 - Los cambios no reemplazan el Task wire nativo de 2025/2026; los IDs de
   bridge son internos, autenticados y no se anuncian como MCP Tasks oficiales.
+
+- Un listener que ya fue reclamado presenta `CONSUMED` y omite el puntero, aunque el registro histórico permanezca. La nueva escucha se rearma por separado tras terminalización y no permite repetir el efecto.

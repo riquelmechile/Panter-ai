@@ -129,3 +129,36 @@ test('concurrent standing pickups never obtain two execution claims for one work
  assert.equal(claim.work?.id,w.id);
  assert.equal((await m.pending('grok')).length,0);
 }));
+
+test('bridge pointer becomes CONSUMED after fenced claim and does not permit stale pickup',()=>fixture(async m=>{
+ await m.setProfile('gpt-a',grok,0);
+ const task=await m.taskBridgeArm('grok','2026-07-28');
+ const w=await m.delegate('gpt-a',{missionId:'m-consumed',target:'grok',
+ role:'reviewer',instruction:'Do once',idempotencyKey:'consumed'});
+ assert.equal((await m.taskBridgeGet('grok',task.taskId)).workId,w.id);
+ const claimed=await m.pickup('grok');
+ assert.equal(claimed.status,'CLAIMED');
+ const stale=await m.taskBridgeGet('grok',task.taskId);
+ assert.equal(stale.status,'CONSUMED');
+ assert.equal(stale.workId,null);
+ assert.equal((await m.pickup('grok')).status,'EMPTY');
+}));
+
+test('failed rearm cannot replay a committed result and can resume after recovery',()=>fixture(async (m,dir)=>{
+ await m.setProfile('gpt-a',grok,0);
+ const w=await m.delegate('gpt-a',{missionId:'m-rearmfail',target:'grok',
+ role:'reviewer',instruction:'Audit once',idempotencyKey:'one'});
+ const c=await m.pickup('grok');
+ assert.equal(c.status,'CLAIMED');
+ m.taskBridgeArm=async()=>{throw new Error('transient transport error')};
+ const result=await m.completeAndRearm('grok',w.id,c.work!.attemptId!,
+ c.work!.leaseGeneration,'final output',true,'2026-07-28');
+ assert.equal(result.receipt.state,'COMPLETED');
+ assert.equal(result.rearm.status,'PENDING_RETRY');
+ const reopened=await MeshEngine.open(dir);
+ assert.equal((await reopened.resultGet('gpt-a',w.id)).result,'final output');
+ assert.equal((await reopened.rearmStatus('grok'))[0]!.status,'PENDING');
+ await reopened.taskBridgeArm('grok','2026-07-28');
+ assert.equal((await reopened.rearmStatus('grok'))[0]!.status,'ACKED');
+ assert.equal((await reopened.inbox('gpt-a')).messages.filter(x=>x.workId===w.id&&x.kind==='RESULT').length,1);
+}));
