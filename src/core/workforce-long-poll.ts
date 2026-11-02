@@ -11,12 +11,13 @@ export class WorkforceLongPoll {
   private readonly active = new Set<WorkerHost>();
   constructor(private readonly mesh: MeshEngine) {}
 
-  async wait(caller: Host, protocolEra: ProtocolEra, waitMs: number) {
+  async wait(caller: Host, protocolEra: ProtocolEra, waitMs: number, signal?:AbortSignal) {
     if (!(WORKER_HOSTS as readonly string[]).includes(caller))
       throw new Error('Only authenticated workers may wait for work');
-    if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > 20_000)
-      throw new Error('Long-poll wait must be 0..20000 milliseconds');
+    if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > 3_600_000)
+      throw new Error('Long-poll wait must be 0..3600000 milliseconds');
 
+    if (signal?.aborted) throw new Error('Long-poll cancelled');
     const host = caller as WorkerHost;
     const report = {protocolEra, deliveryMode: 'LONG_POLL' as const};
     // Fail-closed duplicate wait admission applies before any async work.
@@ -39,17 +40,21 @@ export class WorkforceLongPoll {
     const deadline = performance.now() + waitMs;
     try {
       while (true) {
+        if(signal?.aborted) throw new Error('Long-poll cancelled');
         changed = false;
         const result = await this.mesh.workforcePoll(host, report);
         if (result.next) return {...result, waitOutcome: 'CANDIDATE' as const};
         const remaining = deadline - performance.now();
         if (remaining <= 0) return {...result, waitOutcome: 'TIMED_OUT' as const};
         if (changed) continue;
-        await new Promise<void>(resolve => {
-          resume = resolve;
-          timeout = setTimeout(resolve, remaining);
-          // A durable event may have landed while awaiting the preceding poll.
-          if (changed) resolve();
+        await new Promise<void>((resolve,reject) => {
+          const cleanup = () => signal?.removeEventListener('abort', onAbort);
+          const onAbort = () => {cleanup(); reject(new Error('Long-poll cancelled'));};
+          if(signal?.aborted){onAbort();return;}
+          signal?.addEventListener('abort',onAbort,{once:true});
+          resume = () => {cleanup(); resolve();};
+          timeout = setTimeout(() => {cleanup(); resolve();}, remaining);
+          if (changed) resume();
         });
         resume = null;
         if (timeout) { clearTimeout(timeout); timeout = null; }

@@ -352,19 +352,46 @@ const handler = createMcpHandler(() => {
   // Actor-bound, single-process long-poll fallback: one bounded waiter per worker.
   // Not a provider wake and not the MCP Tasks 2026 extension.
   server.registerTool('panter_workforce_wait',{
-    description:'Authenticated worker waits up to 20s for its own oldest QUEUED candidate. No claim, no wake guarantee and no second queue.',
+    description:'Authenticated worker holds a live MCP wait up to 3600s for its own QUEUED candidate. No claim/wake authority; requires a live host session.',
     inputSchema:z.object({
       protocolEra:z.enum(['2026-07-28','2025-11-25','UNKNOWN']),
-      waitSeconds:z.number().int().min(0).max(20).default(15),
+      waitSeconds:z.number().int().min(0).max(3600).default(300),
     }).strict(),
-  },async x=>execute(()=>workforceLongPoll.wait(hostPrincipal(), x.protocolEra, x.waitSeconds * 1000)));
+  },async (x,ctx)=>execute(()=>workforceLongPoll.wait(hostPrincipal(), x.protocolEra, x.waitSeconds * 1000,ctx.mcpReq.signal)));
   server.registerTool('panter_workforce_status',{
     description:'GPT-A read-only four-worker presence, claims, receipts and unverified wake-route reports. No invented READY or wake proof.',
     inputSchema:z.object({}),annotations:{readOnlyHint:true},
   },async()=>execute(()=>mesh.workforceStatus(hostPrincipal())));
+  // Task schema bridge (NOT extension-native tasks/get): transport pointers only.
+  // Client must re-arm after a terminal receipt; no server-side model execution.
+  server.registerTool('panter_workforce_task_bridge',{
+    description:'Compatibility task listener arm/get/cancel for authenticated host, backed by Mesh SQLite. This tool is not native MCP Tasks wire.',
+    inputSchema:z.object({
+      action:z.enum(['arm','get','cancel']),
+      protocolEra:z.enum(['2025-11-25','2026-07-28']).optional(),
+      taskId:z.string().uuid().optional(),
+      ttlSeconds:z.number().int().min(60).max(86400).optional(),
+    }).strict()
+  },async x=>execute(async()=>{
+    const actor=hostPrincipal();
+    if(x.action==='arm'){
+      if(!x.protocolEra||x.taskId)throw Error('Arm requires protocol era and no taskId');
+      return mesh.taskBridgeArm(actor,x.protocolEra,x.ttlSeconds);
+    }
+    if(!x.taskId||x.protocolEra||x.ttlSeconds!==undefined)throw Error('Get/cancel require taskId only');
+    return x.action==='get'?mesh.taskBridgeGet(actor,x.taskId):mesh.taskBridgeCancel(actor,x.taskId);
+  }));
+  server.registerTool('panter_workforce_rearm_status',{
+    description:'Actor-visible pending and acknowledged terminal rearm intents. No credentials or result payloads.',
+    inputSchema:z.object({}),annotations:{readOnlyHint:true}
+  },async()=>execute(()=>mesh.rearmStatus(hostPrincipal())));
+  server.registerTool('panter_workforce_result_get',{
+    description:'GPT-A retrieves complete terminal result from authoritative backend, not worker chat output.',
+    inputSchema:z.object({workId:z.uuid()}).strict(),annotations:{readOnlyHint:true}
+  },async x=>execute(()=>mesh.resultGet(hostPrincipal(),x.workId)));
   server.registerTool('panter_mesh_claim',{description:'Claim actor-owned work with a fenced attempt and obtain instructions.',inputSchema:z.object({workId:z.uuid(),leaseSeconds:z.number().int().min(30).max(3600).default(300)})},async x=>execute(()=>mesh.claim(hostPrincipal(),x.workId,x.leaseSeconds)));
   server.registerTool('panter_mesh_heartbeat',{description:'Renew exact worker lease.',inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),leaseSeconds:z.number().int().min(30).max(3600).default(300)})},async x=>execute(()=>mesh.heartbeat(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.leaseSeconds)));
-  server.registerTool('panter_mesh_complete',{description:'Submit fenced terminal receipt; result is automatically delivered to GPT-A inbox.',inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),result:z.string().max(50000),success:z.boolean().default(true)})},async x=>execute(()=>mesh.complete(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.result,x.success)));
+  server.registerTool('panter_mesh_complete',{description:'Persist terminal result in backend, enqueue compact GPT-A receipt, create durable rearm intent; return only compact ack.',inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),result:z.string().max(50000),success:z.boolean().default(true)})},async x=>execute(()=>mesh.complete(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.result,x.success)));
   server.registerTool('panter_mesh_message',{description:'Send actor-bound A2A question, answer or progress update to collaborator or GPT-A.',inputSchema:z.object({missionId:bounded(120),to:hostEnum,workId:z.uuid(),kind:z.enum(['QUESTION','ANSWER','UPDATE']),text:bounded(10000)})},async x=>execute(()=>mesh.message(hostPrincipal(),x)));
   server.registerTool('panter_mesh_inbox',{description:'Retrieve only the authenticated actor inbox; since is a durable per-actor revision cursor.',inputSchema:z.object({since:z.number().int().nonnegative().default(0)}),annotations:{readOnlyHint:true}},async x=>execute(()=>mesh.inbox(hostPrincipal(),x.since)));
 
