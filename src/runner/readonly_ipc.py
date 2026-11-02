@@ -32,7 +32,7 @@ class AdmissionError(Exception):
     """Fixed messages, never include client-provided content."""
 
 
-def validate_socket_path(path: str) -> Path:
+def validate_socket_path(path: str, socket_gid: int | None = None) -> Path:
     if not path or not os.path.isabs(path) or "\0" in path:
         raise AdmissionError("Invalid absolute socket path")
     target = Path(path)
@@ -43,8 +43,19 @@ def validate_socket_path(path: str) -> Path:
         info = os.lstat(parent)
     except OSError as exc:
         raise AdmissionError("Socket parent unavailable") from exc
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
-        raise AdmissionError("Socket parent must be private and owned by runner UID")
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != os.geteuid():
+        raise AdmissionError("Socket parent must be owned by runner UID")
+    # The direct parent may not hide a symlink in an ancestor.
+    if os.path.realpath(parent) != str(parent):
+        raise AdmissionError("Socket parent ancestry must be real")
+    if socket_gid is None:
+        if info.st_mode & 0o077:
+            raise AdmissionError("Default socket parent must be private 0700")
+    else:
+        if (not isinstance(socket_gid, int) or socket_gid <= 0 or
+                socket_gid != info.st_gid or socket_gid != os.getegid() or
+                stat.S_IMODE(info.st_mode) != 0o710):
+            raise AdmissionError("Cross-UID socket parent must be runner-owned 0710 and group-bound")
     # Never unlink a pre-existing path (including a symlink or another server).
     if os.path.lexists(target):
         raise AdmissionError("Refusing existing socket path")
@@ -92,12 +103,14 @@ def read_intent(conn: socket.socket) -> bool:
             decoded["operation"] == "runner.status")
 
 
-def serve(socket_path: str, allowed_uid: int) -> None:
+def serve(socket_path: str, allowed_uid: int, socket_gid: int | None = None) -> None:
     if sys.platform != "linux" or not hasattr(socket, "SO_PEERCRED"):
         raise AdmissionError("Linux SO_PEERCRED required")
     if not isinstance(allowed_uid, int) or allowed_uid < 0:
         raise AdmissionError("Invalid allowlisted UID")
-    target = validate_socket_path(socket_path)
+    if socket_gid is not None and allowed_uid == os.geteuid():
+        raise AdmissionError("Cross-UID mode requires a different peer UID")
+    target = validate_socket_path(socket_path, socket_gid)
     # The socket path is owned by the runner's UID; no group/world access.
     prior_umask = os.umask(0o177)
     server: socket.socket | None = None
@@ -135,8 +148,13 @@ def serve(socket_path: str, allowed_uid: int) -> None:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         prior_sigterm = signal.signal(signal.SIGTERM, request_stop)
         server.bind(str(target))
-        os.chmod(target, 0o600, follow_symlinks=False)
+        # Once bind succeeds, cleanup must run even when chgrp/chmod fails.
         cleanup_inode = os.lstat(target).st_ino
+        if socket_gid is not None:
+            os.chown(target, -1, socket_gid, follow_symlinks=False)
+            os.chmod(target, 0o660, follow_symlinks=False)
+        else:
+            os.chmod(target, 0o600, follow_symlinks=False)
         server.listen(MAX_ACTIVE_CLIENTS)
         server.settimeout(0.4)
         while not stopping:
@@ -180,9 +198,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Deny-by-default local runner admission (no execution)")
     parser.add_argument("--socket", required=True)
     parser.add_argument("--allow-uid", type=int, required=True)
+    parser.add_argument("--socket-gid", type=int, default=None,
+                        help="Explicit different-UID peer group; runner must have this primary GID")
     args = parser.parse_args()
     try:
-        serve(args.socket, args.allow_uid)
+        serve(args.socket, args.allow_uid, args.socket_gid)
         return 0
     except AdmissionError as exc:
         print(str(exc), file=sys.stderr)
