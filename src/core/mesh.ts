@@ -117,7 +117,7 @@ export class MeshEngine {
     });
   }
   profiles() { return this.read(d => d.profiles); }
-  /** Authenticated worker poll; never claims work or changes its authorization. */
+  /** Authenticated worker poll; exposes a QUEUED candidate only. Claim may still reject expired authorization. */
   async workforcePoll(caller: Host, report: WorkerRouteReport) {
     check(caller !== 'gpt-a', 'Only workers may poll');
     validateRouteReport(report);
@@ -129,7 +129,7 @@ export class MeshEngine {
       const next = d.works.filter(w => w.target === caller && w.state === 'QUEUED')
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))[0];
       return {
-        status: next ? 'READY' as const : 'EMPTY' as const,
+        status: next ? 'CANDIDATE' as const : 'EMPTY' as const,
         next: next ? { workId: next.id, missionId: next.missionId, role: next.role } : null,
         presenceEvidence: 'AUTHENTICATED_MCP_CALL' as const,
         routeEvidence: 'REPORTED_UNVERIFIED' as const,
