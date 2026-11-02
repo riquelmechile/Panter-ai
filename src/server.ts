@@ -340,7 +340,7 @@ const handler = createMcpHandler(() => {
   // An authenticated worker may check ONLY its own oldest queued pointer.
   // Self-reported wake routes are never promoted to verified autonomous delivery.
   server.registerTool('panter_workforce_next',{
-    description:'Actor-bound next eligible QUEUED work pointer; updates observed MCP presence, but never claims, wakes or grants execution.',
+    description:'Actor-bound next QUEUED candidate pointer; claim revalidates authorization. Updates observed MCP presence but never wakes or grants execution.',
     inputSchema:z.object({
       protocolEra:z.enum(['2026-07-28','2025-11-25','UNKNOWN']),
       deliveryMode:z.enum(['DELIVERY_ONLY','TASKS_2026','TASKS_2025','TASK_BRIDGE_2025','LONG_POLL','EXTERNAL_WAKE','SCHEDULED_POLL']),
