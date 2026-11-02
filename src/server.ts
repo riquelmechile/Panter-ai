@@ -11,6 +11,7 @@ import { ClientAddressPolicy } from './core/trusted-proxy.js';
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { MeshEngine, HOSTS, isHost } from './core/mesh.js';
+import { registerTaskWire } from './core/workforce-task-wire.js';
 import { WorkforceLongPoll } from './core/workforce-long-poll.js';
 import { createServer } from 'node:http';
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server';
@@ -135,7 +136,7 @@ function requireAdmin(){if(!isAdminPrincipal(principal(),ownerTrustedHosts))thro
 const missionStatus = z.enum(['DRAFT', 'READY', 'RUNNING', 'VERIFYING', 'DONE', 'BLOCKED']);
 const bounded = (max = 2048) => z.string().trim().min(1).max(max);
 
-const handler = createMcpHandler(() => {
+const handler = createMcpHandler(reqCtx => {
   const server = new McpServer({ name: 'panter-ai', version: '0.15.0' }, {
     capabilities: { resources: { subscribe: true } },
     instructions: 'Panter-ai is a host-operated development harness with NO provider inference. GPT-A is the coordinator. For a new user development request start with panter_harness_start (goal + permitted work and observed facts, NEVER ask the user to pick agents, roles, skills or review lenses). Then call panter_harness_tick and execute the returned phase automatically with host tools or native subagents; call panter_harness_report after observing actual results, and repeat until blocked by actual authorization/evidence or completed. The server automatically selects ODD discovery, planning, scoped implementation, independent verification and 4R by risk; Judgment Day only when explicitly requested. An initial Agent Studio preference may bind model/host but never requires per-task specialist selection. GPT_A_ONLY forbids remote delegation while preserving maximum requested model/effort, fast native worker processing, and maximum safe host-observed parallelism. If no remote peer is connected continue with GPT-A native/inline. The host owns model selection and subagent execution; claims of model, effort, speed or children are REQUESTED, not verified. Do not misstate packet preparation as subagent execution. Panter-RDD is an independently implemented SHA-bound review gate, not the official Gentle AI Go controller; human delivery authorization remains separate. Do not merge or deploy without separately authorized tools and exact-candidate proof.'
@@ -349,6 +350,16 @@ const handler = createMcpHandler(() => {
       pollIntervalSeconds:z.number().int().min(60).max(86400).optional(),
     }).strict(),
   },async x=>execute(()=>mesh.workforcePoll(hostPrincipal(),x)));
+  // Negotiated 2025/2026 era comes from SDK connection, not a worker claim.
+  // Native tasks/get/cancel and legacy list/result operate over existing
+  // durable listener handles; native Tasks *creation* remains unsupported.
+  registerTaskWire(server,mesh,hostPrincipal,reqCtx.era);
+  server.registerTool('panter_workforce_listen',{
+    description:'Authenticated live MCP listen request (0–3600s) with server-observed protocol era. Resumes a connected host when a work pointer arrives; not cold-start.',
+    inputSchema:z.object({waitSeconds:z.number().int().min(0).max(3600).default(300)}).strict()
+  },async (x,ctx)=>execute(()=>workforceLongPoll.wait(hostPrincipal(),
+    reqCtx.era==='modern'?'2026-07-28':'2025-11-25',
+    x.waitSeconds*1000,ctx.mcpReq.signal)));
   // Actor-bound, single-process long-poll fallback: one bounded waiter per worker.
   // Not a provider wake and not the MCP Tasks 2026 extension.
   server.registerTool('panter_workforce_wait',{

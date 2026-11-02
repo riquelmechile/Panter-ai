@@ -195,6 +195,35 @@ export class MeshEngine {
         delivery:'SCHEMA_BRIDGE_ONLY' as const,autonomousWakeVerified:false as const};
     });
   }
+  /** Read-only actor-scoped Task wire projection over existing bridge records.
+   * This never allows an event or task ID to claim executable work.
+   */
+  async wireTaskGet(caller:Host,taskId:string,era:'2025-11-25'|'2026-07-28'){
+    check(caller!=='gpt-a','Only workers may inspect listener tasks');
+    return this.read(d=>{
+      const item=(d.taskBridges??[]).find(t=>t.taskId===taskId&&t.host===caller&&t.protocolEra===era);
+      check(item,'Task not found');
+      const expired=Date.parse(item.expiresAt)<=Date.now();
+      const isQueued=item.status==='DELIVERED'&&d.works.some(w=>w.id===item.workId&&w.target===caller&&w.state==='QUEUED');
+      const status=expired||item.status==='EXPIRED'?'failed':item.status==='CANCELLED'?'cancelled':
+        item.status==='DELIVERED'?'completed':'working';
+      const createdAt=item.createdAt;
+      const ttlMs=Math.max(0,Date.parse(item.expiresAt)-Date.parse(createdAt));
+      return {taskId:item.taskId,status,createdAt,lastUpdatedAt:createdAt,
+        ttlMs,pollIntervalMs:1000,workId:isQueued?item.workId:null};
+    });
+  }
+  async wireTaskList(caller:Host,era:'2025-11-25'|'2026-07-28',cursor?:string){
+    check(caller!=='gpt-a','Only workers may inspect listener tasks');
+    return this.read(d=>{
+      const rows=(d.taskBridges??[]).filter(t=>t.host===caller&&t.protocolEra===era)
+        .sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.taskId.localeCompare(b.taskId));
+      const pos=cursor===undefined?0:rows.findIndex(t=>t.taskId===cursor)+1;
+      check(cursor===undefined||pos>0,'Invalid task cursor');
+      const page=rows.slice(pos,pos+25);
+      return {taskIds:page.map(t=>t.taskId),nextCursor:rows.length>pos+25?page.at(-1)?.taskId:undefined};
+    });
+  }
   async taskBridgeCancel(caller:Host,taskId:string){
     check(caller!=='gpt-a','Only workers may cancel task bridge');
     return this.write(d=>{
