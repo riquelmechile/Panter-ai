@@ -17,7 +17,7 @@ test('2025 task wire projections use durable actor-scoped bridge, no task-conten
  const task=await m.taskBridgeArm('grok','2025-11-25',60);
  const before=await m.wireTaskGet('grok',task.taskId,'2025-11-25');
  assert.equal(before.status,'working');
- assert.equal(before.ttlMs,60000);
+ assert.ok(before.ttlMs>=59000&&before.ttlMs<=60000,'TTL measured against persisted creation timestamp');
  await assert.rejects(m.wireTaskGet('claude',task.taskId,'2025-11-25'),/not found/);
  await assert.rejects(m.wireTaskGet('gpt-a',task.taskId,'2025-11-25'),/Only workers/);
  await assert.rejects(m.wireTaskGet('grok',task.taskId,'2026-07-28'),/not found/);
