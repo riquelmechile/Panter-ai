@@ -84,6 +84,7 @@ const store = await PanterStore.open(dataDir);
 const agents = await AgentEngine.open(dataDir, store);
 const mesh = await MeshEngine.open(dataDir);
 const workforceLongPoll = new WorkforceLongPoll(mesh);
+mesh.setStandingListenerCheck(host=>workforceLongPoll.isListening(host));
 const nativeSubagentReview = await NativeSubagentReview.open(dataDir);
 const githubGate = new GitHubDeliveryGate({
   allowedRepositories:(process.env.PANTER_GITHUB_ALLOWED_REPOS??'').split(',').map(x=>x.trim()).filter(Boolean),

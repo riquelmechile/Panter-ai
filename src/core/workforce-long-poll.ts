@@ -12,6 +12,8 @@ export class WorkforceLongPoll {
   // Periodically refresh authenticated presence while a live wait stays open.
   // Also catches commits made by a separate process sharing the SQLite ledger.
   constructor(private readonly mesh: MeshEngine, private readonly refreshMs = 60_000) {}
+  /** Evidence of a live tool wait in this server process, never proof of a cold start. */
+  isListening(host: WorkerHost): boolean { return this.active.has(host); }
 
   async wait(caller: Host, protocolEra: ProtocolEra, waitMs: number, signal?:AbortSignal) {
     if (!(WORKER_HOSTS as readonly string[]).includes(caller))

@@ -32,6 +32,9 @@ export class MeshEngine {
   /** Emitted only AFTER the updated ledger is atomically persisted. */
   readonly events = new EventEmitter();
   private writeGuard:((missionId:string,paths:string[])=>Promise<void>)|null=null;
+  /** Ephemeral process-local proof: durable route reports alone cannot prove wake. */
+  private standingListenerCheck:((host:WorkerHost)=>boolean)|null=null;
+  setStandingListenerCheck(check:(host:WorkerHost)=>boolean){this.standingListenerCheck=check;}
   setWriteGuard(guard:(missionId:string,paths:string[])=>Promise<void>){this.writeGuard=guard;}
   private constructor(dir: string) { this.sqlite = SqliteLedger.open(dir); }
   static async open(dir: string) {
@@ -146,7 +149,8 @@ export class MeshEngine {
     return this.read(d => summarizeWorkforce(d.profiles, d.workforce ?? {}, d.works).map(view=>{
       const active=(d.taskBridges??[]).filter(t=>t.host===view.host&&
         (t.status==='ARMED'||t.status==='DELIVERED')&&Date.parse(t.expiresAt)>Date.now());
-      return {...view,bridgeListeners:active.map(t=>({taskId:t.taskId,status:t.status,
+      return {...view,liveListenerObserved:this.standingListenerCheck?.(view.host)===true,
+        bridgeListeners:active.map(t=>({taskId:t.taskId,status:t.status,
         protocolEra:t.protocolEra,expiresAt:t.expiresAt})),
         pendingRearmIntents:(d.rearmIntents??[]).filter(i=>i.host===view.host&&i.status==='PENDING').length};
     }));
@@ -343,11 +347,12 @@ export class MeshEngine {
         if(p.host==='gpt-a'||!p.roles.includes(input.role))return false;
         const observation=d.workforce?.[p.host as WorkerHost];
         const age=now-Date.parse(observation?.lastPollAt??'');
-        // A stored bridge listener alone does not prove the host is online.
-        // Restrict AUTO routing to an authenticated recent poll from a standing route.
+        // A worker can self-report LONG_POLL via panter_workforce_next.
+        // Auto routing therefore requires an observed live MCP tool waiter
+        // in this server process, *not* just fresh self-reported metadata.
         return Number.isFinite(age)&&age>=0&&age<=120000&&
-          ['LONG_POLL','TASKS_2025','TASKS_2026','TASK_BRIDGE_2025']
-            .includes(observation?.reportedRoute?.deliveryMode??'');
+          this.standingListenerCheck?.(p.host as WorkerHost)===true &&
+          observation?.reportedRoute?.deliveryMode==='LONG_POLL';
       }).map(p=>({
         host:p.host,
         load:d.works.filter(w=>w.target===p.host&&
@@ -371,7 +376,7 @@ export class MeshEngine {
     // SQLite idempotency. A disconnect after selection remains queued work.
     const work=await this.delegate(caller,{...input,target:choice.target});
     return {status:'DELEGATED' as const,selectedHost:work.target,work,
-      selectionEvidence:'AUTHENTICATED_RECENT_POLL' as const,
+      selectionEvidence:'LIVE_MCP_LISTENER_AND_AUTHENTICATED_POLL' as const,
       autonomousWakeVerified:false as const};
   }
 
