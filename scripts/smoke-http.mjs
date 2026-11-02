@@ -75,12 +75,21 @@ try {
   const inbox = await gpt.callTool({ name: 'panter_mesh_inbox', arguments: { since: 0 } });
   assert.ok(inbox.content?.some(c => c.type === 'text' && c.text.includes('revision')), 'No durable inbox response');
   // Real cross-actor MCP round trip: GPT-A -> Grok -> GPT-A.
+  // A real authenticated live MCP tool request: wait without provider polling.
+  const activeListen = grok.callTool({name:'panter_workforce_listen',arguments:{waitSeconds:8}});
   const delegated = await gpt.callTool({ name: 'panter_mesh_delegate', arguments: {
     missionId: 'smoke-mission', target: 'grok', role: 'reviewer',
     instruction: 'Review the candidate safely', idempotencyKey: 'smoke-review-1',
   } });
   assert.ok(!delegated.isError, JSON.stringify(delegated.content));
   const work = JSON.parse(delegated.content.find(c => c.type === 'text').text);
+  const liveDelivery = await Promise.race([activeListen,
+    sleep(10000).then(()=>{throw Error('Authenticated listener did not receive durable delegate');})]);
+  assert.ok(!liveDelivery.isError,JSON.stringify(liveDelivery.content));
+  const liveState=JSON.parse(liveDelivery.content.find(c=>c.type==='text').text);
+  assert.equal(liveState.waitOutcome,'CANDIDATE');
+  assert.equal(liveState.next.workId,work.id);
+  assert.equal(liveState.autonomousWakeVerified,false);
   const deliveredWire=await grok.request({method:'tasks/get',params:{taskId}},wireSchema);
   assert.equal(deliveredWire.status,'completed');
   assert.ok(!JSON.stringify(deliveredWire).includes('Review the candidate safely'));
