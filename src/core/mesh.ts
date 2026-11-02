@@ -17,7 +17,8 @@ export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;ef
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
 export type WorkforceTaskBridge = {taskId:string;host:WorkerHost;protocolEra:'2025-11-25'|'2026-07-28';status:'ARMED'|'DELIVERED'|'CANCELLED'|'EXPIRED';createdAt:string;expiresAt:string;workId:string|null};
 export type WorkforceRearmIntent = {workId:string;host:WorkerHost;status:'PENDING'|'ACKED';createdAt:string;acknowledgedAt?:string};
-type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
+export type GrokWakeAttempt = {workId:string;state:'RESERVED'|'SIGNAL_ACCEPTED'|'SIGNAL_FAILED';reservedAt:string;statusCode:number|null;claimedAt?:string};
+type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
 const hosts = new Set<string>(HOSTS);
 const roles = new Set<MeshRole>(['orchestrator', 'explorer', 'architect', 'implementer', 'verifier', 'reviewer']);
 export function isHost(x: string): x is Host { return hosts.has(x); }
@@ -58,6 +59,7 @@ export class MeshEngine {
       data.workforce ??= {};
       data.taskBridges ??= [];
       data.rearmIntents ??= [];
+      data.grokWakeAttempts ??= [];
     };
     normalize(parsed);
     // Persist upgrades inside a transaction; subsequent reads cannot lose historical cursors.
