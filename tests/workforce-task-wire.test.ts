@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {MeshEngine} from '../src/core/mesh.js';
 import {McpServer} from '@modelcontextprotocol/server';
-import {registerTaskWire} from '../src/core/workforce-task-wire.js';
+import {registerTaskWire,modern} from '../src/core/workforce-task-wire.js';
 
 async function fixture(fn:(m:MeshEngine)=>Promise<void>){
  const dir=await mkdtemp(join(tmpdir(),'panter-wire-'));
@@ -52,3 +52,18 @@ test('SDK provides explicit custom method registration without Tasks capability 
   assert.ok(server.server);
  }finally{await rm(dir,{recursive:true,force:true})}
 });
+
+test('2026 tasks/get projection uses the standard complete discriminator and opaque pointer',()=>fixture(async m=>{
+ await m.setProfile('gpt-a',profile,0);
+ const task=await m.taskBridgeArm('grok','2026-07-28',60);
+ const first=modern(await m.wireTaskGet('grok',task.taskId,'2026-07-28'));
+ assert.equal(first.resultType,'complete');
+ assert.equal(first.status,'working');
+ const w=await m.delegate('gpt-a',{missionId:'wire-modern',target:'grok',
+   role:'reviewer',instruction:'secret work instruction',idempotencyKey:'one'});
+ const after=modern(await m.wireTaskGet('grok',task.taskId,'2026-07-28'));
+ assert.equal(after.resultType,'complete');
+ assert.equal(after.status,'completed');
+ assert.ok(JSON.stringify(after).includes(w.id));
+ assert.ok(!JSON.stringify(after).includes('secret work instruction'));
+}));
