@@ -35,7 +35,10 @@ before arming its next transport handle. GPT-A sees the compact receipt through
 ## Proof levels and limits
 
 A recently authenticated poll proves a call happened, not that an app can
-be cold-started or that it will stay connected. Worker-advertised delivery
+be cold-started or that it will stay connected. An active long-poll refreshes
+that server-observed presence and checks the authoritative SQLite queue every
+60 seconds, including across separately running server processes. This is a
+bounded fallback, not an external push wake or an app-launch mechanism. Worker-advertised delivery
 modes remain unverified claims. No live host task delivery is marked
 `autonomousWakeVerified=true` until independent real-host E2E evidence exists.
 A listener cannot itself launch a closed ChatGPT, Claude, Grok or Gemini app.
