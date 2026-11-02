@@ -83,3 +83,38 @@ test('replay conflict and stale writer completion never create a duplicate termi
  await assert.rejects(m.complete('claude',w.id,claim.attemptId!,claim.leaseGeneration,'one result'),/Work not found/);
  assert.equal((await m.rearmStatus('grok')).length,1);
 }));
+
+test('standing worker pickup atomically claims oldest eligible pointer, then drains queue',()=>fixture(async m=>{
+ await m.setProfile('gpt-a',grok,0);
+ const w=await m.delegate('gpt-a',{missionId:'standing',target:'grok',role:'reviewer',
+   instruction:'Check source',idempotencyKey:'first'});
+ const first=await m.pickup('grok',60);
+ assert.equal(first.status,'CLAIMED');
+ assert.equal(first.work?.id,w.id);
+ assert.equal(first.work?.instruction,'Check source');
+ assert.equal((await m.pickup('grok',60)).status,'EMPTY');
+ await assert.rejects(m.pickup('gpt-a',60),/Only workers/);
+}));
+
+test('complete-and-rearm commits result exactly once and creates host-owned listener',()=>fixture(async (m,dir)=>{
+ await m.setProfile('gpt-a',grok,0);
+ const w=await m.delegate('gpt-a',{missionId:'m-complete',target:'grok',
+   role:'reviewer',instruction:'Audit',idempotencyKey:'1'});
+ const c=await m.pickup('grok',300);
+ assert.equal(c.status,'CLAIMED');
+ const terminal=await m.completeAndRearm('grok',w.id,c.work!.attemptId!,c.work!.leaseGeneration,
+   'full raw findings',true,'2025-11-25');
+ assert.equal(terminal.receipt.state,'COMPLETED');
+ assert.equal(terminal.rearm.status,'ACKED');
+ assert.equal(JSON.stringify(terminal).includes('full raw findings'),false);
+ assert.equal((await m.resultGet('gpt-a',w.id)).result,'full raw findings');
+ const restarted=await MeshEngine.open(dir);
+ assert.equal((await restarted.rearmStatus('grok'))[0]!.status,'ACKED');
+ assert.equal((await restarted.workforceStatus('gpt-a')).find(x=>x.host==='grok')!.bridgeListeners.length,1);
+ const again=await restarted.completeAndRearm('grok',w.id,c.work!.attemptId!,c.work!.leaseGeneration,
+   'full raw findings',true,'2025-11-25');
+ assert.equal(again.rearm.status,'ACKED');
+ assert.equal((await restarted.rearmStatus('grok')).length,1);
+ await assert.rejects(restarted.completeAndRearm('claude',w.id,c.work!.attemptId!,c.work!.leaseGeneration,
+   'full raw findings',true,'2025-11-25'),/Work not found/);
+}));

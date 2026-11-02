@@ -79,3 +79,23 @@ Cloudflare.** Revisar PR y CI SHA exacto antes de merge y E2E antes de producci�
 
 ## Fase 2B
 La compatibilidad mediante herramientas no equivale a los métodos wire MCP Tasks 2026. Los resultados íntegros se conservan en el backend y el ACK del trabajador es compacto. El rearme se registra en SQLite. El soporte autónomo de los hosts requiere E2E verificadas.
+
+
+### Fase 2C — cadena compacta de trabajo
+
+- `panter_workforce_pickup`: el worker autenticado toma el siguiente Work
+  en estado `QUEUED` mediante el mismo claim con fencing/grants que
+  `panter_mesh_claim`. Devuelve instrucciones **solo tras claim autorizado**.
+  No introduce una cola paralela ni ejecuta inferencia en Panter.
+- `panter_workforce_complete_and_rearm`: primero persiste el resultado,
+  receipt e intención de rearme en la transacción Mesh SQLite; después
+  registra el siguiente listener compat del mismo actor. Un error en el
+  segundo paso retorna `PENDING_RETRY` y **no repite** los efectos ni el
+  trabajo. El ACK de resultado continúa siendo compacto.
+- `panter_workforce_receipts`: inbox compacto de operación normal; el
+  anterior `panter_mesh_inbox` mantiene una respuesta legacy ampliada **solo
+  para GPT-A** para no romper clientes existentes (menos eficiente en tokens).
+  Migrar clientes a `panter_workforce_receipts` y
+  `panter_workforce_result_get` antes de retirar el legacy.
+- Los cambios no reemplazan el Task wire nativo de 2025/2026; los IDs de
+  bridge son internos, autenticados y no se anuncian como MCP Tasks oficiales.

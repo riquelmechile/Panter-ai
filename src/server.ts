@@ -364,6 +364,17 @@ const handler = createMcpHandler(() => {
   },async()=>execute(()=>mesh.workforceStatus(hostPrincipal())));
   // Task schema bridge (NOT extension-native tasks/get): transport pointers only.
   // Client must re-arm after a terminal receipt; no server-side model execution.
+  server.registerTool('panter_workforce_pickup',{
+    description:'Standing worker claims its next QUEUED authorized work with a fenced attempt. No arbitrary work ID required.',
+    inputSchema:z.object({leaseSeconds:z.number().int().min(30).max(3600).default(300)}).strict()
+  },async x=>execute(()=>mesh.pickup(hostPrincipal(),x.leaseSeconds)));
+  server.registerTool('panter_workforce_complete_and_rearm',{
+    description:'Persist terminal result and receipt first, then arm the next schema bridge listener; failure is a durable rearm retry, never a work replay.',
+    inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),
+      result:z.string().max(50000),success:z.boolean().default(true),
+      protocolEra:z.enum(['2025-11-25','2026-07-28'])}).strict()
+  },async x=>execute(()=>mesh.completeAndRearm(hostPrincipal(),x.workId,x.attemptId,
+    x.leaseGeneration,x.result,x.success,x.protocolEra)));
   server.registerTool('panter_workforce_task_bridge',{
     description:'Compatibility task listener arm/get/cancel for authenticated host, backed by Mesh SQLite. This tool is not native MCP Tasks wire.',
     inputSchema:z.object({

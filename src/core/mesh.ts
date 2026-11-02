@@ -143,7 +143,13 @@ export class MeshEngine {
   }
   async workforceStatus(caller: Host) {
     check(caller === 'gpt-a', 'Only GPT-A may inspect Workforce');
-    return this.read(d => summarizeWorkforce(d.profiles, d.workforce ?? {}, d.works));
+    return this.read(d => summarizeWorkforce(d.profiles, d.workforce ?? {}, d.works).map(view=>{
+      const active=(d.taskBridges??[]).filter(t=>t.host===view.host&&
+        (t.status==='ARMED'||t.status==='DELIVERED')&&Date.parse(t.expiresAt)>Date.now());
+      return {...view,bridgeListeners:active.map(t=>({taskId:t.taskId,status:t.status,
+        protocolEra:t.protocolEra,expiresAt:t.expiresAt})),
+        pendingRearmIntents:(d.rearmIntents??[]).filter(i=>i.host===view.host&&i.status==='PENDING').length};
+    }));
   }
   /** Task bridge is a compat TOOL (not native tasks/get wire). No second work queue:
    * listener rows are actor-bound transport pointers to QUEUED Mesh work.
@@ -369,6 +375,45 @@ export class MeshEngine {
       this.notify(d, 'gpt-a');
       return w;
     });
+  }
+  /** A standing worker obtains a real fenced claim, without enumerating IDs.
+   * No inference takes place here; the host executes the returned instructions.
+   */
+  async pickup(caller:Host,leaseSeconds=300) {
+    check(caller!=='gpt-a','Only workers may pick up delegated work');
+    check(Number.isInteger(leaseSeconds)&&leaseSeconds>=30&&leaseSeconds<=3600,'Invalid lease');
+    // Snapshot candidates only; claim() still validates authority and CAS under SQLite.
+    const candidates=(await this.pending(caller))
+      .sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.workId.localeCompare(b.workId));
+    for(const candidate of candidates.slice(0,32)){
+      try{
+        const work=await this.claim(caller,candidate.workId,leaseSeconds);
+        if(work.state!=='RUNNING')return {status:'OUTCOME_UNKNOWN' as const,workId:work.id};
+        return {status:'CLAIMED' as const,work};
+      }catch(error){
+        // Concurrent worker already took this candidate; retry the next.
+        if(error instanceof Error && /Work is not claimable|Work not found/.test(error.message))continue;
+        // A permission failure must never be treated as an empty queue or bypassed.
+        throw error;
+      }
+    }
+    return {status:'EMPTY' as const};
+  }
+  /** Commit terminal receipt first, then separately arm a transport listener.
+   * A rearm failure leaves a durable PENDING intent and never retries the work.
+   */
+  async completeAndRearm(caller:Host,id:string,attemptId:string,generation:number,result:string,
+    success:boolean,protocolEra:'2025-11-25'|'2026-07-28'){
+    check(caller!=='gpt-a','Only workers may complete delegated work');
+    const receipt=await this.complete(caller,id,attemptId,generation,result,success);
+    try {
+      const listener=await this.taskBridgeArm(caller,protocolEra);
+      return {receipt,rearm:{status:'ACKED' as const,taskId:listener.taskId,
+        delivery:'SCHEMA_BRIDGE_ONLY' as const}};
+    }catch {
+      // Preserve the successful terminal ACK; operator can inspect/retry rearm.
+      return {receipt,rearm:{status:'PENDING_RETRY' as const}};
+    }
   }
   async heartbeat(caller: Host, id: string, attemptId: string, generation: number, leaseSeconds = 300) {
     return this.write(d => {
