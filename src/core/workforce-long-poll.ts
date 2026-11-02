@@ -9,7 +9,9 @@ import { WORKER_HOSTS, type WorkerHost, type ProtocolEra } from './workforce-rea
 export class WorkforceLongPoll {
   /** Bound the live wait surfaces to one per worker: four total at most. */
   private readonly active = new Set<WorkerHost>();
-  constructor(private readonly mesh: MeshEngine) {}
+  // Periodically refresh authenticated presence while a live wait stays open.
+  // Also catches commits made by a separate process sharing the SQLite ledger.
+  constructor(private readonly mesh: MeshEngine, private readonly refreshMs = 60_000) {}
 
   async wait(caller: Host, protocolEra: ProtocolEra, waitMs: number, signal?:AbortSignal) {
     if (!(WORKER_HOSTS as readonly string[]).includes(caller))
@@ -53,7 +55,7 @@ export class WorkforceLongPoll {
           if(signal?.aborted){onAbort();return;}
           signal?.addEventListener('abort',onAbort,{once:true});
           resume = () => {cleanup(); resolve();};
-          timeout = setTimeout(() => {cleanup(); resolve();}, remaining);
+          timeout = setTimeout(() => {cleanup(); resolve();}, Math.min(remaining, this.refreshMs));
           if (changed) resume();
         });
         resume = null;

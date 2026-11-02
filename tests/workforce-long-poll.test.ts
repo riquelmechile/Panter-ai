@@ -98,3 +98,18 @@ test('a stopped host aborts its listener immediately, cleans the slot and can re
   const next=await live.wait('grok','2026-07-28',0);
   assert.equal(next.status,'EMPTY');
 }));
+
+test('live listeners refresh authenticated presence without an external event',()=>fixture(async (m)=>{
+  const live=new WorkforceLongPoll(m,20);
+  const stop=new AbortController();
+  const pending=live.wait('grok','2026-07-28',1000,stop.signal);
+  await new Promise(resolve=>setTimeout(resolve,12));
+  const first=(await m.workforceStatus('gpt-a')).find(p=>p.host==='grok')!.lastSeenAt;
+  await new Promise(resolve=>setTimeout(resolve,85));
+  const second=(await m.workforceStatus('gpt-a')).find(p=>p.host==='grok')!.lastSeenAt;
+  assert.ok(first&&second&&Date.parse(second)>Date.parse(first),
+    'server must keep authenticated presence fresh through a long MCP wait');
+  stop.abort();
+  await assert.rejects(pending,/cancelled/);
+  assert.equal(m.events.listenerCount('grok'),0);
+}));

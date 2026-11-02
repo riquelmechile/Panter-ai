@@ -339,6 +339,10 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_mesh_profile_set',{description:'GPT-A configures a host agent profile, model and effort are requests only.',inputSchema:z.object({host:hostEnum,actorId:bounded(160),modelRequest:z.string().max(120),effortRequest:z.string().max(32),roles:z.array(roleEnum).min(1),coordinationMode:z.enum(['AUTO','GPT_A_ONLY']).optional(),preferNativeSubagents:z.boolean().optional(),maxRequestedNativeWorkers:z.number().int().min(0).max(32).optional(),expectedRevision:z.number().int().nonnegative()})},async x=>execute(()=>mesh.setProfile(hostPrincipal(),x,x.expectedRevision)));
   server.registerTool('panter_mesh_profiles',{description:'List configured host profiles.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.profiles()));
   server.registerTool('panter_mesh_delegate',{description:'GPT-A creates actor-bound A2A work for one configured host.',inputSchema:z.object({missionId:bounded(120),target:hostEnum,role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160)})},async x=>execute(()=>mesh.delegate(hostPrincipal(),x)));
+  server.registerTool('panter_mesh_delegate_auto',{
+    description:'GPT-A routes to the least-loaded recently authenticated standing peer with the requested role; returns LOCAL_FALLBACK_REQUIRED when no live peer is evidenced. Does not prove cold-start wake.',
+    inputSchema:z.object({missionId:bounded(120),role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160)}).strict(),
+  },async x=>execute(()=>mesh.delegateAuto(hostPrincipal(),x)));
   server.registerTool('panter_mesh_pending',{description:'Return pointers to work assigned to authenticated host.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.pending(hostPrincipal())));
   // An authenticated worker may check ONLY its own oldest queued pointer.
   // Self-reported wake routes are never promoted to verified autonomous delivery.
