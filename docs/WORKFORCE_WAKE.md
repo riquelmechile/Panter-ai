@@ -75,3 +75,7 @@ Cloudflare.** Revisar PR y CI SHA exacto antes de merge y E2E antes de producci�
   compatibilidad Task wire basada en esta herramienta.
 - El listener de esta fase es **local a una réplica**: no sirve para varias
   instancias sin bus de eventos compartido.
+
+
+## Fase 2B
+La compatibilidad mediante herramientas no equivale a los métodos wire MCP Tasks 2026. Los resultados íntegros se conservan en el backend y el ACK del trabajador es compacto. El rearme se registra en SQLite. El soporte autónomo de los hosts requiere E2E verificadas.
