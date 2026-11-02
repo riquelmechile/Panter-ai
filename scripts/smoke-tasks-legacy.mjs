@@ -22,7 +22,7 @@ const clients=[];
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function connect(host){
  const client=new Client({name:'panter-tasks-legacy-'+host,version:'1.0.0'},
-   {versionNegotiation:{mode:{pin:'2025-11-25'}}});
+   {versionNegotiation:{mode:'legacy'}});
  await client.connect(new StreamableHTTPClientTransport(url,{authProvider:{token:async()=>tokens[host]}}));
  clients.push(client);
  assert.equal(client.getProtocolEra(),'legacy');
