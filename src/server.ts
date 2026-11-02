@@ -337,6 +337,20 @@ const handler = createMcpHandler(() => {
   server.registerTool('panter_mesh_profiles',{description:'List configured host profiles.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.profiles()));
   server.registerTool('panter_mesh_delegate',{description:'GPT-A creates actor-bound A2A work for one configured host.',inputSchema:z.object({missionId:bounded(120),target:hostEnum,role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160)})},async x=>execute(()=>mesh.delegate(hostPrincipal(),x)));
   server.registerTool('panter_mesh_pending',{description:'Return pointers to work assigned to authenticated host.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.pending(hostPrincipal())));
+  // An authenticated worker may check ONLY its own oldest queued pointer.
+  // Self-reported wake routes are never promoted to verified autonomous delivery.
+  server.registerTool('panter_workforce_next',{
+    description:'Actor-bound next eligible QUEUED work pointer; updates observed MCP presence, but never claims, wakes or grants execution.',
+    inputSchema:z.object({
+      protocolEra:z.enum(['2026-07-28','2025-11-25','UNKNOWN']),
+      deliveryMode:z.enum(['DELIVERY_ONLY','TASKS_2026','TASKS_2025','TASK_BRIDGE_2025','LONG_POLL','EXTERNAL_WAKE','SCHEDULED_POLL']),
+      pollIntervalSeconds:z.number().int().min(60).max(86400).optional(),
+    }).strict(),
+  },async x=>execute(()=>mesh.workforcePoll(hostPrincipal(),x)));
+  server.registerTool('panter_workforce_status',{
+    description:'GPT-A read-only four-worker presence, claims, receipts and unverified wake-route reports. No invented READY or wake proof.',
+    inputSchema:z.object({}),annotations:{readOnlyHint:true},
+  },async()=>execute(()=>mesh.workforceStatus(hostPrincipal())));
   server.registerTool('panter_mesh_claim',{description:'Claim actor-owned work with a fenced attempt and obtain instructions.',inputSchema:z.object({workId:z.uuid(),leaseSeconds:z.number().int().min(30).max(3600).default(300)})},async x=>execute(()=>mesh.claim(hostPrincipal(),x.workId,x.leaseSeconds)));
   server.registerTool('panter_mesh_heartbeat',{description:'Renew exact worker lease.',inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),leaseSeconds:z.number().int().min(30).max(3600).default(300)})},async x=>execute(()=>mesh.heartbeat(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.leaseSeconds)));
   server.registerTool('panter_mesh_complete',{description:'Submit fenced terminal receipt; result is automatically delivered to GPT-A inbox.',inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),result:z.string().max(50000),success:z.boolean().default(true)})},async x=>execute(()=>mesh.complete(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.result,x.success)));
