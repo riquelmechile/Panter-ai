@@ -287,7 +287,7 @@ export class MeshEngine {
     return this.delegate(caller,{missionId:input.missionId,target:binding.host,role:packet.role,instruction:packet.instruction,idempotencyKey:input.idempotencyKey,
       specialist:{agentId:packet.agentId,skillIds:packet.skillIds,packetDigest:packet.digest,assetDigests:packet.assetDigests,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,bindingRevision:binding.revision,candidateSha:input.candidateSha,allowedEditSurfaces:packet.allowedEditSurfaces}});
   }
-  async delegate(caller: Host, input: { missionId: string; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?:NonNullable<MeshWork['specialist']> }) {
+  async delegate(caller: Host, input: { missionId: string; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?:NonNullable<MeshWork['specialist']>; wakeOnly?:boolean }) {
     check(caller === 'gpt-a', 'Only GPT-A can delegate');
     check(input.missionId.length > 0 && input.missionId.length <= 120, 'Invalid mission');
     check(isHost(input.target) && input.target !== 'gpt-a', 'Invalid target');
@@ -312,6 +312,12 @@ export class MeshEngine {
       if (dup) {
         check(dup.target === input.target && dup.role === input.role && dup.instruction === input.instruction && JSON.stringify(dup.specialist??null)===JSON.stringify(input.specialist??null), 'Idempotency conflict');
         return dup;
+      }
+      if(input.wakeOnly){
+        check(input.target==='grok' && input.role!=='implementer','Grok wake cannot authorize remote writes');
+        check(!d.works.some(w=>w.target==='grok' &&
+          ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state)),
+          'Grok wake peer busy');
       }
       if(input.specialist?.allowedEditSurfaces?.length){
         const conflict=d.works.find(w=>w.missionId===input.missionId && w.role==='implementer' && ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state) && (w.specialist?.allowedEditSurfaces??[]).some(a=>input.specialist!.allowedEditSurfaces.some(b=>a===b || a.startsWith(b+'/') || b.startsWith(a+'/'))));
@@ -462,6 +468,8 @@ export class MeshEngine {
       if (caller !== 'gpt-a') {
         const presence = (d.workforce ??= {})[caller as WorkerHost] ??= {};
         presence.lastClaimAt = iso();
+        const wake=(d.grokWakeAttempts??[]).find(a=>a.workId===w.id);
+        if(wake?.state==='SIGNAL_ACCEPTED')wake.claimedAt=presence.lastClaimAt;
       }
       w.leaseUntil = new Date(Date.now() + leaseSeconds * 1000).toISOString();
       this.notify(d, 'gpt-a');
