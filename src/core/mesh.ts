@@ -356,8 +356,8 @@ export class MeshEngine {
       return eligible.length?{target:eligible[0]!.host}:{reason:'NO_FRESH_STANDBY_PEER' as const};
     });
     if('replay' in choice&&choice.replay){
-      check(choice.replay.role===input.role&&choice.replay.instruction===input.instruction,
-        'Idempotency conflict');
+      check(choice.replay.role===input.role&&choice.replay.instruction===input.instruction&&
+        !choice.replay.specialist,'Idempotency conflict');
       return {status:'DELEGATED' as const,selectedHost:choice.replay.target,
         work:choice.replay,selectionEvidence:'IDEMPOTENT_REPLAY' as const,
         autonomousWakeVerified:false as const};
