@@ -1,0 +1,9 @@
+# Issue #42 — observación cgroup v2 (solo lectura, nunca permiso)
+
+El módulo \`inspectRunnerCgroupV2Quiescence(scope)\` verifica **solo en el kernel Linux real** que el cgroup privado del runner está en un mount \`cgroup2\`, su árbol de ruta no usa symlinks y las lecturas consecutivas de \`cgroup.events\`, \`cgroup.procs\` y \`cgroup.threads\` coinciden, con \`populated 0\` y listas de procesos/hilos vacías. El parámetro \`scope\` es relativo a \`/sys/fs/cgroup\` y se valida estrictamente; no se acepta otro root ni un backend simulado. Los archivos se abren con \`O_NOFOLLOW\`, solo lectura, con límite de bytes. El digest devuelto identifica los datos leídos **pero no es una firma externa**.
+
+La API devuelve \`QUIESCENT_OBSERVATION_NOT_AUTHORIZATION\`, \`permitsReclaim:false\` y \`permitsExecution:false\`; rechaza procesos activos, lecturas inestables, ficheros ausentes, ruta fuera de alcance, formato ambiguo y sistemas que no montan cgroup v2. **No existe operación de matar procesos** en este módulo; no se llama \`cgroup.kill\`, no se manipulan recursos reales, ni se reclaman fences o se activan operaciones.
+
+**Límite de seguridad fundamental:** un cgroup vacío observado **no demuestra** que otro proceso no podrá ingresar después del segundo muestreo, ni que un efecto externo haya concluido. Antes de usar cualquier dato en un protocolo de recuperación real se requiere control independiente del cgroup, freeze/denegación de nuevas entradas, terminación y espera del grupo completo, testigo Ed25519 y verificación de todos los outcomes contra evidencia independiente. Esta función **no está conectada** a \`RunnerWriterFence.reclaim\`; no se ofrece un bypass.
+
+Los tests verifican parsers adversariales y que rutas ficticias no se traten como una prueba. No se crea cgroup de producción, ni se ejecuta \`kill\`, ni se modifica Oracle o Cloudflare. El gate #42 continúa abierto.
