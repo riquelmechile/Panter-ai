@@ -16,7 +16,8 @@
     "build:ui": "node scripts/build-ui.mjs",
     "smoke:http": "node scripts/smoke-http.mjs",
     "smoke:oauth": "node scripts/smoke-oauth.mjs",
-    "smoke:embedded": "node scripts/smoke-embedded.mjs"
+    "smoke:embedded": "node scripts/smoke-embedded.mjs",
+    "smoke:tasks-legacy": "node scripts/smoke-tasks-legacy.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.4.0",

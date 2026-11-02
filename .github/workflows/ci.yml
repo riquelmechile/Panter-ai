@@ -26,6 +26,7 @@ jobs:
       - run: npm run smoke:http
       - run: npm run smoke:oauth
       - run: npm run smoke:embedded
+      - run: npm run smoke:tasks-legacy
   arm64-image:
     # Native GitHub-hosted ARM64 runner (free for public repositories), the
     # same architecture as the Oracle Ampere VM. QEMU emulation on x86 hung
