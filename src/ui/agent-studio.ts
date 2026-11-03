@@ -6,7 +6,7 @@ const roleNames = ['explorer', 'architect', 'implementer', 'verifier', 'reviewer
 /** The server keeps exactly one orchestrator profile (PANTER_LEAD_HOST); default GPT-A when none is stored yet. */
 let leader: string = 'gpt-a';
 type Host = typeof hostNames[number];
-type Profile = { host: Host; actorId: string; modelRequest: string; effortRequest: string; roles: string[]; revision: number; preferNativeSubagents?:boolean; maxRequestedNativeWorkers?:number; coordinationMode?:'AUTO'|'GPT_A_ONLY' };
+type Profile = { host: Host; actorId: string; modelRequest: string; effortRequest: string; roles: string[]; revision: number; preferNativeSubagents?:boolean; maxRequestedNativeWorkers?:number; coordinationMode?:'AUTO'|'GPT_A_ONLY'; scheduledPickupEnabled?:boolean; scheduledPollIntervalSeconds?:number; executionRequest?:Record<string,unknown> };
 const hostBox = document.getElementById('hosts')!;
 const status = document.getElementById('status')!;
 const refresh = document.getElementById('refresh') as HTMLButtonElement;
@@ -37,7 +37,7 @@ function card(host: Host, existing?: Profile) {
   const subtitle = document.createElement('p'); subtitle.textContent = existing ? `Perfil guardado · revisión ${existing.revision}` : 'Pendiente de configurar';
   article.append(heading, subtitle);
   const actor = field('Alias del actor (no es una credencial)', existing?.actorId ?? `actor-${host}`, 160);
-  const model = field('Modelo solicitado', existing?.modelRequest ?? (host===leader&&host==='gpt-a'?'gpt-6-astra':'host-default'), 120);
+  const model = field('Modelo solicitado', existing?.modelRequest ?? (host===leader&&(host==='gpt-a'||host==='gpt-b')?'gpt-6-astra':'host-default'), 120);
   const effort = field('Esfuerzo solicitado', existing?.effortRequest ?? 'max', 32);
   for (const inp of [actor, model, effort]) article.append(inp.parentElement!);
   const legend = document.createElement('label'); legend.textContent = 'Roles asignados';
@@ -85,7 +85,11 @@ function card(host: Host, existing?: Profile) {
       if(host===leader&&(!Number.isInteger(count)||count===undefined||count<0||count>32))throw new Error('Límite nativo inválido');
       const response = await call('panter_mesh_profile_set', {
         host, actorId: actor.value.trim(), modelRequest: model.value.trim(), effortRequest: effort.value.trim(),
-        roles: chosen, ...(host===leader?{coordinationMode:coordination!.value,preferNativeSubagents:prefer!.checked,maxRequestedNativeWorkers:count}:{}), expectedRevision: existing?.revision ?? 0,
+        roles: chosen, ...(host===leader?{coordinationMode:coordination!.value,preferNativeSubagents:prefer!.checked,maxRequestedNativeWorkers:count}:{
+          // A profile save replaces the whole profile: carry over worker settings this card does not edit.
+          ...(existing?.executionRequest?{executionRequest:existing.executionRequest}:{}),
+          ...(existing?.scheduledPickupEnabled!==undefined?{scheduledPickupEnabled:existing.scheduledPickupEnabled}:{}),
+          ...(existing?.scheduledPollIntervalSeconds!==undefined?{scheduledPollIntervalSeconds:existing.scheduledPollIntervalSeconds}:{})}), expectedRevision: existing?.revision ?? 0,
       }) as Profile;
       existing = response;
       subtitle.textContent = `Perfil guardado · revisión ${response.revision}`;
@@ -100,7 +104,9 @@ async function load() {
   refresh.disabled = true;
   try {
     const profiles = await call('panter_mesh_profiles', {}) as Profile[];
-    leader = profiles.find(p => p.roles.includes('orchestrator'))?.host ?? 'gpt-a';
+    // The server names the leader; the stored orchestrator profile is only a fallback.
+    const catalog = await call('panter_gentle_catalog', {}) as { leaderHost?: string };
+    leader = catalog.leaderHost ?? profiles.find(p => p.roles.includes('orchestrator'))?.host ?? 'gpt-a';
     hostBox.replaceChildren(...hostNames.map(host => card(host, profiles.find(p => p.host === host))));
     await loadSpecialists();
   } catch (error) { setStatus(error instanceof Error ? error.message : 'No se pudo consultar MCP', true); }

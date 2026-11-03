@@ -27,10 +27,25 @@ Hasta v0.15 el líder estaba fijo en `gpt-a`. Ahora se define con `PANTER_LEAD_H
 ## Cambio de líder en un despliegue existente
 
 1. Detener Panter y respaldar `data/`.
-2. Revisar el trabajo pendiente. Lo que esté en `QUEUED` o `RUNNING` hacia el futuro líder no lo podrá tomar nadie después del cambio, así que hay que cerrarlo o reconciliarlo antes.
-3. Agregar `PANTER_LEAD_HOST=claude` al archivo de entorno y arrancar. Al abrir, Panter normaliza los perfiles: el del líder queda con el rol `orchestrator` y ningún worker conserva ese rol. Los bindings de especialistas que apuntan al líder quedan inactivos, y las revisiones vuelven a fases nativas hasta reasignarlos a un worker.
-4. Desde el nuevo líder, configurar los perfiles de los workers (GPT-A, GPT-B, Grok, Gemini) con `panter_mesh_profile_set` o desde Agent Studio.
+2. Agregar `PANTER_LEAD_HOST=claude` al archivo de entorno y arrancar.
+3. Desde el nuevo líder, configurar los perfiles de los workers (GPT-A, GPT-B, Grok, Gemini) con `panter_mesh_profile_set` o desde Agent Studio.
 
-Agent Studio reconoce al líder por el perfil que tiene el rol `orchestrator`. Si ese perfil todavía no existe, la interfaz asume GPT-A: hay que guardar primero el modo de coordinación del líder (`panter_native_mode_set`), que crea su perfil.
+Panter guarda en su ledger quién era el líder. Si al arrancar el líder configurado es otro, migra solo y lo registra en el log (`Panter leader switch gpt-a -> claude`):
 
-Hay un solo líder por proceso y solo el líder crea trabajo. Por eso el nuevo líder ve y puede leer los resultados del trabajo que delegó el anterior: inbox, `resultGet` y el estado de los wakes de Grok y Claude.
+- **Trabajo dirigido al nuevo líder**, que ya nadie podría tomar:
+  - si estaba en `QUEUED`, queda `ABORTED_NO_EFFECTS`;
+  - si estaba en curso, queda `FAILED`;
+  - si era de implementación en curso, queda `OUTCOME_UNKNOWN`, para pasar por la reconciliación de siempre.
+- **Mensajes de workers al líder anterior** pasan al nuevo líder.
+- **Fases nativas ODD abiertas** del líder anterior las adopta el nuevo.
+- **Perfiles:**
+  - si el líder no tenía perfil, se le crea uno;
+  - el del líder queda solo con el rol `orchestrator` y sin ajustes de worker;
+  - los workers pierden el rol `orchestrator` y los ajustes exclusivos del líder;
+  - el líder anterior puede quedar sin roles hasta que lo configures.
+- **Bindings de especialistas que apuntan al líder** quedan inactivos y se ven como no asignados. Se pueden reasignar a un worker con revisión 0, y mientras tanto las revisiones usan fases nativas.
+- **Revisiones nativas 4R y Judgment Day** guardan el modelo y el esfuerzo con que se congelaron, así que siguen siendo legibles después del cambio.
+
+Un ledger vacío no cuenta como cambio de líder. Hay un solo líder por proceso y solo el líder crea trabajo, así que el nuevo líder ve los resultados del trabajo que delegó el anterior: inbox, `resultGet` y el estado de los wakes de Grok y Claude.
+
+Agent Studio toma el líder de `panter_gentle_catalog` (`leaderHost`).

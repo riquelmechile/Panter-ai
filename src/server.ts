@@ -1,4 +1,4 @@
-import { leaderHost, leaderLabel, appEventHosts, freezeLeaderHost } from './core/leadership.js';
+import { leaderHost, leaderLabel, appEventHosts, freezeLeaderHost, leaderPolicyProfile } from './core/leadership.js';
 import { ExternalOAuthVerifier, staticBearerMatch } from './core/oauth.js';
 import { isAdminPrincipal, parseOwnerTrustedHosts } from './core/owner-trust.js';
 import { EmbeddedOAuth } from './core/embedded-oauth.js';
@@ -35,6 +35,7 @@ import { GitHubDeliveryGate } from './core/github-delivery.js';
 import { PanterRdd } from './core/panter-rdd.js';
 import { LocalGitVerifier } from './core/local-git-verifier.js';
 import { buildConnectionContract } from './core/connection-contract.js';
+import { MODEL_REQUEST_PATTERN, EFFORT_REQUEST_PATTERN } from './core/mesh.js';
 
 // Fail closed before any store opens on an invalid PANTER_LEAD_HOST; the leader is frozen
 // for this process and never comes from tool input.
@@ -94,6 +95,10 @@ async function execute<T>(work: () => Promise<T>) {
 const store = await PanterStore.open(dataDir);
 const agents = await AgentEngine.open(dataDir, store);
 const mesh = await MeshEngine.open(dataDir);
+if (mesh.leaderSwitch) {
+  const moved = await agents.adoptLeaderPhases(mesh.leaderSwitch.from, mesh.leaderSwitch.to);
+  console.error(`Panter leader switch ${mesh.leaderSwitch.from} -> ${mesh.leaderSwitch.to}: ${moved} open native phases adopted`);
+}
 const workforceLongPoll = new WorkforceLongPoll(mesh);
 const grokRoutineWake = new GrokRoutineWake();
 const claudeRoutineWake = new ClaudeRoutineWake();
@@ -152,7 +157,9 @@ const missionStatus = z.enum(['DRAFT', 'READY', 'RUNNING', 'VERIFYING', 'DONE', 
 const bounded = (max = 2048) => z.string().trim().min(1).max(max);
 
 function connectionContract(actor:string):string{
-  return isHost(actor)?buildConnectionContract(actor,actor===leaderHost(),mesh.profileSnapshot(actor)):'';
+  if(!isHost(actor))return '';
+  const leader=actor===leaderHost();
+  return buildConnectionContract(actor,leader,mesh.profileSnapshot(actor),leader?hostRequest(leaderPolicyProfile()):undefined);
 }
 const handler = createMcpHandler(reqCtx => {
   const server = new McpServer({ name: 'panter-ai', version: '0.15.0' }, {
@@ -358,7 +365,7 @@ const handler = createMcpHandler(reqCtx => {
 
   const hostEnum = z.enum(HOSTS);
   const roleEnum = z.enum(['orchestrator','explorer','architect','implementer','verifier','reviewer']);
-  server.registerTool('panter_mesh_profile_set',{description:`${leaderLabel()} configures a host agent profile. Model, effort and executionRequest (service tier, stream, parallel tool calls, native subagents) are frozen into each delegated work as REQUESTED_UNVERIFIED requirements the worker must apply and report; Panter cannot enforce them.`,inputSchema:z.object({host:hostEnum,actorId:bounded(160),modelRequest:z.string().max(120),effortRequest:z.string().max(32),roles:z.array(roleEnum).min(1),coordinationMode:z.enum(['AUTO','GPT_A_ONLY']).optional(),preferNativeSubagents:z.boolean().optional(),maxRequestedNativeWorkers:z.number().int().min(0).max(32).optional(),scheduledPickupEnabled:z.boolean().optional(),scheduledPollIntervalSeconds:z.number().int().min(3600).max(86400).optional(),executionRequest:z.object({serviceTier:z.string().regex(/^[a-z][a-z0-9_-]{1,31}$/).optional(),stream:z.boolean().optional(),parallelToolCalls:z.boolean().optional(),maxNativeSubagents:z.number().int().min(0).max(32).optional()}).strict().optional(),expectedRevision:z.number().int().nonnegative()})},async x=>execute(()=>mesh.setProfile(hostPrincipal(),x,x.expectedRevision)));
+  server.registerTool('panter_mesh_profile_set',{description:`${leaderLabel()} configures a host agent profile. Model, effort and executionRequest (service tier, stream, parallel tool calls, native subagents) are frozen into each delegated work as REQUESTED_UNVERIFIED requirements the worker must apply and report; Panter cannot enforce them.`,inputSchema:z.object({host:hostEnum,actorId:bounded(160),modelRequest:z.string().regex(MODEL_REQUEST_PATTERN),effortRequest:z.string().regex(EFFORT_REQUEST_PATTERN),roles:z.array(roleEnum).min(1),coordinationMode:z.enum(['AUTO','GPT_A_ONLY']).optional(),preferNativeSubagents:z.boolean().optional(),maxRequestedNativeWorkers:z.number().int().min(0).max(32).optional(),scheduledPickupEnabled:z.boolean().optional(),scheduledPollIntervalSeconds:z.number().int().min(3600).max(86400).optional(),executionRequest:z.object({serviceTier:z.string().regex(/^[a-z][a-z0-9_-]{1,31}$/).optional(),stream:z.boolean().optional(),parallelToolCalls:z.boolean().optional(),maxNativeSubagents:z.number().int().min(0).max(32).optional()}).strict().optional(),expectedRevision:z.number().int().nonnegative()})},async x=>execute(()=>mesh.setProfile(hostPrincipal(),x,x.expectedRevision)));
   server.registerTool('panter_mesh_profiles',{description:'List configured host profiles.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.profiles()));
   server.registerTool('panter_mesh_delegate',{description:`${leaderLabel()} creates actor-bound A2A work for one configured host.`,inputSchema:z.object({missionId:bounded(120),target:hostEnum,role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160)})},async x=>execute(()=>mesh.delegate(hostPrincipal(),x)));
   server.registerTool('panter_mesh_delegate_auto',{
@@ -562,7 +569,7 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_gentle_catalog',{
     description:`List all ten Gentle Shell specialist definitions, thirteen MCP-hosted skills, 4R lenses and Judgment Day agents; only ${leaderLabel()} configures them.`,
     inputSchema:z.object({}),annotations:{readOnlyHint:true}
-  },async()=>execute(async()=>{requireLeader();return gentleCatalog()}));
+  },async()=>execute(async()=>{requireLeader();return {...gentleCatalog(),leaderHost:leaderHost()}}));
 
   server.registerTool('panter_gentle_orchestrator_read',{
     description:`${leaderLabel()} lazily reads one pinned ODD orchestration section from the upstream Gentle Shell assets; Pi-specific mechanisms are reference only.`,
@@ -579,7 +586,7 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_specialist_bind',{
     description:`${leaderLabel()} assigns an individual specialist to one authenticated host, requested model/effort and selected MCP skills. Separate from host credentials.`,
     inputSchema:z.object({agentId:z.enum(GENTLE_AGENTS.map(a=>a.id) as [string,...string[]]),host:hostEnum,
-      modelRequest:z.string().max(120),effortRequest:z.string().max(32),skillIds:z.array(z.enum(GENTLE_SKILLS.map(s=>s.id) as [string,...string[]])).max(8),expectedRevision:z.number().int().nonnegative()})
+      modelRequest:z.string().regex(MODEL_REQUEST_PATTERN),effortRequest:z.string().regex(EFFORT_REQUEST_PATTERN),skillIds:z.array(z.enum(GENTLE_SKILLS.map(s=>s.id) as [string,...string[]])).max(8),expectedRevision:z.number().int().nonnegative()})
   },async ({expectedRevision,...input})=>execute(()=>mesh.bindSpecialist(hostPrincipal(),input,expectedRevision)));
   server.registerTool('panter_specialist_assignments',{
     description:'Read individual specialist assignments (distinct from five host connection profiles).',
