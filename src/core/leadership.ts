@@ -31,6 +31,10 @@ export function isLeader(host: string | null | undefined): boolean { return host
 /** Human-readable leader name used in error messages and tool descriptions. */
 export function leaderLabel(): string { return LABELS[leaderHost()]; }
 export function hostLabel(host: LeaderHost): string { return LABELS[host]; }
+/** Native host policy for the leader: only ChatGPT hosts get the OpenAI model/effort request. */
+export function leaderPolicyProfile(): 'chatgpt' | 'host-native' {
+  const lead = leaderHost(); return lead === 'gpt-a' || lead === 'gpt-b' ? 'chatgpt' : 'host-native';
+}
 export function workerHosts(): LeaderHost[] { const lead = leaderHost(); return WORKER_ORDER.filter(h => h !== lead); }
 export function isWorker(host: string | null | undefined): host is LeaderHost {
   return !!host && (workerHosts() as string[]).includes(host);

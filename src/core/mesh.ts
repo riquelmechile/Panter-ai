@@ -27,6 +27,7 @@ export function isHost(x: string): x is Host { return hosts.has(x); }
 function check(condition: unknown, reason: string): asserts condition { if (!condition) throw new Error(reason); }
 function sha(value: string) { return createHash('sha256').update(value).digest('hex'); }
 function iso() { return new Date().toISOString(); }
+function activeBindings(d: MeshData) { return (d.specialistBindings ?? []).filter(b => b.host !== leaderHost()); }
 
 export class MeshEngine {
   private readonly sqlite: SqliteLedger;
@@ -286,7 +287,9 @@ export class MeshEngine {
         result:w.result,receiptDigest:w.receiptDigest,completedAt:w.completedAt};
     });
   }
-  specialistBindings() { return this.read(d => d.specialistBindings ?? []); }
+  /** Bindings to the current leader are inactive: after a leader switch they must not
+   * route remote work back to the orchestrator; callers fall back to native phases. */
+  specialistBindings() { return this.read(d => activeBindings(d)); }
   /** GPT-A configures many specialist definitions independently of the five hosts. */
   bindSpecialist(caller:Host, input:{agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:string[]}, expectedRevision:number) {
     check(caller===leaderHost(), `Only ${leaderLabel()} configures specialist bindings`);
@@ -311,7 +314,7 @@ export class MeshEngine {
    */
   async delegateBoundSpecialist(caller:Host,input:{missionId:string;agentId:string;objective:string;idempotencyKey:string;candidateSha?:string;allowedEditSurfaces?:string[]}) {
     check(caller===leaderHost(),`Only ${leaderLabel()} can delegate`);
-    const binding=await this.read(d=>(d.specialistBindings??[]).find(b=>b.agentId===input.agentId)??null);
+    const binding=await this.read(d=>activeBindings(d).find(b=>b.agentId===input.agentId)??null);
     check(binding,'Specialist must be configured in Agent Studio');
     const packet=await specialistPacket({agentId:binding.agentId,skillIds:binding.skillIds,objective:input.objective,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,candidateSha:input.candidateSha,allowedEditSurfaces:input.allowedEditSurfaces});
     return this.delegate(caller,{missionId:input.missionId,target:binding.host,role:packet.role,instruction:packet.instruction,idempotencyKey:input.idempotencyKey,
@@ -330,7 +333,7 @@ export class MeshEngine {
       check(!d.profiles.some(p=>p.host===leaderHost()&&p.coordinationMode==='GPT_A_ONLY'),
         `GPT_A_ONLY forbids remote delegation; use native ${leaderLabel()} phases`);
       if (input.specialist) {
-        const binding=(d.specialistBindings??[]).find(b=>b.agentId===input.specialist?.agentId);
+        const binding=activeBindings(d).find(b=>b.agentId===input.specialist?.agentId);
         check(binding?.host===input.target && binding.revision===input.specialist.bindingRevision, 'Specialist binding changed during dispatch');
         check(input.specialist.packetDigest===sha(input.instruction), 'Specialist packet digest mismatch');
       }
@@ -605,7 +608,7 @@ export class MeshEngine {
       if(previous){check(previous.kind===input.kind && previous.candidateSha===input.candidateSha && previous.objective===input.objective,'Conflicting review idempotency');return previous;}
       const now=iso();const workIds:string[]=[];
       for(let i=0;i<ids.length;i++){
-        const binding=(d.specialistBindings??[]).find(b=>b.agentId===ids[i]);
+        const binding=activeBindings(d).find(b=>b.agentId===ids[i]);
         const original=configured[i]!,packet=packets[i]!;
         check(binding?.revision===original.revision && binding.host===original.host,'Review binding changed during dispatch');
         const profile=d.profiles.find(p=>p.host===binding.host);

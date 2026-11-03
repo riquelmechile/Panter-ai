@@ -1,5 +1,5 @@
 /** GPT-A-only host-native fallback. Plans work; never starts AI inference or fabricates native workers. */
-import { leaderHost, leaderLabel } from './leadership.js';
+import { leaderHost, leaderLabel, leaderPolicyProfile } from './leadership.js';
 import { agentDefinition, checkSkills, gentleCatalog, readOrchestratorSection, specialistPacket, type GentleAgentId } from './gentle-catalog.js';
 import { routeFlow, type FlowSignals } from './agents.js';
 import { type Host, type SpecialistBinding } from './mesh.js';
@@ -36,7 +36,7 @@ export function planHostNative(input: {
 }) {
   const { signals,capabilities }=input;
   const route=routeFlow(signals);
-  const policy=hostRequest('chatgpt');
+  const policy=hostRequest(leaderPolicyProfile());
   const coordinationMode=input.coordinationMode??'AUTO';
   if(coordinationMode!=='AUTO'&&coordinationMode!=='GPT_A_ONLY')throw new Error('Invalid coordination mode');
   const requestedNativeWorkers=input.requestedNativeWorkers??policy.plannerCeiling;
@@ -118,7 +118,7 @@ export function planHostNative(input: {
       inferenceApiCalls:0 as const,serverModelWorkers:0 as const},
     capacityGaps:capabilityGaps,fullCapacityObserved:false,
     hostReportedEvidence:capabilities.evidence,serverWorkersStarted:0,
-    instructions:`${leaderLabel()} remains the only orchestrator. In GPT_A_ONLY mode never delegate to a remote host even if CONNECTED. Enforce the maximum requested ${leaderLabel()} model/effort policy (gpt-6-astra max, xhigh fallback) through the host-native controls when available. Request fast native subagents at maximum observed independent parallelism without degrading reasoning; if unavailable continue with the same maximum-quality root inline and batch independent tool I/O. Report missing native capacity rather than claiming compliance. Load MCP skills for every relevant ODD phase; No model may claim independent review of its own changes. Never re-dispatch writes with unknown outcome.`,
+    instructions:`${leaderLabel()} remains the only orchestrator. In GPT_A_ONLY mode never delegate to a remote host even if CONNECTED. Enforce the maximum requested ${leaderLabel()} model/effort policy (${policy.model} ${policy.reasoningEffort}${policy.reasoningFallback?`, ${policy.reasoningFallback} fallback`:''}) through the host-native controls when available. Request fast native subagents at maximum observed independent parallelism without degrading reasoning; if unavailable continue with the same maximum-quality root inline and batch independent tool I/O. Report missing native capacity rather than claiming compliance. Load MCP skills for every relevant ODD phase; No model may claim independent review of its own changes. Never re-dispatch writes with unknown outcome.`,
     upstream:gentleCatalog().source,
   };
 }
@@ -130,7 +130,7 @@ export async function nativePacket(input:{agentId:string;objective:string;candid
   if(!agent)throw new Error('Unknown native fallback agent');
   const packet=await specialistPacket({agentId:input.agentId,objective:input.objective,
     skillIds:input.skillIds??[...agent.defaultSkills],candidateSha:input.candidateSha,
-    allowedEditSurfaces:input.allowedEditSurfaces,modelRequest:input.modelRequest??hostRequest('chatgpt').model,effortRequest:input.effortRequest??hostRequest('chatgpt').reasoningEffort});
+    allowedEditSurfaces:input.allowedEditSurfaces,modelRequest:input.modelRequest??hostRequest(leaderPolicyProfile()).model,effortRequest:input.effortRequest??hostRequest(leaderPolicyProfile()).reasoningEffort});
   return {...packet,executionOwner:leaderHost(),
     notice:`${leaderLabel()} must execute using its own host tools or explicitly available native subagents. This packet does not launch a worker, create a verified reviewer, or grant write privileges.`};
 }

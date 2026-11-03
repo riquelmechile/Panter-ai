@@ -2,7 +2,7 @@
  * Host owns subagent execution. This ledger never confers official Gentle AI RDD approval.
  */
 import type { LeaderHost } from './leadership.js';
-import { leaderHost, leaderLabel } from './leadership.js';
+import { leaderHost, leaderLabel, leaderPolicyProfile } from './leadership.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -65,7 +65,7 @@ export class NativeSubagentReview {
       requireValid(old.kind===input.kind&&old.candidateSha===input.candidateSha&&old.objective===input.objective,'Review idempotency conflict');
       return this.publicStatus(old);
     }
-    const policy=hostRequest('chatgpt');
+    const policy=hostRequest(leaderPolicyProfile());
     const agents=coreRoles[input.kind];
     const packets=await Promise.all(agents.map(agentId=>specialistPacket({agentId,objective:input.objective,
       candidateSha:input.candidateSha,skillIds:input.kind==='judgment-day'?['judgment-day']:['gentle-ai'],
@@ -104,7 +104,7 @@ export class NativeSubagentReview {
   async packet(reviewId:string,slotId:string){
     const r=await this.read(d=>d.reviews.find(x=>x.id===reviewId));requireValid(r,'Review not found');
     const slot=r.slots.find(x=>x.id===slotId);requireValid(slot,'Review slot not found');
-    const policy=hostRequest('chatgpt');
+    const policy=hostRequest(leaderPolicyProfile());
     const packet=await specialistPacket({agentId:slot.agentId,objective:r.objective,candidateSha:r.candidateSha,
       skillIds:r.kind==='judgment-day'?['judgment-day']:['gentle-ai'],modelRequest:policy.model,effortRequest:policy.reasoningEffort});
     requireValid(packet.digest===slot.packetDigest,'Catalog assets changed: frozen packet mismatch');
@@ -129,7 +129,7 @@ export class NativeSubagentReview {
     const packets=solo?originalPackets.map(p=>({...p,execution:'GPT_A_SOLO_LENS_REQUESTED' as const,
       independenceRequirement:`${leaderLabel()} itself reviews this lens; it is not an independent subagent, no independent attestation and no RDD approval.`,
       returnContract:'Inspect one lens of this exact candidate, then submit agentId/candidateSha/packetDigest/evidence/findings with panter_native_review_submit_solo. Do not invent a child run ID.'})):originalPackets;
-    const capacity=hostRequest('chatgpt');
+    const capacity=hostRequest(leaderPolicyProfile());
     return {reviewId,kind:status.kind,candidateSha:status.candidateSha,
       dispatch:solo?'READY_FOR_GPT_A_SOLO_4R':observedNativeParallelism>0?'READY_FOR_HOST_NATIVE_DISPATCH':'HOST_NATIVE_SUBAGENTS_UNAVAILABLE',
       reviewMode:solo?'GPT_A_SOLO_UNVERIFIED':'HOST_NATIVE_SUBAGENTS',

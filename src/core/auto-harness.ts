@@ -1,4 +1,4 @@
-import { leaderHost, leaderLabel } from './leadership.js';
+import { leaderHost, leaderLabel, leaderPolicyProfile } from './leadership.js';
 import { SqliteLedger } from './sqlite-ledger.js';
 /** Panter automatic ODD harness: the user chooses an objective, not agents.
  * GPT-A/host-owned models execute packets. This engine never launches inference.
@@ -307,7 +307,7 @@ export class AutomaticHarness {
     // An operator may switch to GPT_A_ONLY mid-mission. Never dispatch fresh
     // remote work after that change, or silently reassign an in-flight write.
     const effectiveMode:HarnessMode=record.mode==='GPT_A_ONLY'||profile?.coordinationMode==='GPT_A_ONLY'?'GPT_A_ONLY':'AUTO';
-    const policy=hostRequest('chatgpt');
+    const policy=hostRequest(leaderPolicyProfile());
     const common={runId:record.id,mode:effectiveMode,risk:record.risk,reason:record.reason,
       capacityRequest:{model:policy.model,reasoning:policy.reasoningEffort,workerProcessing:policy.worker.preferredProcessing,
         requestedParallelism:Math.min(runtime.nativeSubagents?runtime.maxParallelSubagents:0,policy.plannerCeiling),

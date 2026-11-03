@@ -76,3 +76,38 @@ test('GPT-A as worker uses in-app turns; the leader cannot take worker turns or 
   await assert.rejects(poll.wait('claude', '2025-11-25', 0), /Only authenticated workers may wait for work/);
   await assert.rejects(m.pickup('claude'), /Only workers may pick up delegated work/);
 }));
+
+test('a non-ChatGPT leader gets the host-native policy, never the OpenAI model request', async () => {
+  const { planHostNative } = await import('../src/core/native-fallback.js');
+  const plan = planHostNative({
+    signals: { requirementsClear: true, resumableFromDiff: true, risk: 'low', unknownCodeArea: false, independentWorkUnits: 1, writesAuthorized: true },
+    assignments: [{ agentId: 'gentle-ai-explore', objective: 'Inspect scoped code' }],
+    bindings: [], peerStates: {},
+    capabilities: { nativeSubagents: false, maxParallelSubagents: 0, toolsAvailable: true, evidence: 'HOST_REPORTED_UNVERIFIED' },
+  });
+  const text = JSON.stringify(plan);
+  assert.ok(!text.includes('gpt-6-astra'), 'Claude leader must not be asked for an OpenAI model');
+  assert.ok(text.includes('host-selected'));
+  process.env.PANTER_LEAD_HOST = 'gpt-a';
+  assert.ok(JSON.stringify(planHostNative({
+    signals: { requirementsClear: true, resumableFromDiff: true, risk: 'low', unknownCodeArea: false, independentWorkUnits: 1, writesAuthorized: true },
+    assignments: [{ agentId: 'gentle-ai-explore', objective: 'Inspect scoped code' }],
+    bindings: [], peerStates: {},
+    capabilities: { nativeSubagents: false, maxParallelSubagents: 0, toolsAvailable: true, evidence: 'HOST_REPORTED_UNVERIFIED' },
+  })).includes('gpt-6-astra'), 'ChatGPT leader keeps its policy');
+});
+
+test('after switching leader, review bindings that target the new leader are inactive', () => withMesh(async m => {
+  // Configured under the historical GPT-A leader: Claude was a 4R reviewer.
+  process.env.PANTER_LEAD_HOST = 'gpt-a';
+  await m.setProfile('gpt-a', { host: 'claude', actorId: 'actor-claude', modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer'] }, 0);
+  for (const agentId of ['review-risk', 'review-readability', 'review-reliability', 'review-resilience'])
+    await m.bindSpecialist('gpt-a', { agentId, host: 'claude', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] }, 0);
+  assert.equal((await m.specialistBindings()).length, 4);
+  // Restart with Claude as leader: those bindings must not route work back to it.
+  process.env.PANTER_LEAD_HOST = 'claude';
+  assert.equal((await m.specialistBindings()).length, 0);
+  await assert.rejects(m.startReview('claude', { missionId: 'switch', kind: '4r', objective: 'Review', candidateSha: 'b'.repeat(40), idempotencyKey: 'rev-1' }),
+    /All review specialists must be configured first/);
+  assert.equal((await m.pending('claude')).length, 0);
+}));
