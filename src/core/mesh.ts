@@ -410,6 +410,68 @@ export class MeshEngine {
     });
   }
 
+  /** Queue work for host-native scheduled Tasks (Gemini, GPT-B, Claude) only
+   * after an authenticated worker has actually called the scheduled pickup tool.
+   * A schedule is NOT an active listener, webhook, or autonomous wake proof.
+   * The host owns the schedule; this method never invokes a model.
+   */
+  async delegateScheduled(caller:Host,input:{missionId:string;role:MeshRole;instruction:string;idempotencyKey:string}){
+    check(caller==='gpt-a','Only GPT-A can delegate');
+    check(input.missionId.trim().length>0&&input.missionId.length<=120,'Invalid mission');
+    check(roles.has(input.role)&&input.role!=='orchestrator','Invalid role');
+    check(input.instruction.trim().length>0&&input.instruction.length<=50000,'Invalid instruction');
+    check(input.idempotencyKey.trim().length>0&&input.idempotencyKey.length<=160,'Invalid idempotency');
+    const choice=await this.read(d=>{
+      const replay=d.works.find(w=>w.missionId===input.missionId&&w.idempotencyKey===input.idempotencyKey);
+      if(replay)return {replay};
+      if(d.profiles.some(p=>p.host==='gpt-a'&&p.coordinationMode==='GPT_A_ONLY'))
+        return {reason:'GPT_A_ONLY' as const};
+      if(input.role==='implementer')return {reason:'SCHEDULED_WRITES_NOT_ENABLED' as const};
+      const now=Date.now();
+      const ready=d.profiles.filter(p=>{
+        if(p.host==='gpt-a'||!p.roles.includes(input.role)||p.scheduledPickupEnabled!==true)
+          return false;
+        const interval=p.scheduledPollIntervalSeconds;
+        const ob=d.workforce?.[p.host as WorkerHost];
+        const age=now-Date.parse(ob?.lastScheduledPollAt??'');
+        return interval!==undefined&&Number.isFinite(age)&&age>=0&&
+          age<=interval*2000+120_000&&
+          ob?.reportedRoute?.deliveryMode==='SCHEDULED_POLL'&&
+          ob.reportedRoute.pollIntervalSeconds===interval&&
+          !d.works.some(w=>w.target===p.host&&
+            ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state));
+      }).sort((a,b)=>{
+        const aAge=Date.parse(d.workforce?.[a.host as WorkerHost]?.lastScheduledPollAt??'');
+        const bAge=Date.parse(d.workforce?.[b.host as WorkerHost]?.lastScheduledPollAt??'');
+        return bAge-aAge||a.host.localeCompare(b.host);
+      });
+      return ready[0]?{target:ready[0].host}:{reason:'NO_OBSERVED_SCHEDULED_PEER' as const};
+    });
+    if('replay' in choice&&choice.replay){
+      check(choice.replay.role===input.role&&choice.replay.instruction===input.instruction&&
+        !choice.replay.specialist,'Idempotency conflict');
+      return {status:'DELEGATED' as const,selectedHost:choice.replay.target,
+        work:choice.replay,selectionEvidence:'IDEMPOTENT_REPLAY' as const,
+        autonomousWakeVerified:false as const};
+    }
+    if(!('target' in choice)||!choice.target)
+      return {status:'LOCAL_FALLBACK_REQUIRED' as const,
+        reason:('reason' in choice?choice.reason:'NO_OBSERVED_SCHEDULED_PEER'),
+        autonomousWakeVerified:false as const};
+    try{
+      const work=await this.delegate(caller,{...input,target:choice.target,scheduleOnly:true});
+      return {status:'DELEGATED' as const,selectedHost:work.target,work,
+        selectionEvidence:'OBSERVED_SCHEDULE_POLL_QUEUE_ONLY' as const,
+        autonomousWakeVerified:false as const};
+    }catch(error){
+      if(error instanceof Error&&
+        /Scheduled worker busy|Scheduled worker has no recent authenticated scheduled pickup/.test(error.message))
+        return {status:'LOCAL_FALLBACK_REQUIRED' as const,reason:'SCHEDULE_NO_LONGER_ELIGIBLE' as const,
+          autonomousWakeVerified:false as const};
+      throw error;
+    }
+  }
+
   /** Select a recently authenticated standing worker without requiring GPT-A to
    * name a host. A reported route is NOT proof of cold-start wake. If there is
    * no suitable live peer, GPT-A must use its native local/subagent path.
