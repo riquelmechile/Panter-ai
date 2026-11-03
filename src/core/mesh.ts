@@ -11,9 +11,13 @@ export const HOSTS = ['gpt-a', 'gpt-b', 'grok', 'gemini', 'claude'] as const;
 export type Host = typeof HOSTS[number];
 export type MeshRole = 'orchestrator' | 'explorer' | 'architect' | 'implementer' | 'verifier' | 'reviewer';
 export type MeshWorkState = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'WAITING_INPUT' | 'OUTCOME_UNKNOWN' | 'ABORTED_NO_EFFECTS';
-export type ActorProfile = { host: Host; actorId: string; modelRequest: string; effortRequest: string; roles: MeshRole[]; revision: number; preferNativeSubagents?: boolean; maxRequestedNativeWorkers?: number; coordinationMode?: 'AUTO' | 'GPT_A_ONLY'; scheduledPickupEnabled?:boolean; scheduledPollIntervalSeconds?:number };
+export type ActorProfile = { host: Host; actorId: string; modelRequest: string; effortRequest: string; roles: MeshRole[]; revision: number; preferNativeSubagents?: boolean; maxRequestedNativeWorkers?: number; coordinationMode?: 'AUTO' | 'GPT_A_ONLY'; scheduledPickupEnabled?:boolean; scheduledPollIntervalSeconds?:number; executionRequest?: WorkerExecutionRequest };
+/** Host execution settings the leader REQUIRES of a worker. Panter cannot enforce or observe them;
+ * they are frozen into each delegated work so the worker applies them and reports what it actually used. */
+export type WorkerExecutionRequest = { serviceTier?: string; stream?: boolean; parallelToolCalls?: boolean; maxNativeSubagents?: number };
+export type WorkExecutionRequest = WorkerExecutionRequest & { status: 'REQUESTED_UNVERIFIED'; model: string; reasoningEffort: string };
 export type MeshMessage = { id: string; missionId: string; from: Host; to: Host; workId: string | null; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' | 'RESULT'; text: string; createdAt: string; inboxRevision: number };
-export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string} };
+export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string} };
 export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
 export type WorkforceTaskBridge = {taskId:string;host:WorkerHost;protocolEra:'2025-11-25'|'2026-07-28';status:'ARMED'|'DELIVERED'|'CANCELLED'|'EXPIRED';createdAt:string;expiresAt:string;workId:string|null};
@@ -27,6 +31,12 @@ export function isHost(x: string): x is Host { return hosts.has(x); }
 function check(condition: unknown, reason: string): asserts condition { if (!condition) throw new Error(reason); }
 function sha(value: string) { return createHash('sha256').update(value).digest('hex'); }
 function iso() { return new Date().toISOString(); }
+/** Snapshot the target's required execution settings into the work; specialist model/effort win when bound. */
+function frozenExecution(d: MeshData, target: Host, specialist?: { modelRequest: string; effortRequest: string }): WorkExecutionRequest | undefined {
+  const p = d.profiles.find(x => x.host === target);
+  if (!p) return undefined;
+  return { status: 'REQUESTED_UNVERIFIED', model: specialist?.modelRequest ?? p.modelRequest, reasoningEffort: specialist?.effortRequest ?? p.effortRequest, ...(p.executionRequest ?? {}) };
+}
 function activeBindings(d: MeshData) { return (d.specialistBindings ?? []).filter(b => b.host !== leaderHost()); }
 
 export class MeshEngine {
@@ -101,6 +111,15 @@ export class MeshEngine {
     if(profile.preferNativeSubagents !== undefined) check(typeof profile.preferNativeSubagents==='boolean' && profile.host===leaderHost(), 'Native worker preferences are leader-only');
     if(profile.coordinationMode !== undefined) check(profile.host===leaderHost() && ['AUTO','GPT_A_ONLY'].includes(profile.coordinationMode), `Coordination mode is ${leaderLabel()}-only`);
     if(profile.maxRequestedNativeWorkers !== undefined) check(profile.host===leaderHost() && Number.isInteger(profile.maxRequestedNativeWorkers) && profile.maxRequestedNativeWorkers>=0 && profile.maxRequestedNativeWorkers<=32, 'Invalid native worker ceiling');
+    if(profile.executionRequest!==undefined){
+      const x=profile.executionRequest;
+      check(profile.host!==leaderHost(),'Execution requests are worker-only');
+      check(!!x&&typeof x==='object'&&!Array.isArray(x)&&Object.keys(x).every(k=>['serviceTier','stream','parallelToolCalls','maxNativeSubagents'].includes(k)),'Invalid execution request');
+      if(x.serviceTier!==undefined)check(typeof x.serviceTier==='string'&&/^[a-z][a-z0-9_-]{1,31}$/.test(x.serviceTier),'Invalid service tier');
+      if(x.stream!==undefined)check(typeof x.stream==='boolean','Invalid stream flag');
+      if(x.parallelToolCalls!==undefined)check(typeof x.parallelToolCalls==='boolean','Invalid parallel tool calls flag');
+      if(x.maxNativeSubagents!==undefined)check(Number.isInteger(x.maxNativeSubagents)&&x.maxNativeSubagents>=0&&x.maxNativeSubagents<=32,'Invalid native subagent count');
+    }
     if(profile.scheduledPickupEnabled!==undefined)
       check(profile.host!==leaderHost()&&typeof profile.scheduledPickupEnabled==='boolean','Scheduled pickup is worker-only');
     if(profile.scheduledPollIntervalSeconds!==undefined)
@@ -369,7 +388,7 @@ export class MeshEngine {
         const conflict=d.works.find(w=>w.missionId===input.missionId && w.role==='implementer' && ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state) && (w.specialist?.allowedEditSurfaces??[]).some(a=>input.specialist!.allowedEditSurfaces.some(b=>a===b || a.startsWith(b+'/') || b.startsWith(a+'/'))));
         check(!conflict,'Overlapping active writer edit surfaces');
       }
-      const w: MeshWork = { id: randomUUID(), missionId: input.missionId, from: leaderHost(), target: input.target, role: input.role, instruction: input.instruction, idempotencyKey: input.idempotencyKey, specialist: input.specialist, state: 'QUEUED', attemptId: null, leaseGeneration: 0, leaseUntil: null, result: null, receiptDigest: null, createdAt: iso(), completedAt: null };
+      const w: MeshWork = { id: randomUUID(), missionId: input.missionId, from: leaderHost(), target: input.target, role: input.role, instruction: input.instruction, idempotencyKey: input.idempotencyKey, specialist: input.specialist, executionRequest: frozenExecution(d, input.target, input.specialist), state: 'QUEUED', attemptId: null, leaseGeneration: 0, leaseUntil: null, result: null, receiptDigest: null, createdAt: iso(), completedAt: null };
       d.works.push(w);
       // Bind the oldest active transport listener to the authoritative queued work.
       const bridge=(d.taskBridges??[]).find(t=>t.host===w.target&&t.status==='ARMED'&&Date.parse(t.expiresAt)>Date.now());
@@ -616,7 +635,7 @@ export class MeshEngine {
         const work:MeshWork={id:randomUUID(),missionId:input.missionId,from:leaderHost(),target:binding.host,role:'reviewer',instruction:packet.instruction,
           idempotencyKey:`${input.idempotencyKey}:${ids[i]}`,specialist:{agentId:packet.agentId,skillIds:packet.skillIds,packetDigest:packet.digest,
             assetDigests:packet.assetDigests,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,bindingRevision:binding.revision,
-            candidateSha:input.candidateSha,allowedEditSurfaces:[]},state:'QUEUED',attemptId:null,leaseGeneration:0,leaseUntil:null,result:null,receiptDigest:null,createdAt:now,completedAt:null};
+            candidateSha:input.candidateSha,allowedEditSurfaces:[]},executionRequest:frozenExecution(d,binding.host,binding),state:'QUEUED',attemptId:null,leaseGeneration:0,leaseUntil:null,result:null,receiptDigest:null,createdAt:now,completedAt:null};
         d.works.push(work);workIds.push(work.id);this.notify(d,binding.host);
       }
       const review:ReviewSession={id:randomUUID(),missionId:input.missionId,kind:input.kind,objective:input.objective,candidateSha:input.candidateSha,idempotencyKey:input.idempotencyKey,workIds,createdAt:now};
