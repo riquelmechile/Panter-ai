@@ -16,6 +16,7 @@ import { WorkforceLongPoll } from './core/workforce-long-poll.js';
 import { GrokRoutineWake } from './core/grok-routine-wake.js';
 import { WorkforceEvents } from './core/workforce-events.js';
 import { registerWorkforceEventWire } from './core/workforce-event-wire.js';
+import { appWorkforceTurn } from './core/workforce-app-turn.js';
 import { createServer } from 'node:http';
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
@@ -408,6 +409,11 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_mesh_pending',{description:'Return pointers to work assigned to authenticated host.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.pending(hostPrincipal())));
   // An authenticated worker may check ONLY its own oldest queued pointer.
   // Self-reported wake routes are never promoted to verified autonomous delivery.
+  server.registerTool('panter_workforce_app_turn',{
+    description:'GPT-B or Gemini in their own ChatGPT/Gemini app: single authenticated MCP call to claim one assigned task and receive host-native execution instructions. No Work, Codex CLI, Antigravity CLI or model-provider API; does not wake a closed app.',
+    inputSchema:z.object({leaseSeconds:z.number().int().min(30).max(3600).default(900)}).strict()
+  },async x=>execute(()=>appWorkforceTurn(mesh,hostPrincipal(),
+    reqCtx.era==='modern'?'2026-07-28':'2025-11-25',x.leaseSeconds)));
   server.registerTool('panter_workforce_schedule_pickup',{
     description:'For a host-owned recurring Task or Skill: authenticate the scheduled MCP poll and claim at most one actor-owned non-writer task. Requires GPT-A scheduled-worker opt-in. The server never starts the host, and self-reported mode does not prove autonomous wake.',
     inputSchema:z.object({
