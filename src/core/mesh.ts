@@ -334,6 +334,47 @@ export class MeshEngine {
     });
   }
 
+  /** Reserve one outbound doorbell after the authoritative work is committed.
+   * A lost response is never blindly resent: RESERVED is an uncertain outcome.
+   */
+  async reserveGrokWake(caller:Host,workId:string){
+    check(caller==='gpt-a','Only GPT-A may signal delegated work');
+    return this.write(d=>{
+      const w=d.works.find(w=>w.id===workId&&w.from==='gpt-a'&&w.target==='grok');
+      check(w,'Grok work not found');
+      const existing=(d.grokWakeAttempts??[]).find(a=>a.workId===workId);
+      if(existing)return {send:false,attempt:existing};
+      check(w.state==='QUEUED','Only queued Grok work can receive wake');
+      const attempt:GrokWakeAttempt={workId,state:'RESERVED',reservedAt:iso(),statusCode:null};
+      (d.grokWakeAttempts??=[]).push(attempt);
+      this.notify(d,'gpt-a');
+      return {send:true,attempt};
+    });
+  }
+  async finishGrokWake(caller:Host,workId:string,accepted:boolean,statusCode:number|null){
+    check(caller==='gpt-a','Only GPT-A may record wake delivery');
+    return this.write(d=>{
+      const attempt=(d.grokWakeAttempts??[]).find(a=>a.workId===workId);
+      check(attempt,'Wake attempt not found');
+      if(attempt.state!=='RESERVED')return attempt;
+      attempt.state=accepted?'SIGNAL_ACCEPTED':'SIGNAL_FAILED';
+      attempt.statusCode=statusCode;
+      this.notify(d,'gpt-a');
+      return attempt;
+    });
+  }
+  async grokWakeStatus(caller:Host,workId:string){
+    check(caller==='gpt-a','Only GPT-A may inspect Grok wake attempts');
+    return this.read(d=>{
+      const w=d.works.find(w=>w.id===workId&&w.from==='gpt-a'&&w.target==='grok');
+      check(w,'Grok work not found');
+      const a=(d.grokWakeAttempts??[]).find(x=>x.workId===workId);
+      return {workId,state:a?.state??'DELIVERY_ONLY',statusCode:a?.statusCode??null,
+        wakeObserved:a?.state==='SIGNAL_ACCEPTED'&&Boolean(a.claimedAt),
+        claimedAt:a?.claimedAt??null};
+    });
+  }
+
   /** Select a recently authenticated standing worker without requiring GPT-A to
    * name a host. A reported route is NOT proof of cold-start wake. If there is
    * no suitable live peer, GPT-A must use its native local/subagent path.
