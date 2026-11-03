@@ -341,7 +341,7 @@ const handler = createMcpHandler(reqCtx => {
 
   const hostEnum = z.enum(HOSTS);
   const roleEnum = z.enum(['orchestrator','explorer','architect','implementer','verifier','reviewer']);
-  server.registerTool('panter_mesh_profile_set',{description:'GPT-A configures a host agent profile, model and effort are requests only.',inputSchema:z.object({host:hostEnum,actorId:bounded(160),modelRequest:z.string().max(120),effortRequest:z.string().max(32),roles:z.array(roleEnum).min(1),coordinationMode:z.enum(['AUTO','GPT_A_ONLY']).optional(),preferNativeSubagents:z.boolean().optional(),maxRequestedNativeWorkers:z.number().int().min(0).max(32).optional(),expectedRevision:z.number().int().nonnegative()})},async x=>execute(()=>mesh.setProfile(hostPrincipal(),x,x.expectedRevision)));
+  server.registerTool('panter_mesh_profile_set',{description:'GPT-A configures a host agent profile, model and effort are requests only.',inputSchema:z.object({host:hostEnum,actorId:bounded(160),modelRequest:z.string().max(120),effortRequest:z.string().max(32),roles:z.array(roleEnum).min(1),coordinationMode:z.enum(['AUTO','GPT_A_ONLY']).optional(),preferNativeSubagents:z.boolean().optional(),maxRequestedNativeWorkers:z.number().int().min(0).max(32).optional(),scheduledPickupEnabled:z.boolean().optional(),scheduledPollIntervalSeconds:z.number().int().min(3600).max(86400).optional(),expectedRevision:z.number().int().nonnegative()})},async x=>execute(()=>mesh.setProfile(hostPrincipal(),x,x.expectedRevision)));
   server.registerTool('panter_mesh_profiles',{description:'List configured host profiles.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.profiles()));
   server.registerTool('panter_mesh_delegate',{description:'GPT-A creates actor-bound A2A work for one configured host.',inputSchema:z.object({missionId:bounded(120),target:hostEnum,role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160)})},async x=>execute(()=>mesh.delegate(hostPrincipal(),x)));
   server.registerTool('panter_mesh_delegate_auto',{
@@ -388,7 +388,7 @@ const handler = createMcpHandler(reqCtx => {
         wake:await mesh.claudeWakeStatus(caller,work.id),
         autonomousWakeVerified:false as const};
     }
-    return direct;
+    return mesh.delegateScheduled(caller,x);
   }));
   server.registerTool('panter_workforce_grok_wake_status',{
     description:'GPT-A reads redacted durable Grok webhook attempt for an own work ID. Accepted HTTP is not evidence the worker ran.',
@@ -401,6 +401,29 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_mesh_pending',{description:'Return pointers to work assigned to authenticated host.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.pending(hostPrincipal())));
   // An authenticated worker may check ONLY its own oldest queued pointer.
   // Self-reported wake routes are never promoted to verified autonomous delivery.
+  server.registerTool('panter_workforce_schedule_pickup',{
+    description:'For a host-owned recurring Task or Skill: authenticate the scheduled MCP poll and claim at most one actor-owned non-writer task. Requires GPT-A scheduled-worker opt-in. The server never starts the host, and self-reported mode does not prove autonomous wake.',
+    inputSchema:z.object({
+      intervalSeconds:z.number().int().min(3600).max(86400).default(3600),
+      leaseSeconds:z.number().int().min(30).max(3600).default(300),
+    }).strict(),
+  },async x=>execute(async()=>{
+    const actor=hostPrincipal();
+    if(actor==='gpt-a')throw Error('Only workers may run host schedules');
+    const profile=(await mesh.profiles()).find(p=>p.host===actor);
+    if(profile?.scheduledPickupEnabled!==true||
+       profile.scheduledPollIntervalSeconds!==x.intervalSeconds)
+      throw Error('Scheduled pickup is not configured for this authenticated actor');
+    const poll=await mesh.workforcePoll(actor,{
+      protocolEra:reqCtx.era==='modern'?'2026-07-28':'2025-11-25',
+      deliveryMode:'SCHEDULED_POLL',pollIntervalSeconds:x.intervalSeconds
+    });
+    if(!poll.next)return {status:'EMPTY' as const,
+      delivery:'AUTHENTICATED_SCHEDULE_POLL' as const,autonomousWakeVerified:false as const};
+    const claim=await mesh.pickup(actor,x.leaseSeconds,true);
+    return {...claim,delivery:'AUTHENTICATED_SCHEDULE_POLL' as const,
+      autonomousWakeVerified:false as const};
+  }));
   server.registerTool('panter_workforce_next',{
     description:'Actor-bound next QUEUED candidate pointer; claim revalidates authorization. Updates observed MCP presence but never wakes or grants execution.',
     inputSchema:z.object({
