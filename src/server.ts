@@ -14,6 +14,8 @@ import { MeshEngine, HOSTS, isHost } from './core/mesh.js';
 import { registerTaskWire } from './core/workforce-task-wire.js';
 import { WorkforceLongPoll } from './core/workforce-long-poll.js';
 import { GrokRoutineWake } from './core/grok-routine-wake.js';
+import { WorkforceEvents, reconcileWorkforceEventOutbox } from './core/workforce-events.js';
+import { registerWorkforceEventWire } from './core/workforce-event-wire.js';
 import { appWorkforceTurn } from './core/workforce-app-turn.js';
 import { ClaudeRoutineWake } from './core/claude-routine-wake.js';
 import { createServer } from 'node:http';
@@ -89,6 +91,7 @@ const mesh = await MeshEngine.open(dataDir);
 const workforceLongPoll = new WorkforceLongPoll(mesh);
 const grokRoutineWake = new GrokRoutineWake();
 const claudeRoutineWake = new ClaudeRoutineWake();
+const workforceEvents = new WorkforceEvents(dataDir);
 mesh.setStandingListenerCheck(host=>workforceLongPoll.isListening(host));
 const nativeSubagentReview = await NativeSubagentReview.open(dataDir);
 const githubGate = new GitHubDeliveryGate({
@@ -144,7 +147,7 @@ const bounded = (max = 2048) => z.string().trim().min(1).max(max);
 
 const handler = createMcpHandler(reqCtx => {
   const server = new McpServer({ name: 'panter-ai', version: '0.15.0' }, {
-    capabilities: { resources: { subscribe: true } },
+    capabilities: { resources: { subscribe: true }, events: {} } as any,
     instructions: 'Panter-ai is a host-operated development harness with NO provider inference. GPT-A is the coordinator. For a new user development request start with panter_harness_start (goal + permitted work and observed facts, NEVER ask the user to pick agents, roles, skills or review lenses). Then call panter_harness_tick and execute the returned phase automatically with host tools or native subagents; call panter_harness_report after observing actual results, and repeat until blocked by actual authorization/evidence or completed. The server automatically selects ODD discovery, planning, scoped implementation, independent verification and 4R by risk; Judgment Day only when explicitly requested. An initial Agent Studio preference may bind model/host but never requires per-task specialist selection. GPT_A_ONLY forbids remote delegation while preserving maximum requested model/effort, fast native worker processing, and maximum safe host-observed parallelism. If no remote peer is connected continue with GPT-A native/inline. The host owns model selection and subagent execution; claims of model, effort, speed or children are REQUESTED, not verified. Do not misstate packet preparation as subagent execution. Panter-RDD is an independently implemented SHA-bound review gate, not the official Gentle AI Go controller; human delivery authorization remains separate. Do not merge or deploy without separately authorized tools and exact-candidate proof.'
 
   });
@@ -337,6 +340,9 @@ const handler = createMcpHandler(reqCtx => {
     requireLeader();const {project,...save}=item;
     return (await memoryFor(project)).save(hostPrincipal(),save);
   }));
+  // Native, actor-scoped MCP Events wire; requires a client supporting events.
+  registerWorkforceEventWire(server,workforceEvents,hostPrincipal,mesh);
+
   // Worker learning/proposals stay in panter_mesh_message until GPT-A
   // independently verifies them and chooses to save them in Engram.
 
@@ -357,6 +363,19 @@ const handler = createMcpHandler(reqCtx => {
     // native host Routines that have been explicitly configured by operator.
     // All remote wake is fail-closed, pointer-only, read-only.
     const profiles=await mesh.profiles();
+    // The live MCP waiter already took precedence. Compatible subscribers
+    // can receive webhook pointers but do not prove an idle chat woke.
+    for(const host of ['gpt-b','gemini'] as const){
+      if(!workforceEvents.hasActive(host)||!profiles.some(p=>p.host===host&&p.roles.includes(x.role)))continue;
+      try {
+        const work=await mesh.delegate(caller,{...x,target:host,wakeOnly:true});
+        return {status:'DELEGATED' as const,selectedHost:host,work,
+          selectionEvidence:'ACTIVE_MCP_EVENT_SUBSCRIPTION' as const,
+          autonomousWakeVerified:false as const};
+      } catch(error) {
+        if(!(error instanceof Error&&error.message==='MCP event peer busy'))throw error;
+      }
+    }
     for(const host of ['grok','claude'] as const){
       const available=host==='grok'?grokRoutineWake.configured:claudeRoutineWake.configured;
       if(!available||!profiles.some(p=>p.host===host&&p.roles.includes(x.role)))continue;
@@ -391,6 +410,10 @@ const handler = createMcpHandler(reqCtx => {
     }
     return mesh.delegateScheduled(caller,x);
   }));
+  server.registerTool('panter_workforce_event_status',{
+    description:'GPT-A reads redacted event subscription and delivery counts; HTTP acceptance does not prove worker execution.',
+    inputSchema:z.object({}).strict(),annotations:{readOnlyHint:true}
+  },async()=>execute(async()=>workforceEvents.status(hostPrincipal())));
   server.registerTool('panter_workforce_grok_wake_status',{
     description:'GPT-A reads redacted durable Grok webhook attempt for an own work ID. Accepted HTTP is not evidence the worker ran.',
     inputSchema:z.object({workId:z.uuid()}).strict(),annotations:{readOnlyHint:true}
@@ -821,6 +844,21 @@ const handler = createMcpHandler(reqCtx => {
   }
   return server;
 });
+
+// Reconcile only real queued work pointers with subscribed event receivers.
+// The event payload cannot authorize writes or expose instructions.
+const reconcileEvents=()=>{
+  void reconcileWorkforceEventOutbox(['gpt-b','gemini'],
+    host=>mesh.pending(host),workforceEvents)
+    .then(({enqueueFailures})=>{
+      if(enqueueFailures)console.error('MCP event outbox enqueue deferred');
+    }).catch(()=>console.error('MCP event outbox reconciliation failed'));
+};
+mesh.events.on('gpt-b',reconcileEvents);
+mesh.events.on('gemini',reconcileEvents);
+const eventRetry=setInterval(reconcileEvents,30_000);
+eventRetry.unref();
+reconcileEvents();
 
 // Publish only after atomic ledger persistence. SDK handles modern listen
 // streams; the in-memory bus is intentionally single-process in v0.4.
