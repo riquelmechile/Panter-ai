@@ -6,20 +6,27 @@
 import {createHash,createHmac,randomBytes,timingSafeEqual} from 'node:crypto';
 import {lookup} from 'node:dns/promises';
 import {request} from 'node:https';
-import {BlockList,isIP} from 'node:net';
+import {BlockList,isIP,type LookupFunction} from 'node:net';
 import {SqliteLedger} from './sqlite-ledger.js';
 
 export const WORK_EVENT='panter.work.ready';
 export type EventHost='gpt-b'|'gemini';
 type Subscription={id:string;owner:EventHost;url:string;secret:string;expiresAt:string;verifiedAt:string};
 type Delivery={id:string;subId:string;workId:string;state:'PENDING'|'SENDING'|'ACCEPTED'|'FAILED';
-  attempts:number;nextAt:number;lastStatus:number|null};
+  attempts:number;nextAt:number;lastStatus:number|null;terminalAt?:number};
 type EventData={version:1;subscriptions:Subscription[];deliveries:Delivery[]};
 type PostResult={status:number;body:string};
 export type EventPost=(url:string,headers:Record<string,string>,body:string)=>Promise<PostResult>;
 const seed:EventData={version:1,subscriptions:[],deliveries:[]};
 const hash=(v:string)=>createHash('sha256').update(v).digest('hex');
 const now=()=>Date.now();
+// DNS was prevalidated; honor both Node.js lookup callback shapes.
+export function pinnedAddressLookup(address:string,family:number):LookupFunction{
+  return (_hostname,opts,callback)=>{
+    if(opts.all)callback(null,[{address,family}]);
+    else callback(null,address,family);
+  };
+}
 
 const privateIps=new BlockList();
 for(const [ip,mask] of [
@@ -33,6 +40,24 @@ for(const [ip,mask] of [
   ['::',128],['::1',128],['fc00::',7],['fe80::',10],
   ['ff00::',8],['2001:db8::',32],['2001:10::',28],
 ] as const)privateIps.addSubnet(ip,mask,'ipv6');
+
+const MAX_OUTSTANDING=2000;
+const MAX_TERMINAL_HISTORY=2000;
+const TERMINAL_HISTORY_TTL_MS=7*24*60*60*1000;
+const isTerminal=(d:Delivery)=>d.state==='ACCEPTED'||d.state==='FAILED';
+/** Keep successful webhook dedup while work remains queued, but bound terminal
+ * history after work is no longer in the authenticated actor's queue.
+ * A webhook 2xx must never be mistaken for a completed worker claim.
+ */
+function compactTerminalHistory(d:EventData,actor:EventHost,queued:Set<string>){
+  const owners=new Set(d.subscriptions.filter(s=>s.owner===actor).map(s=>s.id));
+  const eligible=d.deliveries.filter(x=>isTerminal(x)&&owners.has(x.subId)&&!queued.has(x.workId));
+  eligible.sort((a,b)=>(b.terminalAt??b.nextAt)-(a.terminalAt??a.nextAt));
+  const keep=new Set(eligible.slice(0,MAX_TERMINAL_HISTORY)
+    .filter(x=>(x.terminalAt??x.nextAt)>=now()-TERMINAL_HISTORY_TTL_MS).map(x=>x.id));
+  const candidates=new Set(eligible.map(x=>x.id));
+  d.deliveries=d.deliveries.filter(x=>!candidates.has(x.id)||keep.has(x.id));
+}
 
 export function publicIp(ip:string):boolean{
   const family=isIP(ip);
@@ -83,7 +108,7 @@ export async function safeWebhookPost(url:string,headers:Record<string,string>,
   return new Promise<PostResult>((resolve,reject)=>{
     const req=request(u,{method:'POST',
       servername:u.hostname,timeout:7000,maxHeaderSize:16384,
-      lookup:(_host,_opts,cb)=>cb(null,selected.address,selected.family),
+      lookup:pinnedAddressLookup(selected.address,selected.family),
       headers:{...headers,'content-length':Buffer.byteLength(body)}},
     res=>{
       const chunks:Buffer[]=[];let total=0;
@@ -193,14 +218,18 @@ export class WorkforceEvents{
   queue(actor:EventHost,workIds:string[]){
     const ids=[...new Set(workIds.filter(id=>
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)))].slice(0,100);
-    if(!ids.length)return 0;
+    const stillQueued=new Set(workIds);
     return this.db.mutate('events',seed,d=>{
+      compactTerminalHistory(d,actor,stillQueued);
+      if(!ids.length)return 0;
       let added=0;
+      let outstanding=d.deliveries.filter(x=>!isTerminal(x)).length;
       for(const sub of d.subscriptions.filter(s=>s.owner===actor&&isLive(s)))
         for(const workId of ids){
           const id='evt_'+hash(sub.id+':'+workId).slice(0,32);
           if(d.deliveries.some(x=>x.id===id))continue;
-          if(d.deliveries.length>=2000)throw Error('MCP event backlog limit reached');
+          if(outstanding>=MAX_OUTSTANDING)throw Error('MCP event backlog limit reached');
+          outstanding++;
           d.deliveries.push({id,subId:sub.id,workId,state:'PENDING',
             attempts:0,nextAt:now(),lastStatus:null});added++;
         }
@@ -217,8 +246,8 @@ export class WorkforceEvents{
           (x.state==='SENDING'&&x.nextAt<=t));
         if(!next)return null;
         const sub=d.subscriptions.find(s=>s.id===next.subId&&isLive(s,t));
-        if(!sub){next.state='FAILED';return null;}
-        if(next.attempts>=5){next.state='FAILED';return null;}
+        if(!sub){next.state='FAILED';next.terminalAt=t;return null;}
+        if(next.attempts>=5){next.state='FAILED';next.terminalAt=t;return null;}
         next.attempts++;next.state='SENDING';next.nextAt=t+60_000;
         return {delivery:{...next},sub:{...sub}};
       }).result;
@@ -237,8 +266,8 @@ export class WorkforceEvents{
         const x=d.deliveries.find(y=>y.id===delivery.id);
         if(!x||x.state!=='SENDING'||x.attempts!==delivery.attempts)return;
         x.lastStatus=status;
-        if(status!==null&&status>=200&&status<300){x.state='ACCEPTED';return;}
-        if(status===410||status===413||x.attempts>=5){x.state='FAILED';return;}
+        if(status!==null&&status>=200&&status<300){x.state='ACCEPTED';x.terminalAt=now();return;}
+        if(status===410||status===413||x.attempts>=5){x.state='FAILED';x.terminalAt=now();return;}
         x.state='PENDING';
         x.nextAt=now()+Math.min(300_000,5000*2**(x.attempts-1));
       });

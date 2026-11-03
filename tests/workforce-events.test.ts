@@ -4,7 +4,7 @@ import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {randomBytes} from 'node:crypto';
-import {WorkforceEvents,WORK_EVENT,publicIp,validCallback,webhookHeaders,
+import {WorkforceEvents,WORK_EVENT,publicIp,validCallback,webhookHeaders,pinnedAddressLookup,
   type EventPost} from '../src/core/workforce-events.js';
 
 const callback='https://connectors.api.openai.com/mcp-events/test-callback';
@@ -151,4 +151,49 @@ test('Gemini and GPT-B callbacks are separate OAuth actor subscriptions, not ali
   await engine.flush();
   assert.deepEqual(received.map(x=>x.subscriber),[gemini.id,chat.id]);
   assert.equal(engine.status('gpt-a').hosts.length,2);
+}));
+
+test('pinned TLS lookup honors both Node address-family callback modes',async()=>{
+  const pinned=pinnedAddressLookup('2606:4700:4700::1111',6);
+  const all=await new Promise<unknown>((resolve,reject)=>{
+    pinned('events.example.org',{all:true},(error,result)=>{
+      if(error)reject(error);else resolve(result);
+    });
+  });
+  assert.deepEqual(all,[{address:'2606:4700:4700::1111',family:6}]);
+  const single=await new Promise<unknown>((resolve,reject)=>{
+    pinned('events.example.org',{all:false},(error,result,family)=>{
+      if(error)reject(error);else resolve({result,family});
+    });
+  });
+  assert.deepEqual(single,{result:'2606:4700:4700::1111',family:6});
+});
+
+test('lifetime webhook successes cannot exhaust the active backlog limit',()=>fixture(async dir=>{
+  const post:EventPost=async(_url,_headers,body)=>{
+    const payload=JSON.parse(body) as {type?:string;challenge?:string};
+    return payload.type==='verification'
+      ?{status:200,body:JSON.stringify({challenge:payload.challenge})}
+      :{status:204,body:''};
+  };
+  const events=new WorkforceEvents(dir,post);
+  const sub=await events.subscribe('gpt-b',args);
+  const {SqliteLedger}=await import('../src/core/sqlite-ledger.js');
+  const ledger=SqliteLedger.open(dir);
+  const old=Date.now()-10_000;
+  const historic=Array.from({length:2150},(_,i)=>({
+    id:'evt_historical_'+i,subId:sub.id,
+    workId:'00000000-0000-4000-8000-'+String(i+100).padStart(12,'0'),
+    state:'ACCEPTED' as const,attempts:1,nextAt:old,
+    lastStatus:204,terminalAt:old
+  }));
+  const seed:any={version:1,subscriptions:[],deliveries:[]};
+  ledger.mutate('events',seed,(data:any)=>{data.deliveries.push(...historic);});
+  assert.equal(events.queue('gpt-b',[workId]),1);
+  assert.equal(events.queue('gpt-b',[workId]),0);
+  assert.ok(events.status('gpt-a').accepted<=2000);
+  assert.equal(await events.flush(),1);
+  assert.equal(events.queue('gpt-b',[workId]),0,
+    'terminal dedup remains while corresponding work is still queued');
+  assert.equal(events.status('gpt-a').pending,0);
 }));
