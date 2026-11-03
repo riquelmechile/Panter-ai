@@ -17,6 +17,7 @@ import { GrokRoutineWake } from './core/grok-routine-wake.js';
 import { WorkforceEvents } from './core/workforce-events.js';
 import { registerWorkforceEventWire } from './core/workforce-event-wire.js';
 import { appWorkforceTurn } from './core/workforce-app-turn.js';
+import { ClaudeRoutineWake } from './core/claude-routine-wake.js';
 import { createServer } from 'node:http';
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
@@ -89,6 +90,7 @@ const agents = await AgentEngine.open(dataDir, store);
 const mesh = await MeshEngine.open(dataDir);
 const workforceLongPoll = new WorkforceLongPoll(mesh);
 const grokRoutineWake = new GrokRoutineWake();
+const claudeRoutineWake = new ClaudeRoutineWake();
 const workforceEvents = new WorkforceEvents(dataDir);
 mesh.setStandingListenerCheck(host=>workforceLongPoll.isListening(host));
 const nativeSubagentReview = await NativeSubagentReview.open(dataDir);
@@ -338,7 +340,7 @@ const handler = createMcpHandler(reqCtx => {
     requireLeader();const {project,...save}=item;
     return (await memoryFor(project)).save(hostPrincipal(),save);
   }));
-  // MCP Events is an authenticated wire capability, not a provider API.
+  // Native, actor-scoped MCP Events wire; requires a client supporting events.
   registerWorkforceEventWire(server,workforceEvents,hostPrincipal,mesh);
 
   // Worker learning/proposals stay in panter_mesh_message until GPT-A
@@ -355,62 +357,76 @@ const handler = createMcpHandler(reqCtx => {
   },async x=>execute(async()=>{
     const caller=hostPrincipal();
     const direct=await mesh.delegateAuto(caller,x);
-    if(direct.status!=='LOCAL_FALLBACK_REQUIRED' ||
-       direct.reason!=='NO_FRESH_STANDBY_PEER')return direct;
-    // Prefer a real live MCP listener, then operator-configured Grok Bot
-    // webhook, then an authenticated scheduled host poll. Never invent wake.
-    if(x.role!=='implementer'){
-      const profiles=await mesh.profiles();
-      for(const host of ['gpt-b','gemini'] as const){
-        if(!workforceEvents.hasActive(host)||
-          !profiles.some(p=>p.host===host&&p.roles.includes(x.role)))continue;
-        try{
-          const work=await mesh.delegate(caller,{...x,target:host,wakeOnly:true});
-          return {status:'DELEGATED' as const,selectedHost:host,work,
-            selectionEvidence:'ACTIVE_HOST_NATIVE_MCP_EVENT_SUBSCRIPTION' as const,
-            autonomousWakeVerified:false as const};
-        }catch(error){
-          if(!(error instanceof Error&&/MCP event peer busy/.test(error.message)))
-            throw error;
-        }
+    if(direct.status!=='LOCAL_FALLBACK_REQUIRED'||
+       direct.reason!=='NO_FRESH_STANDBY_PEER'||x.role==='implementer')return direct;
+    // A real connected live waiter takes priority. Without one, use only
+    // native host Routines that have been explicitly configured by operator.
+    // All remote wake is fail-closed, pointer-only, read-only.
+    const profiles=await mesh.profiles();
+    // The live MCP waiter already took precedence. Compatible subscribers
+    // can receive webhook pointers but do not prove an idle chat woke.
+    for(const host of ['gpt-b','gemini'] as const){
+      if(!workforceEvents.hasActive(host)||!profiles.some(p=>p.host===host&&p.roles.includes(x.role)))continue;
+      try {
+        const work=await mesh.delegate(caller,{...x,target:host,wakeOnly:true});
+        return {status:'DELEGATED' as const,selectedHost:host,work,
+          selectionEvidence:'ACTIVE_MCP_EVENT_SUBSCRIPTION' as const,
+          autonomousWakeVerified:false as const};
+      } catch(error) {
+        if(!(error instanceof Error&&error.message==='MCP event peer busy'))throw error;
       }
     }
-    if(grokRoutineWake.configured&&x.role!=='implementer'){
-      const profiles=await mesh.profiles();
-      if(profiles.some(p=>p.host==='grok'&&p.roles.includes(x.role))){
-        let work:Awaited<ReturnType<typeof mesh.delegate>>|null=null;
-        try{work=await mesh.delegate(caller,{...x,target:'grok',wakeOnly:true});}
-        catch(error){
-          if(!(error instanceof Error&&error.message==='Grok wake peer busy'))throw error;
-        }
-        if(work){
-          const reserved=await mesh.reserveGrokWake(caller,work.id);
-          if(reserved.send){
-            const response=await grokRoutineWake.dispatch(work.id);
-            await mesh.finishGrokWake(caller,work.id,response.accepted,response.statusCode);
-          }
-          return {status:'DELEGATED' as const,selectedHost:'grok' as const,
-            work,selectionEvidence:'CONFIGURED_GROK_ROUTINE_WEBHOOK' as const,
-            wake:await mesh.grokWakeStatus(caller,work.id),
-            autonomousWakeVerified:false as const};
-        }
+    for(const host of ['grok','claude'] as const){
+      const available=host==='grok'?grokRoutineWake.configured:claudeRoutineWake.configured;
+      if(!available||!profiles.some(p=>p.host===host&&p.roles.includes(x.role)))continue;
+      let work:Awaited<ReturnType<typeof mesh.delegate>>;
+      try{work=await mesh.delegate(caller,{...x,target:host,wakeOnly:true});}
+      catch(error){
+        if(error instanceof Error&&error.message===
+           (host==='grok'?'Grok wake peer busy':'Claude wake peer busy'))continue;
+        throw error;
       }
+      if(host==='grok'){
+        const reserved=await mesh.reserveGrokWake(caller,work.id);
+        if(reserved.send){
+          const response=await grokRoutineWake.dispatch(work.id);
+          await mesh.finishGrokWake(caller,work.id,response.accepted,response.statusCode);
+        }
+        return {status:'DELEGATED' as const,selectedHost:'grok' as const,
+          work,selectionEvidence:'CONFIGURED_GROK_ROUTINE_WEBHOOK' as const,
+          wake:await mesh.grokWakeStatus(caller,work.id),
+          autonomousWakeVerified:false as const};
+      }
+      const reserved=await mesh.reserveClaudeWake(caller,work.id);
+      if(reserved.send){
+        const response=await claudeRoutineWake.dispatch(work.id);
+        await mesh.finishClaudeWake(caller,work.id,response.accepted,
+          response.statusCode,response.sessionId);
+      }
+      return {status:'DELEGATED' as const,selectedHost:'claude' as const,
+        work,selectionEvidence:'CONFIGURED_CLAUDE_ROUTINE_API' as const,
+        wake:await mesh.claudeWakeStatus(caller,work.id),
+        autonomousWakeVerified:false as const};
     }
     return mesh.delegateScheduled(caller,x);
   }));
   server.registerTool('panter_workforce_event_status',{
-    description:'GPT-A reads redacted subscription and delivery counts for GPT-B MCP Events; HTTP 2xx does not prove worker execution.',
+    description:'GPT-A reads redacted event subscription and delivery counts; HTTP acceptance does not prove worker execution.',
     inputSchema:z.object({}).strict(),annotations:{readOnlyHint:true}
   },async()=>execute(async()=>workforceEvents.status(hostPrincipal())));
   server.registerTool('panter_workforce_grok_wake_status',{
     description:'GPT-A reads redacted durable Grok webhook attempt for an own work ID. Accepted HTTP is not evidence the worker ran.',
     inputSchema:z.object({workId:z.uuid()}).strict(),annotations:{readOnlyHint:true}
   },async x=>execute(()=>mesh.grokWakeStatus(hostPrincipal(),x.workId)));
+  server.registerTool('panter_workforce_claude_wake_status',{
+    description:'GPT-A reads durable Claude Code Routine fire state and redacted session ID. HTTP accepted does not prove task execution.',
+    inputSchema:z.object({workId:z.uuid()}).strict(),annotations:{readOnlyHint:true}
+  },async x=>execute(()=>mesh.claudeWakeStatus(hostPrincipal(),x.workId)));
   server.registerTool('panter_mesh_pending',{description:'Return pointers to work assigned to authenticated host.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.pending(hostPrincipal())));
   // An authenticated worker may check ONLY its own oldest queued pointer.
   // Self-reported wake routes are never promoted to verified autonomous delivery.
   server.registerTool('panter_workforce_app_turn',{
-    description:'GPT-B or Gemini in their own ChatGPT/Gemini app: single authenticated MCP call to claim one assigned task and receive host-native execution instructions. No Work, Codex CLI, Antigravity CLI or model-provider API; does not wake a closed app.',
+    description:'Native ChatGPT or Gemini app, not Codex CLI, Gemini CLI or ChatGPT Work: authenticate using existing per-account MCP OAuth connection; receive one actor-owned task with fenced execution identity. No provider APIs or server-side model inference. Cannot initiate a model turn in an inactive chat.',
     inputSchema:z.object({leaseSeconds:z.number().int().min(30).max(3600).default(900)}).strict()
   },async x=>execute(()=>appWorkforceTurn(mesh,hostPrincipal(),
     reqCtx.era==='modern'?'2026-07-28':'2025-11-25',x.leaseSeconds)));
@@ -829,9 +845,8 @@ const handler = createMcpHandler(reqCtx => {
   return server;
 });
 
-// Native MCP Events subscriptions apply only to clients that actually
-// negotiate them. Gemini may use this same wire if its app exposes support;
-// otherwise its host-owned Skills/Task schedule remains the fallback.
+// Reconcile only real queued work pointers with subscribed event receivers.
+// The event payload cannot authorize writes or expose instructions.
 const reconcileEvents=()=>{
   void Promise.all((['gpt-b','gemini'] as const).map(async host=>{
     const rows=await mesh.pending(host);

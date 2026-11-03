@@ -1,4 +1,6 @@
-# Native ChatGPT Work wake through MCP Events (no CLI, no model APIs)
+> Compatibility: OpenAI currently documents MCP Events for Work and dots, not ordinary ChatGPT chats. Panter-ai implements events on the existing endpoint and preserves Listen/app_turn. Webhook acceptance is not proof of autonomous wake.
+
+# Native MCP Events for compatible ChatGPT hosts (no CLI or model APIs)
 
 ## Purpose
 
