@@ -18,7 +18,8 @@ export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day'
 export type WorkforceTaskBridge = {taskId:string;host:WorkerHost;protocolEra:'2025-11-25'|'2026-07-28';status:'ARMED'|'DELIVERED'|'CANCELLED'|'EXPIRED';createdAt:string;expiresAt:string;workId:string|null};
 export type WorkforceRearmIntent = {workId:string;host:WorkerHost;status:'PENDING'|'ACKED';createdAt:string;acknowledgedAt?:string};
 export type GrokWakeAttempt = {workId:string;state:'RESERVED'|'SIGNAL_ACCEPTED'|'SIGNAL_FAILED';reservedAt:string;statusCode:number|null;claimedAt?:string};
-type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
+export type ClaudeWakeAttempt = GrokWakeAttempt & {sessionId:string|null};
+type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; claudeWakeAttempts?: ClaudeWakeAttempt[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
 const hosts = new Set<string>(HOSTS);
 const roles = new Set<MeshRole>(['orchestrator', 'explorer', 'architect', 'implementer', 'verifier', 'reviewer']);
 export function isHost(x: string): x is Host { return hosts.has(x); }
@@ -60,6 +61,7 @@ export class MeshEngine {
       data.taskBridges ??= [];
       data.rearmIntents ??= [];
       data.grokWakeAttempts ??= [];
+      data.claudeWakeAttempts ??= [];
     };
     normalize(parsed);
     // Persist upgrades inside a transaction; subsequent reads cannot lose historical cursors.
@@ -314,10 +316,10 @@ export class MeshEngine {
         return dup;
       }
       if(input.wakeOnly){
-        check(input.target==='grok' && input.role!=='implementer','Grok wake cannot authorize remote writes');
-        check(!d.works.some(w=>w.target==='grok' &&
+        check((input.target==='grok'||input.target==='claude') && input.role!=='implementer','External wake cannot authorize remote writes');
+        check(!d.works.some(w=>w.target===input.target &&
           ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state)),
-          'Grok wake peer busy');
+          input.target==='grok'?'Grok wake peer busy':'Claude wake peer busy');
       }
       if(input.specialist?.allowedEditSurfaces?.length){
         const conflict=d.works.find(w=>w.missionId===input.missionId && w.role==='implementer' && ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state) && (w.specialist?.allowedEditSurfaces??[]).some(a=>input.specialist!.allowedEditSurfaces.some(b=>a===b || a.startsWith(b+'/') || b.startsWith(a+'/'))));
@@ -371,6 +373,49 @@ export class MeshEngine {
       const a=(d.grokWakeAttempts??[]).find(x=>x.workId===workId);
       return {workId,state:a?.state??'DELIVERY_ONLY',statusCode:a?.statusCode??null,
         wakeObserved:a?.state==='SIGNAL_ACCEPTED'&&Boolean(a.claimedAt),
+        claimedAt:a?.claimedAt??null};
+    });
+  }
+
+  /** One-shot Claude Code Routines outbox. A lost POST acknowledgment is
+   * uncertain: never automatically retry, since each fire starts a new session.
+   */
+  async reserveClaudeWake(caller:Host,workId:string){
+    check(caller==='gpt-a','Only GPT-A may signal delegated work');
+    return this.write(d=>{
+      const w=d.works.find(w=>w.id===workId&&w.from==='gpt-a'&&w.target==='claude');
+      check(w,'Claude work not found');
+      const existing=(d.claudeWakeAttempts??[]).find(a=>a.workId===workId);
+      if(existing)return {send:false,attempt:existing};
+      check(w.state==='QUEUED','Only queued Claude work can receive wake');
+      const attempt:ClaudeWakeAttempt={workId,state:'RESERVED',reservedAt:iso(),
+        statusCode:null,sessionId:null};
+      (d.claudeWakeAttempts??=[]).push(attempt);
+      this.notify(d,'gpt-a');
+      return {send:true,attempt};
+    });
+  }
+  async finishClaudeWake(caller:Host,workId:string,accepted:boolean,statusCode:number|null,sessionId:string|null){
+    check(caller==='gpt-a','Only GPT-A may record wake delivery');
+    return this.write(d=>{
+      const attempt=(d.claudeWakeAttempts??[]).find(a=>a.workId===workId);
+      check(attempt,'Claude wake attempt not found');
+      if(attempt.state!=='RESERVED')return attempt;
+      attempt.state=accepted?'SIGNAL_ACCEPTED':'SIGNAL_FAILED';
+      attempt.statusCode=statusCode;
+      attempt.sessionId=accepted?sessionId:null;
+      this.notify(d,'gpt-a');
+      return attempt;
+    });
+  }
+  async claudeWakeStatus(caller:Host,workId:string){
+    check(caller==='gpt-a','Only GPT-A may inspect Claude wake attempts');
+    return this.read(d=>{
+      const w=d.works.find(w=>w.id===workId&&w.from==='gpt-a'&&w.target==='claude');
+      check(w,'Claude work not found');
+      const a=(d.claudeWakeAttempts??[]).find(x=>x.workId===workId);
+      return {workId,state:a?.state??'DELIVERY_ONLY',statusCode:a?.statusCode??null,
+        sessionId:a?.sessionId??null,wakeObserved:a?.state==='SIGNAL_ACCEPTED'&&Boolean(a.claimedAt),
         claimedAt:a?.claimedAt??null};
     });
   }
@@ -509,8 +554,10 @@ export class MeshEngine {
       if (caller !== 'gpt-a') {
         const presence = (d.workforce ??= {})[caller as WorkerHost] ??= {};
         presence.lastClaimAt = iso();
-        const wake=(d.grokWakeAttempts??[]).find(a=>a.workId===w.id);
-        if(wake?.state==='SIGNAL_ACCEPTED')wake.claimedAt=presence.lastClaimAt;
+        const grokWake=(d.grokWakeAttempts??[]).find(a=>a.workId===w.id);
+        const claudeWake=(d.claudeWakeAttempts??[]).find(a=>a.workId===w.id);
+        for(const wake of [grokWake,claudeWake])
+          if(wake?.state==='SIGNAL_ACCEPTED')wake.claimedAt=presence.lastClaimAt;
       }
       w.leaseUntil = new Date(Date.now() + leaseSeconds * 1000).toISOString();
       this.notify(d, 'gpt-a');
