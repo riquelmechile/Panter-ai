@@ -74,17 +74,26 @@ An HTTP 2xx confirms **signal accepted only**. Until a genuine GPT-B
 claim, independent Work-host completion and receipt are demonstrated,
 `autonomousWakeVerified=false`.
 
-## Gemini Apps compatibility
+## Gemini Apps compatibility — same MCP server, conditional feature
 
-The **same** work queue and `panter_workforce_pickup` /
-`panter_workforce_complete_and_rearm` tools are shared with Gemini's
-existing connected MCP application. However, Google's Connected Apps
-Platform documentation currently confirms MCP protocol through
-`2025-11-25`, not that Gemini Apps accepts native ChatGPT-style
-`events/subscribe` callbacks. Do not invent a Gemini event endpoint.
-Use the native Gemini Tasks + Skill schedule introduced in PR #65 as
-the available host-owned wake; upgrade to identical MCP Events only
-if the Gemini host actually negotiates and proves it.
+The **same** `events/list`, `events/subscribe` and `events/unsubscribe`
+methods are also available to Gemini **when its existing MCP-connected
+application actually supports them**. Gemini must authenticate as its own
+OAuth actor and subscribe to `panter.work.ready` with
+`{"host":"gemini"}`. Panter keeps these subscriptions, filters and
+signed webhooks strictly separate from GPT-B.
+
+Google's Connected Apps Platform documentation currently confirms standard
+MCP protocol up to `2025-11-25`. MCP Events is a draft extension which
+can be advertised on 2025 `initialize`, but Google has **not publicly
+confirmed** that Gemini Apps issues `events/subscribe` or receives such
+webhook callbacks. Do not invent or preconfigure a callback URL for Gemini.
+
+The server now supports the **same event contract** for both hosts,
+without changing either existing OAuth account. If Gemini sends a real
+subscription request, activate event-driven delivery to that callback.
+If it does not, Gemini's native Task + Skill schedule from merged PR #65
+continues using the same Mesh queue and fenced result tools.
 
 Reference: https://developers.google.com/connected-apps/mcp/server-optimization
 
