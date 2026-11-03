@@ -358,16 +358,19 @@ const handler = createMcpHandler(reqCtx => {
        direct.reason!=='NO_FRESH_STANDBY_PEER')return direct;
     // Prefer a real live MCP listener, then operator-configured Grok Bot
     // webhook, then an authenticated scheduled host poll. Never invent wake.
-    if(x.role!=='implementer'&&workforceEvents.hasActive('gpt-b')){
+    if(x.role!=='implementer'){
       const profiles=await mesh.profiles();
-      if(profiles.some(p=>p.host==='gpt-b'&&p.roles.includes(x.role))){
+      for(const host of ['gpt-b','gemini'] as const){
+        if(!workforceEvents.hasActive(host)||
+          !profiles.some(p=>p.host===host&&p.roles.includes(x.role)))continue;
         try{
-          const work=await mesh.delegate(caller,{...x,target:'gpt-b',wakeOnly:true});
-          return {status:'DELEGATED' as const,selectedHost:'gpt-b' as const,work,
-            selectionEvidence:'ACTIVE_GPT_B_MCP_EVENT_SUBSCRIPTION' as const,
+          const work=await mesh.delegate(caller,{...x,target:host,wakeOnly:true});
+          return {status:'DELEGATED' as const,selectedHost:host,work,
+            selectionEvidence:'ACTIVE_HOST_NATIVE_MCP_EVENT_SUBSCRIPTION' as const,
             autonomousWakeVerified:false as const};
         }catch(error){
-          if(!(error instanceof Error&&error.message==='GPT-B event peer busy'))throw error;
+          if(!(error instanceof Error&&/MCP event peer busy/.test(error.message)))
+            throw error;
         }
       }
     }
@@ -820,15 +823,18 @@ const handler = createMcpHandler(reqCtx => {
   return server;
 });
 
-// Deliver GPT-B work-ready events through the native ChatGPT Work MCP
-// subscription. This supplements (and never impersonates) a live listener.
+// Native MCP Events subscriptions apply only to clients that actually
+// negotiate them. Gemini may use this same wire if its app exposes support;
+// otherwise its host-owned Skills/Task schedule remains the fallback.
 const reconcileEvents=()=>{
-  void mesh.pending('gpt-b').then(rows=>{
-    workforceEvents.queue(rows.map(w=>w.workId));
-    return workforceEvents.flush();
-  }).catch(()=>console.error('MCP event outbox reconciliation failed'));
+  void Promise.all((['gpt-b','gemini'] as const).map(async host=>{
+    const rows=await mesh.pending(host);
+    workforceEvents.queue(host,rows.map(w=>w.workId));
+  })).then(()=>workforceEvents.flush()).catch(()=>
+    console.error('MCP event outbox reconciliation failed'));
 };
 mesh.events.on('gpt-b',reconcileEvents);
+mesh.events.on('gemini',reconcileEvents);
 const eventRetry=setInterval(reconcileEvents,30_000);
 eventRetry.unref();
 reconcileEvents();
