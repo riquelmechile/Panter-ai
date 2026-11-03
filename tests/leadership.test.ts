@@ -202,6 +202,53 @@ test('leader switch creates the leader profile when missing and keeps old native
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test('a fresh ledger records its leader, so a later switch migrates from the real former leader', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-switch4-'));
+  try {
+    process.env.PANTER_LEAD_HOST = 'claude';
+    const a = await MeshEngine.open(dir);
+    assert.equal(a.leaderSwitch, null);
+    await a.setProfile('claude', worker('gpt-b'), 0);
+    process.env.PANTER_LEAD_HOST = 'gemini';
+    assert.deepEqual((await MeshEngine.open(dir)).leaderSwitch, { from: 'claude', to: 'gemini' });
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('migrated messages get inbox revisions above the new leader cursor', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-switch5-'));
+  try {
+    process.env.PANTER_LEAD_HOST = 'gpt-a';
+    const a = await MeshEngine.open(dir);
+    await a.setProfile('gpt-a', { host: 'claude', actorId: 'actor-claude', modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer'] }, 0);
+    await a.setProfile('gpt-a', worker('gpt-b'), 0);
+    for (const k of ['c1', 'c2']) await a.delegate('gpt-a', { missionId: 'm', target: 'claude', role: 'reviewer', instruction: k, idempotencyKey: k });
+    const cursor = (await a.inbox('claude')).revision;
+    assert.ok(cursor >= 1);
+    const forB = await a.delegate('gpt-a', { missionId: 'm', target: 'gpt-b', role: 'reviewer', instruction: 'b', idempotencyKey: 'b' });
+    await a.message('gpt-b', { missionId: 'm', workId: forB.id, to: 'gpt-a', kind: 'QUESTION', text: 'Late question' });
+    process.env.PANTER_LEAD_HOST = 'claude';
+    const m = await MeshEngine.open(dir);
+    const fresh = await m.inbox('claude', cursor);
+    assert.ok(fresh.messages.some(x => x.text === 'Late question'), 'migrated message must be above the saved cursor');
+    assert.ok(fresh.revision > cursor);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('a remote review interrupted by a leader switch reports INTERRUPTED instead of waiting forever', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-switch6-'));
+  try {
+    process.env.PANTER_LEAD_HOST = 'gpt-a';
+    const a = await MeshEngine.open(dir);
+    await a.setProfile('gpt-a', { host: 'claude', actorId: 'actor-claude', modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer'] }, 0);
+    for (const agentId of ['review-risk', 'review-readability', 'review-reliability', 'review-resilience'])
+      await a.bindSpecialist('gpt-a', { agentId, host: 'claude', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] }, 0);
+    const review = await a.startReview('gpt-a', { missionId: 'm', kind: '4r', objective: 'Review', candidateSha: 'd'.repeat(40), idempotencyKey: 'r-1' });
+    process.env.PANTER_LEAD_HOST = 'claude';
+    const m = await MeshEngine.open(dir);
+    assert.equal((await m.reviewStatus('claude', review.id)).stage, 'INTERRUPTED');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 // Keep last: freezing is process-wide by design.
 test('freezeLeaderHost pins the leader for the process', async () => {
   const mod = await import('../src/core/leadership.js');
