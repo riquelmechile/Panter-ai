@@ -29,7 +29,7 @@ for(const [ip,mask] of [
   ['240.0.0.0',4],
 ] as const)privateIps.addSubnet(ip,mask,'ipv4');
 for(const [ip,mask] of [
-  ['::',128],['::1',128],['::ffff:0:0',96],['fc00::',7],['fe80::',10],
+  ['::',128],['::1',128],['fc00::',7],['fe80::',10],
   ['ff00::',8],['2001:db8::',32],['2001:10::',28],
 ] as const)privateIps.addSubnet(ip,mask,'ipv6');
 
