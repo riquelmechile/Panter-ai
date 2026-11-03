@@ -14,6 +14,8 @@ import { MeshEngine, HOSTS, isHost } from './core/mesh.js';
 import { registerTaskWire } from './core/workforce-task-wire.js';
 import { WorkforceLongPoll } from './core/workforce-long-poll.js';
 import { GrokRoutineWake } from './core/grok-routine-wake.js';
+import { WorkforceEvents } from './core/workforce-events.js';
+import { registerWorkforceEventWire } from './core/workforce-event-wire.js';
 import { createServer } from 'node:http';
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
@@ -86,6 +88,7 @@ const agents = await AgentEngine.open(dataDir, store);
 const mesh = await MeshEngine.open(dataDir);
 const workforceLongPoll = new WorkforceLongPoll(mesh);
 const grokRoutineWake = new GrokRoutineWake();
+const workforceEvents = new WorkforceEvents(dataDir);
 mesh.setStandingListenerCheck(host=>workforceLongPoll.isListening(host));
 const nativeSubagentReview = await NativeSubagentReview.open(dataDir);
 const githubGate = new GitHubDeliveryGate({
@@ -141,7 +144,7 @@ const bounded = (max = 2048) => z.string().trim().min(1).max(max);
 
 const handler = createMcpHandler(reqCtx => {
   const server = new McpServer({ name: 'panter-ai', version: '0.15.0' }, {
-    capabilities: { resources: { subscribe: true } },
+    capabilities: { resources: { subscribe: true }, events: {} } as any,
     instructions: 'Panter-ai is a host-operated development harness with NO provider inference. GPT-A is the coordinator. For a new user development request start with panter_harness_start (goal + permitted work and observed facts, NEVER ask the user to pick agents, roles, skills or review lenses). Then call panter_harness_tick and execute the returned phase automatically with host tools or native subagents; call panter_harness_report after observing actual results, and repeat until blocked by actual authorization/evidence or completed. The server automatically selects ODD discovery, planning, scoped implementation, independent verification and 4R by risk; Judgment Day only when explicitly requested. An initial Agent Studio preference may bind model/host but never requires per-task specialist selection. GPT_A_ONLY forbids remote delegation while preserving maximum requested model/effort, fast native worker processing, and maximum safe host-observed parallelism. If no remote peer is connected continue with GPT-A native/inline. The host owns model selection and subagent execution; claims of model, effort, speed or children are REQUESTED, not verified. Do not misstate packet preparation as subagent execution. Panter-RDD is an independently implemented SHA-bound review gate, not the official Gentle AI Go controller; human delivery authorization remains separate. Do not merge or deploy without separately authorized tools and exact-candidate proof.'
 
   });
@@ -334,6 +337,9 @@ const handler = createMcpHandler(reqCtx => {
     requireLeader();const {project,...save}=item;
     return (await memoryFor(project)).save(hostPrincipal(),save);
   }));
+  // MCP Events is an authenticated wire capability, not a provider API.
+  registerWorkforceEventWire(server,workforceEvents,hostPrincipal,mesh);
+
   // Worker learning/proposals stay in panter_mesh_message until GPT-A
   // independently verifies them and chooses to save them in Engram.
 
@@ -352,6 +358,19 @@ const handler = createMcpHandler(reqCtx => {
        direct.reason!=='NO_FRESH_STANDBY_PEER')return direct;
     // Prefer a real live MCP listener, then operator-configured Grok Bot
     // webhook, then an authenticated scheduled host poll. Never invent wake.
+    if(x.role!=='implementer'&&workforceEvents.hasActive('gpt-b')){
+      const profiles=await mesh.profiles();
+      if(profiles.some(p=>p.host==='gpt-b'&&p.roles.includes(x.role))){
+        try{
+          const work=await mesh.delegate(caller,{...x,target:'gpt-b',wakeOnly:true});
+          return {status:'DELEGATED' as const,selectedHost:'gpt-b' as const,work,
+            selectionEvidence:'ACTIVE_GPT_B_MCP_EVENT_SUBSCRIPTION' as const,
+            autonomousWakeVerified:false as const};
+        }catch(error){
+          if(!(error instanceof Error&&error.message==='GPT-B event peer busy'))throw error;
+        }
+      }
+    }
     if(grokRoutineWake.configured&&x.role!=='implementer'){
       const profiles=await mesh.profiles();
       if(profiles.some(p=>p.host==='grok'&&p.roles.includes(x.role))){
@@ -375,6 +394,10 @@ const handler = createMcpHandler(reqCtx => {
     }
     return mesh.delegateScheduled(caller,x);
   }));
+  server.registerTool('panter_workforce_event_status',{
+    description:'GPT-A reads redacted subscription and delivery counts for GPT-B MCP Events; HTTP 2xx does not prove worker execution.',
+    inputSchema:z.object({}).strict(),annotations:{readOnlyHint:true}
+  },async()=>execute(async()=>workforceEvents.status(hostPrincipal())));
   server.registerTool('panter_workforce_grok_wake_status',{
     description:'GPT-A reads redacted durable Grok webhook attempt for an own work ID. Accepted HTTP is not evidence the worker ran.',
     inputSchema:z.object({workId:z.uuid()}).strict(),annotations:{readOnlyHint:true}
@@ -796,6 +819,19 @@ const handler = createMcpHandler(reqCtx => {
   }
   return server;
 });
+
+// Deliver GPT-B work-ready events through the native ChatGPT Work MCP
+// subscription. This supplements (and never impersonates) a live listener.
+const reconcileEvents=()=>{
+  void mesh.pending('gpt-b').then(rows=>{
+    workforceEvents.queue(rows.map(w=>w.workId));
+    return workforceEvents.flush();
+  }).catch(()=>console.error('MCP event outbox reconciliation failed'));
+};
+mesh.events.on('gpt-b',reconcileEvents);
+const eventRetry=setInterval(reconcileEvents,30_000);
+eventRetry.unref();
+reconcileEvents();
 
 // Publish only after atomic ledger persistence. SDK handles modern listen
 // streams; the in-memory bus is intentionally single-process in v0.4.
