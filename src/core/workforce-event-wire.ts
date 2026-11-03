@@ -7,7 +7,7 @@ import {WORK_EVENT,WorkforceEvents} from './workforce-events.js';
 import type {MeshEngine} from './mesh.js';
 
 const eventName=z.literal(WORK_EVENT);
-const args=z.object({host:z.literal('gpt-b')}).strict();
+const args=z.object({host:z.enum(['gpt-b','gemini'])}).strict();
 const callback=z.object({mode:z.literal('webhook'),url:z.string().max(2048),
   secret:z.string().max(256)}).strict();
 const unsubCallback=z.object({mode:z.literal('webhook').optional(),
@@ -28,9 +28,11 @@ export function registerWorkforceEventWire(server:McpServer,events:WorkforceEven
       cursor:z.null(),truncated:z.boolean()}).strict()
   },async input=>{
     const result=await events.subscribe(actor(),input);
-    // This is an authenticated GPT-B subscription, not permission to execute.
-    const pending=await mesh.pending('gpt-b');
-    events.queue(pending.map(w=>w.workId));
+    // The actor is the authenticated MCP principal, not the client-supplied filter.
+    const host=actor();
+    if(host!=='gpt-b'&&host!=='gemini')throw Error('Unsupported event actor');
+    const pending=await mesh.pending(host);
+    events.queue(host,pending.map(w=>w.workId));
     void events.flush().catch(()=>{/* durable retry queue remains */});
     return result;
   });
