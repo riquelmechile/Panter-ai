@@ -95,10 +95,14 @@ async function execute<T>(work: () => Promise<T>) {
 const store = await PanterStore.open(dataDir);
 const agents = await AgentEngine.open(dataDir, store);
 const mesh = await MeshEngine.open(dataDir);
-if (mesh.leaderSwitch) {
-  const moved = await agents.adoptLeaderPhases(mesh.leaderSwitch.from, mesh.leaderSwitch.to);
-  console.error(`Panter leader switch ${mesh.leaderSwitch.from} -> ${mesh.leaderSwitch.to}: ${moved} open native phases adopted`);
+if (mesh.leaderSwitch) console.error(`Panter leader switch ${mesh.leaderSwitch.from} -> ${mesh.leaderSwitch.to}`);
+// Runs on every boot while the ledger marker exists, so a crash between the mesh migration
+// and the phase adoption is finished on the next start.
+for (const from of mesh.pendingPhaseAdoption) {
+  const moved = await agents.adoptLeaderPhases(from, leaderHost());
+  console.error(`Panter leader phases ${from} -> ${leaderHost()}: ${moved} open native phases adopted`);
 }
+if (mesh.pendingPhaseAdoption.length) await mesh.clearPhaseAdoption(mesh.pendingPhaseAdoption);
 const workforceLongPoll = new WorkforceLongPoll(mesh);
 const grokRoutineWake = new GrokRoutineWake();
 const claudeRoutineWake = new ClaudeRoutineWake();
