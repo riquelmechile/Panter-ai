@@ -80,7 +80,7 @@ export async function safeWebhookPost(url:string,headers:Record<string,string>,
     throw Error('Unsafe webhook destination');
   const selected=records[0]!;
   return new Promise<PostResult>((resolve,reject)=>{
-    const req=request(u,{method:'POST',redirect:undefined as never,
+    const req=request(u,{method:'POST',
       servername:u.hostname,timeout:7000,maxHeaderSize:16384,
       lookup:(_host,_opts,cb)=>cb(null,selected.address,selected.family),
       headers:{...headers,'content-length':Buffer.byteLength(body)}},
@@ -190,7 +190,7 @@ export class WorkforceEvents{
     if(!ids.length)return 0;
     return this.db.mutate('events',seed,d=>{
       let added=0;
-      for(const sub of d.subscriptions.filter(isLive))
+      for(const sub of d.subscriptions.filter(s=>isLive(s)))
         for(const workId of ids){
           const id='evt_'+hash(sub.id+':'+workId).slice(0,32);
           if(d.deliveries.some(x=>x.id===id))continue;
