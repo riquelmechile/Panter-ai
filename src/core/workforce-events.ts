@@ -171,8 +171,8 @@ export class WorkforceEvents{
       const i=d.subscriptions.findIndex(x=>x.id===id);
       if(i<0)d.subscriptions.push(saved);
       else d.subscriptions[i]=saved;
-      // Never allow old deliveries signed with a previous key to resend.
-      d.deliveries=d.deliveries.filter(x=>x.subId!==id||x.state==='ACCEPTED');
+      // Preserve durable pending events on refresh and key rotation.
+      // The exact raw body is re-signed on each attempt with the current key.
     });
     return {id,refreshBefore:expiresAt,cursor:null,truncated:false};
   }
