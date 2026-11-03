@@ -13,6 +13,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { MeshEngine, HOSTS, isHost } from './core/mesh.js';
 import { registerTaskWire } from './core/workforce-task-wire.js';
 import { WorkforceLongPoll } from './core/workforce-long-poll.js';
+import { GrokRoutineWake } from './core/grok-routine-wake.js';
 import { createServer } from 'node:http';
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
@@ -84,6 +85,7 @@ const store = await PanterStore.open(dataDir);
 const agents = await AgentEngine.open(dataDir, store);
 const mesh = await MeshEngine.open(dataDir);
 const workforceLongPoll = new WorkforceLongPoll(mesh);
+const grokRoutineWake = new GrokRoutineWake();
 mesh.setStandingListenerCheck(host=>workforceLongPoll.isListening(host));
 const nativeSubagentReview = await NativeSubagentReview.open(dataDir);
 const githubGate = new GitHubDeliveryGate({
@@ -343,7 +345,37 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_mesh_delegate_auto',{
     description:'GPT-A routes to the least-loaded recently authenticated standing peer with the requested role; returns LOCAL_FALLBACK_REQUIRED when no live peer is evidenced. Does not prove cold-start wake.',
     inputSchema:z.object({missionId:bounded(120),role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160)}).strict(),
-  },async x=>execute(()=>mesh.delegateAuto(hostPrincipal(),x)));
+  },async x=>execute(async()=>{
+    const caller=hostPrincipal();
+    const direct=await mesh.delegateAuto(caller,x);
+    if(direct.status!=='LOCAL_FALLBACK_REQUIRED' ||
+      direct.reason!=='NO_FRESH_STANDBY_PEER' ||
+      !grokRoutineWake.configured||x.role==='implementer')return direct;
+    // External Grok Bot Routine is a cold-start doorbell only. No writes until
+    // a separate, host-authorized grant exists. Do not queue on a busy peer.
+    const profiles=await mesh.profiles();
+    if(!profiles.some(p=>p.host==='grok'&&p.roles.includes(x.role)))return direct;
+    let work:Awaited<ReturnType<typeof mesh.delegate>>;
+    try{work=await mesh.delegate(caller,{...x,target:'grok',wakeOnly:true});}
+    catch(error){
+      if(error instanceof Error&&error.message==='Grok wake peer busy')
+        return {...direct,reason:'GROK_WAKE_PEER_BUSY' as const};
+      throw error;
+    }
+    const reserved=await mesh.reserveGrokWake(caller,work.id);
+    if(reserved.send){
+      const response=await grokRoutineWake.dispatch(work.id);
+      await mesh.finishGrokWake(caller,work.id,response.accepted,response.statusCode);
+    }
+    return {status:'DELEGATED' as const,selectedHost:'grok' as const,
+      work,selectionEvidence:'CONFIGURED_GROK_ROUTINE_WEBHOOK' as const,
+      wake:await mesh.grokWakeStatus(caller,work.id),
+      autonomousWakeVerified:false as const};
+  }));
+  server.registerTool('panter_workforce_grok_wake_status',{
+    description:'GPT-A reads redacted durable Grok webhook attempt for an own work ID. Accepted HTTP is not evidence the worker ran.',
+    inputSchema:z.object({workId:z.uuid()}).strict(),annotations:{readOnlyHint:true}
+  },async x=>execute(()=>mesh.grokWakeStatus(hostPrincipal(),x.workId)));
   server.registerTool('panter_mesh_pending',{description:'Return pointers to work assigned to authenticated host.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.pending(hostPrincipal())));
   // An authenticated worker may check ONLY its own oldest queued pointer.
   // Self-reported wake routes are never promoted to verified autonomous delivery.
