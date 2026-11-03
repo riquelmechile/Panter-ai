@@ -85,15 +85,19 @@ export class MeshEngine {
           }
         }
         // Worker messages to the former leader go to the new one (one leader per process).
+        // Fresh revisions above the new leader's cursor, so incremental inbox polling still sees them.
+        let next = Math.max(data.inboxRevision[lead] ?? 0, ...data.messages.filter(m => m.to === lead).map(m => m.inboxRevision || 0));
         for (const m of data.messages) {
           if (m.to !== from || m.from === from) continue;
           const w = m.workId ? data.works.find(x => x.id === m.workId) : undefined;
-          if (!w || w.target === m.from) { m.to = lead; m.inboxRevision = 0; }
+          if (!w || w.target === m.from) { m.to = lead; m.inboxRevision = ++next; }
         }
+        data.inboxRevision[lead] = Math.max(data.inboxRevision[lead] ?? 0, next);
         if (!data.profiles.some(p => p.host === lead)) data.profiles.push({ host: lead, actorId: `actor-${lead}`,
           modelRequest: hostRequest(leaderPolicyProfile()).model, effortRequest: 'max', roles: ['orchestrator'], revision: 1 });
-        data.leader = lead;
       }
+      // Always record the leader, including on an empty ledger, so the next switch migrates from the right host.
+      data.leader = lead;
       const historical: Record<Host, number> = { 'gpt-a': 0, 'gpt-b': 0, 'grok': 0, 'gemini': 0, 'claude': 0 };
       for (const m of data.messages) {
         check(isHost(m.to) && isHost(m.from), 'Invalid message actor');
@@ -706,7 +710,9 @@ export class MeshEngine {
       const work=review.workIds.map(id=>d.works.find(w=>w.id===id));
       check(work.every(Boolean),'Review ledger inconsistent');
       const terminal=work.every(w=>w!.state==='COMPLETED'||w!.state==='FAILED');
-      return {review,stage:terminal?'READY_FOR_CONTROLLER':'AWAITING_REPORTS',
+      // A leader switch aborts review work addressed to the new leader; that session can never complete.
+      const interrupted=work.some(w=>w!.state==='ABORTED_NO_EFFECTS');
+      return {review,stage:interrupted?'INTERRUPTED' as const:terminal?'READY_FOR_CONTROLLER' as const:'AWAITING_REPORTS' as const,
         nativeReviewAuthority:false,
         work:work.map(w=>({workId:w!.id,agentId:w!.specialist?.agentId,packetDigest:w!.specialist?.packetDigest,host:w!.target,state:w!.state,receiptDigest:w!.receiptDigest,result:w!.result}))};
     });
