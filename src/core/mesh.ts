@@ -146,6 +146,11 @@ export class MeshEngine {
       if(report.deliveryMode==='SCHEDULED_POLL'){
         presence.lastScheduledPollAt=presence.lastPollAt;
         presence.scheduledPollCount=Math.min(1_000_000,(presence.scheduledPollCount??0)+1);
+        // The next actual host-owned schedule invocation acknowledges rearm.
+        // Completion itself never claims a scheduled host will run again.
+        for(const intent of d.rearmIntents??[])if(intent.host===caller&&intent.status==='PENDING'){
+          intent.status='ACKED';intent.acknowledgedAt=presence.lastPollAt;
+        }
       }
       const next = d.works.filter(w => w.target === caller && w.state === 'QUEUED')
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))[0];
