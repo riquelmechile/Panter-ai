@@ -10,7 +10,7 @@ export const HOSTS = ['gpt-a', 'gpt-b', 'grok', 'gemini', 'claude'] as const;
 export type Host = typeof HOSTS[number];
 export type MeshRole = 'orchestrator' | 'explorer' | 'architect' | 'implementer' | 'verifier' | 'reviewer';
 export type MeshWorkState = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'WAITING_INPUT' | 'OUTCOME_UNKNOWN' | 'ABORTED_NO_EFFECTS';
-export type ActorProfile = { host: Host; actorId: string; modelRequest: string; effortRequest: string; roles: MeshRole[]; revision: number; preferNativeSubagents?: boolean; maxRequestedNativeWorkers?: number; coordinationMode?: 'AUTO' | 'GPT_A_ONLY' };
+export type ActorProfile = { host: Host; actorId: string; modelRequest: string; effortRequest: string; roles: MeshRole[]; revision: number; preferNativeSubagents?: boolean; maxRequestedNativeWorkers?: number; coordinationMode?: 'AUTO' | 'GPT_A_ONLY'; scheduledPickupEnabled?:boolean; scheduledPollIntervalSeconds?:number };
 export type MeshMessage = { id: string; missionId: string; from: Host; to: Host; workId: string | null; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' | 'RESULT'; text: string; createdAt: string; inboxRevision: number };
 export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string} };
 export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
@@ -97,6 +97,14 @@ export class MeshEngine {
     if(profile.preferNativeSubagents !== undefined) check(typeof profile.preferNativeSubagents==='boolean' && profile.host==='gpt-a', 'Native worker preferences are leader-only');
     if(profile.coordinationMode !== undefined) check(profile.host==='gpt-a' && ['AUTO','GPT_A_ONLY'].includes(profile.coordinationMode), 'Coordination mode is GPT-A-only');
     if(profile.maxRequestedNativeWorkers !== undefined) check(profile.host==='gpt-a' && Number.isInteger(profile.maxRequestedNativeWorkers) && profile.maxRequestedNativeWorkers>=0 && profile.maxRequestedNativeWorkers<=32, 'Invalid native worker ceiling');
+    if(profile.scheduledPickupEnabled!==undefined)
+      check(profile.host!=='gpt-a'&&typeof profile.scheduledPickupEnabled==='boolean','Scheduled pickup is worker-only');
+    if(profile.scheduledPollIntervalSeconds!==undefined)
+      check(profile.host!=='gpt-a'&&Number.isInteger(profile.scheduledPollIntervalSeconds)&&
+        profile.scheduledPollIntervalSeconds>=3600&&profile.scheduledPollIntervalSeconds<=86400,
+        'Scheduled pickup interval must be 3600..86400 seconds');
+    if(profile.scheduledPickupEnabled)
+      check(profile.scheduledPollIntervalSeconds!==undefined,'Scheduled pickup interval required');
     check(profile.host !== 'gpt-a' || profile.roles.every(r => r === 'orchestrator'), 'GPT-A is the coordinator');
     check(profile.host === 'gpt-a' || !profile.roles.includes('orchestrator'), 'Only GPT-A is the coordinator');
     return this.write(d => {
@@ -135,6 +143,10 @@ export class MeshEngine {
       const presence = registry[caller as WorkerHost] ??= {};
       presence.lastPollAt = iso();
       presence.reportedRoute = { ...report };
+      if(report.deliveryMode==='SCHEDULED_POLL'){
+        presence.lastScheduledPollAt=presence.lastPollAt;
+        presence.scheduledPollCount=Math.min(1_000_000,(presence.scheduledPollCount??0)+1);
+      }
       const next = d.works.filter(w => w.target === caller && w.state === 'QUEUED')
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))[0];
       return {
@@ -151,7 +163,17 @@ export class MeshEngine {
     return this.read(d => summarizeWorkforce(d.profiles, d.workforce ?? {}, d.works).map(view=>{
       const active=(d.taskBridges??[]).filter(t=>t.host===view.host&&
         (t.status==='ARMED'||t.status==='DELIVERED')&&Date.parse(t.expiresAt)>Date.now());
+      const profile=d.profiles.find(p=>p.host===view.host);
+      const observed=d.workforce?.[view.host];
+      const lastScheduled=observed?.lastScheduledPollAt??null;
+      const interval=profile?.scheduledPollIntervalSeconds??null;
+      const due=lastScheduled&&interval?new Date(Date.parse(lastScheduled)+interval*1000).toISOString():null;
       return {...view,liveListenerObserved:this.standingListenerCheck?.(view.host)===true,
+        scheduledPickup:{configured:profile?.scheduledPickupEnabled===true,
+          pollIntervalSeconds:interval,lastObservedPollAt:lastScheduled,
+          observedCallCount:observed?.scheduledPollCount??0,nextDueAt:due,
+          overdue:!!(due&&Date.now()>Date.parse(due)+120_000),
+          autonomousWakeVerified:false as const},
         bridgeListeners:active.map(t=>({taskId:t.taskId,status:t.status,
         protocolEra:t.protocolEra,expiresAt:t.expiresAt})),
         pendingRearmIntents:(d.rearmIntents??[]).filter(i=>i.host===view.host&&i.status==='PENDING').length};
@@ -287,7 +309,7 @@ export class MeshEngine {
     return this.delegate(caller,{missionId:input.missionId,target:binding.host,role:packet.role,instruction:packet.instruction,idempotencyKey:input.idempotencyKey,
       specialist:{agentId:packet.agentId,skillIds:packet.skillIds,packetDigest:packet.digest,assetDigests:packet.assetDigests,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,bindingRevision:binding.revision,candidateSha:input.candidateSha,allowedEditSurfaces:packet.allowedEditSurfaces}});
   }
-  async delegate(caller: Host, input: { missionId: string; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?:NonNullable<MeshWork['specialist']>; wakeOnly?:boolean }) {
+  async delegate(caller: Host, input: { missionId: string; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?:NonNullable<MeshWork['specialist']>; wakeOnly?:boolean; scheduleOnly?:boolean }) {
     check(caller === 'gpt-a', 'Only GPT-A can delegate');
     check(input.missionId.length > 0 && input.missionId.length <= 120, 'Invalid mission');
     check(isHost(input.target) && input.target !== 'gpt-a', 'Invalid target');
@@ -312,6 +334,19 @@ export class MeshEngine {
       if (dup) {
         check(dup.target === input.target && dup.role === input.role && dup.instruction === input.instruction && JSON.stringify(dup.specialist??null)===JSON.stringify(input.specialist??null), 'Idempotency conflict');
         return dup;
+      }
+      if(input.scheduleOnly){
+        const observation=d.workforce?.[input.target as WorkerHost];
+        const interval=profile?.scheduledPollIntervalSeconds;
+        const age=Date.now()-Date.parse(observation?.lastScheduledPollAt??'');
+        check(input.role!=='implementer'&&profile?.scheduledPickupEnabled===true&&
+          interval!==undefined&&observation?.reportedRoute?.deliveryMode==='SCHEDULED_POLL'&&
+          observation.reportedRoute.pollIntervalSeconds===interval&&
+          Number.isFinite(age)&&age>=0&&age<=2*interval*1000+120_000,
+          'Scheduled worker has no recent authenticated scheduled pickup');
+        check(!d.works.some(w=>w.target===input.target&&
+          ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state)),
+          'Scheduled worker busy');
       }
       if(input.wakeOnly){
         check(input.target==='grok' && input.role!=='implementer','Grok wake cannot authorize remote writes');
