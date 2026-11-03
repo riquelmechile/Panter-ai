@@ -503,6 +503,11 @@ export class AutomaticHarness {
           instruction:'Panter-RDD not configured; no model report grants approval.'};
       }
       const review=await this.mesh.reviewStatus(leaderHost(),now.reviewId);
+      if(review.stage==='INTERRUPTED'){
+        // Interrupted by a leader switch: drop the session and start a fresh attempt (native until rebound).
+        await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(r.reviewId===now.reviewId){r.reviewId=null;r.reviewTransport=null;r.reviewAttempt=(r.reviewAttempt??0)+1;r.revision++;}});
+        return this.tick(runId,runtime);
+      }
       const evidence=assessMeshReview({kind:review.review.kind,candidateSha:review.review.candidateSha,work:review.work});
       if(this.rdd&&review.stage==='READY_FOR_CONTROLLER'){
         const tx=await this.rdd.begin({missionId:now.id,reviewId:now.reviewId,source:'REMOTE',
