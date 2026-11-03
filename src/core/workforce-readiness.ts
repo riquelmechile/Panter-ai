@@ -21,6 +21,8 @@ export type WorkerObservation = {
   lastPollAt?: string;
   lastClaimAt?: string;
   lastReceiptAt?: string;
+  lastScheduledPollAt?: string;
+  scheduledPollCount?: number;
   reportedRoute?: WorkerRouteReport;
 };
 
