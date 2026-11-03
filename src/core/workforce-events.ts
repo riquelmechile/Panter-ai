@@ -10,7 +10,8 @@ import {BlockList,isIP} from 'node:net';
 import {SqliteLedger} from './sqlite-ledger.js';
 
 export const WORK_EVENT='panter.work.ready';
-type Subscription={id:string;owner:'gpt-b';url:string;secret:string;expiresAt:string;verifiedAt:string};
+export type EventHost='gpt-b'|'gemini';
+type Subscription={id:string;owner:EventHost;url:string;secret:string;expiresAt:string;verifiedAt:string};
 type Delivery={id:string;subId:string;workId:string;state:'PENDING'|'SENDING'|'ACCEPTED'|'FAILED';
   attempts:number;nextAt:number;lastStatus:number|null};
 type EventData={version:1;subscriptions:Subscription[];deliveries:Delivery[]};
@@ -99,15 +100,18 @@ export async function safeWebhookPost(url:string,headers:Record<string,string>,
     req.on('error',reject);req.end(body);
   });
 }
-function assertActor(actor:string):asserts actor is 'gpt-b'{
-  if(actor!=='gpt-b')throw Error('GPT-B OAuth actor required for MCP event subscription');
+function assertActor(actor:string):asserts actor is EventHost{
+  if(actor!=='gpt-b'&&actor!=='gemini')
+    throw Error('Only GPT-B or Gemini OAuth actors may subscribe to Panter MCP events');
 }
-function eventArgs(input:unknown){
+function eventArgs(input:unknown,actor:EventHost){
   if(!input||typeof input!=='object'||Array.isArray(input))throw Error('Invalid event arguments');
   const args=input as Record<string,unknown>;
-  if(Object.keys(args).length!==1||args.host!=='gpt-b')throw Error('Only GPT-B queue events may be subscribed');
+  if(Object.keys(args).length!==1||args.host!==actor)throw Error('Event filter must match authenticated actor');
 }
-function subId(owner:string,url:string){return 'sub_'+hash(owner+'\n'+url+'\n'+WORK_EVENT+'\n{"host":"gpt-b"}').slice(0,32);}
+function subId(owner:EventHost,url:string){
+  return 'sub_'+hash(owner+'\n'+url+'\n'+WORK_EVENT+'\n'+JSON.stringify({host:owner})).slice(0,32);
+}
 const isLive=(s:Subscription,t=now())=>Date.parse(s.expiresAt)>t;
 
 export class WorkforceEvents{
@@ -118,14 +122,14 @@ export class WorkforceEvents{
   list(actor:string){
     assertActor(actor);
     return {events:[{name:WORK_EVENT,
-      description:'GPT-B: a new actor-owned work pointer is ready in Panter-ai. Claim with panter_workforce_pickup.',
+      description:'An authenticated '+actor+' work pointer is ready. Claim with panter_workforce_pickup.',
       delivery:['webhook'],
-      inputSchema:{type:'object',properties:{host:{type:'string',enum:['gpt-b']}},
+      inputSchema:{type:'object',properties:{host:{type:'string',enum:[actor]}},
         required:['host'],additionalProperties:false},
       payloadSchema:{type:'object',properties:{workId:{type:'string',format:'uuid'}},
         required:['workId'],additionalProperties:false}}]};
   }
-  hasActive(actor:'gpt-b'){
+  hasActive(actor:EventHost){
     const data=this.db.read('events',seed);
     return data.subscriptions.some(s=>s.owner===actor&&isLive(s));
   }
@@ -133,7 +137,7 @@ export class WorkforceEvents{
     delivery:{mode:string;url:string;secret:string};ttlMs?:number|null;
     cursor?:string|null}){
     assertActor(actor);if(args.name!==WORK_EVENT)throw Error('Unknown event');
-    eventArgs(args.arguments);
+    eventArgs(args.arguments,actor);
     if(args.cursor!==undefined&&args.cursor!==null)throw Error('Event replay not supported');
     if(args.delivery?.mode!=='webhook')throw Error('Webhook delivery required');
     const u=validCallback(args.delivery.url);
@@ -174,7 +178,7 @@ export class WorkforceEvents{
   }
   unsubscribe(actor:string,args:{name:string;arguments:unknown;delivery:{url:string}}){
     assertActor(actor);if(args.name!==WORK_EVENT)throw Error('Unknown event');
-    eventArgs(args.arguments);
+    eventArgs(args.arguments,actor);
     const url=validCallback(args.delivery?.url).toString();
     const id=subId(actor,url);
     this.db.mutate('events',seed,d=>{
@@ -183,14 +187,14 @@ export class WorkforceEvents{
     });
     return {};
   }
-  /** Reconcile only real QUEUED pointers exposed to authenticated GPT-B. */
-  queue(workIds:string[]){
+  /** Reconcile only real QUEUED pointers for the authenticated host. */
+  queue(actor:EventHost,workIds:string[]){
     const ids=[...new Set(workIds.filter(id=>
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)))].slice(0,100);
     if(!ids.length)return 0;
     return this.db.mutate('events',seed,d=>{
       let added=0;
-      for(const sub of d.subscriptions.filter(s=>isLive(s)))
+      for(const sub of d.subscriptions.filter(s=>s.owner===actor&&isLive(s)))
         for(const workId of ids){
           const id='evt_'+hash(sub.id+':'+workId).slice(0,32);
           if(d.deliveries.some(x=>x.id===id))continue;
@@ -242,7 +246,7 @@ export class WorkforceEvents{
   status(actor:string){
     if(actor!=='gpt-a')throw Error('Only GPT-A may inspect event wake');
     const data=this.db.read('events',seed);
-    return {host:'gpt-b',subscriptions:data.subscriptions.filter(isLive).length,
+    return {hosts:['gpt-b','gemini'].map(host=>({host,activeSubscriptions:data.subscriptions.filter(s=>s.owner===host&&isLive(s)).length})),subscriptions:data.subscriptions.filter(s=>isLive(s)).length,
       pending:data.deliveries.filter(x=>x.state==='PENDING'||x.state==='SENDING').length,
       accepted:data.deliveries.filter(x=>x.state==='ACCEPTED').length,
       failed:data.deliveries.filter(x=>x.state==='FAILED').length,
