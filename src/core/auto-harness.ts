@@ -504,7 +504,9 @@ export class AutomaticHarness {
       }
       const review=await this.mesh.reviewStatus(leaderHost(),now.reviewId);
       if(review.stage==='INTERRUPTED'){
-        // Interrupted by a leader switch: drop the session and start a fresh attempt (native until rebound).
+        // Interrupted by a leader switch: close its queued lenses, drop the session and start a fresh
+        // attempt (native until rebound).
+        await this.mesh.abortInterruptedReview(leaderHost(),now.reviewId);
         await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(r.reviewId===now.reviewId){r.reviewId=null;r.reviewTransport=null;r.reviewAttempt=(r.reviewAttempt??0)+1;r.revision++;}});
         return this.tick(runId,runtime);
       }

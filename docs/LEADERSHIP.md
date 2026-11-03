@@ -34,10 +34,12 @@ Panter guarda en su ledger quién era el líder. Si al arrancar el líder config
 
 - **Trabajo dirigido al nuevo líder**, que ya nadie podría tomar:
   - si estaba en `QUEUED`, queda `ABORTED_NO_EFFECTS`;
-  - si estaba en curso, queda `FAILED`;
+  - si era de solo lectura (revisión, verificación, exploración) y estaba en curso, queda `ABORTED_NO_EFFECTS`;
   - si era de implementación en curso, queda `OUTCOME_UNKNOWN`, para pasar por la reconciliación de siempre.
+- **Revisiones remotas afectadas** quedan `INTERRUPTED`. El harness cierra sus lentes que siguen en cola (`ABORTED_NO_EFFECTS`) y abre un intento nuevo.
 - **Mensajes de workers al líder anterior** pasan al nuevo líder.
-- **Fases nativas ODD abiertas** del líder anterior las adopta el nuevo.
+- **Fases nativas ODD abiertas** del líder anterior las adopta el nuevo. El ledger guarda una marca de adopción pendiente que se borra solo cuando la adopción termina, así que si Panter se cae a mitad de camino, la adopción se repite en el siguiente arranque.
+- **Política exclusiva del líder** (`coordinationMode`, `preferNativeSubagents`, `maxRequestedNativeWorkers`) pasa del líder anterior al nuevo, porque es del rol y no del host. Así `GPT_A_ONLY` se mantiene después del cambio.
 - **Perfiles:**
   - si el líder no tenía perfil, se le crea uno;
   - el del líder queda solo con el rol `orchestrator` y sin ajustes de worker;
