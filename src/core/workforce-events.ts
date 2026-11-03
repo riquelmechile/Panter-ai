@@ -221,6 +221,18 @@ export class WorkforceEvents{
     });
     return {};
   }
+  /** Revoked OAuth connection: stop waking that host until one of its live connections subscribes again.
+   *  Subscriptions are keyed by host, not client, so every subscription of the host is dropped;
+   *  pending deliveries then fail as SUBSCRIPTION_INACTIVE on the next flush. */
+  dropOwners(hosts:readonly string[]){
+    const owners=new Set(hosts);
+    if(!owners.size)return 0;
+    return this.db.mutate('events',seed,d=>{
+      const before=d.subscriptions.length;
+      d.subscriptions=d.subscriptions.filter(s=>!owners.has(s.owner));
+      return before-d.subscriptions.length;
+    }).result;
+  }
   /** Reconcile only real QUEUED pointers for the authenticated host. */
   queue(actor:EventHost,workIds:string[]){
     const ids=[...new Set(workIds.filter(id=>

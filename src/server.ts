@@ -95,10 +95,14 @@ async function execute<T>(work: () => Promise<T>) {
 const store = await PanterStore.open(dataDir);
 const agents = await AgentEngine.open(dataDir, store);
 const mesh = await MeshEngine.open(dataDir);
-if (mesh.leaderSwitch) {
-  const moved = await agents.adoptLeaderPhases(mesh.leaderSwitch.from, mesh.leaderSwitch.to);
-  console.error(`Panter leader switch ${mesh.leaderSwitch.from} -> ${mesh.leaderSwitch.to}: ${moved} open native phases adopted`);
+if (mesh.leaderSwitch) console.error(`Panter leader switch ${mesh.leaderSwitch.from} -> ${mesh.leaderSwitch.to}`);
+// Runs on every boot while the ledger marker exists, so a crash between the mesh migration
+// and the phase adoption is finished on the next start.
+for (const from of mesh.pendingPhaseAdoption) {
+  const moved = await agents.adoptLeaderPhases(from, leaderHost());
+  console.error(`Panter leader phases ${from} -> ${leaderHost()}: ${moved} open native phases adopted`);
 }
+if (mesh.pendingPhaseAdoption.length) await mesh.clearPhaseAdoption(mesh.pendingPhaseAdoption);
 const workforceLongPoll = new WorkforceLongPoll(mesh);
 const grokRoutineWake = new GrokRoutineWake();
 const claudeRoutineWake = new ClaudeRoutineWake();
@@ -690,7 +694,11 @@ const handler = createMcpHandler(reqCtx => {
     server.registerTool('panter_oauth_client_revoke',{
       description:'Admin-only: permanently revoke all active OAuth embedded grants, tokens, codes and pending consent requests for one client ID.',
       inputSchema:z.object({clientId:z.string().regex(/^pc_[A-Za-z0-9_-]{24,64}$/)})
-    },async x=>execute(async()=>{requireAdmin();return {revokedGrants:await embedded.revokeClient(x.clientId)};}));
+    },async x=>execute(async()=>{requireAdmin();
+      const hosts=await embedded.clientHosts(x.clientId);
+      const revokedGrants=await embedded.revokeClient(x.clientId);
+      // A revoked connection must stop receiving work events immediately, not at subscription expiry.
+      return {revokedGrants,droppedEventSubscriptions:workforceEvents.dropOwners(hosts)};}));
   }
   server.registerTool('panter_harness_write_grant',{
     description:`Admin-only explicit bounded write authorization for a particular project/objective; ${leaderLabel()} cannot issue its own permission.`,
