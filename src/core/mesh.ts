@@ -1,4 +1,5 @@
-import { leaderHost, leaderLabel, isWorker } from './leadership.js';
+import { leaderHost, leaderLabel, isWorker, leaderPolicyProfile } from './leadership.js';
+import { hostRequest } from './policy.js';
 import { SqliteLedger } from './sqlite-ledger.js';
 import { summarizeWorkforce, validateRouteReport, type WorkerHost, type WorkerObservation, type WorkerRouteReport } from './workforce-readiness.js';
 /** Original, provider-independent collaboration ledger for authenticated MCP hosts. */
@@ -20,7 +21,7 @@ export type WorkforceTaskBridge = {taskId:string;host:WorkerHost;protocolEra:'20
 export type WorkforceRearmIntent = {workId:string;host:WorkerHost;status:'PENDING'|'ACKED';createdAt:string;acknowledgedAt?:string};
 export type GrokWakeAttempt = {workId:string;state:'RESERVED'|'SIGNAL_ACCEPTED'|'SIGNAL_FAILED';reservedAt:string;statusCode:number|null;claimedAt?:string};
 export type ClaudeWakeAttempt = GrokWakeAttempt & {sessionId:string|null};
-type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; claudeWakeAttempts?: ClaudeWakeAttempt[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
+type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; claudeWakeAttempts?: ClaudeWakeAttempt[]; leader?: Host; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
 const hosts = new Set<string>(HOSTS);
 const roles = new Set<MeshRole>(['orchestrator', 'explorer', 'architect', 'implementer', 'verifier', 'reviewer']);
 export function isHost(x: string): x is Host { return hosts.has(x); }
@@ -33,6 +34,8 @@ export class MeshEngine {
   private readonly sqlite: SqliteLedger;
   private state: MeshData = { version: 1, profiles: [], specialistBindings: [], reviews:[], works: [], messages: [], inboxRevision: { 'gpt-a': 0, 'gpt-b': 0, 'grok': 0, 'gemini': 0, 'claude': 0 } };
   private chain: Promise<unknown> = Promise.resolve();
+  /** Set at open when the stored leader differs from PANTER_LEAD_HOST; other stores migrate from it. */
+  leaderSwitch: { from: Host; to: Host } | null = null;
   /** Emitted only AFTER the updated ledger is atomically persisted. */
   readonly events = new EventEmitter();
   private writeGuard:((missionId:string,paths:string[])=>Promise<void>)|null=null;
@@ -47,7 +50,37 @@ export class MeshEngine {
     check(parsed.version === 1 && Array.isArray(parsed.works) && Array.isArray(parsed.profiles) && Array.isArray(parsed.messages), 'Invalid mesh ledger');
     for (const host of HOSTS) check(Number.isSafeInteger(parsed.inboxRevision[host]) && parsed.inboxRevision[host] >= 0, 'Invalid inbox revision');
     const before = JSON.stringify(parsed);
+    const lead = leaderHost();
+    // Ledgers written before PANTER_LEAD_HOST existed were always led by gpt-a.
+    // An empty ledger has no prior leader to migrate from.
+    const storedLeader = (d: MeshData): Host => d.leader && isHost(d.leader) ? d.leader
+      : (d.profiles.length || d.works.length || d.messages.length) ? 'gpt-a' : lead;
+    const previous = storedLeader(parsed);
+    x.leaderSwitch = previous === lead ? null : { from: previous, to: lead };
     const normalize = (data: MeshData) => {
+      const from = storedLeader(data);
+      if (from !== lead) {
+        const stamp = iso();
+        // Work addressed to the new leader can never be claimed now: close it explicitly.
+        for (const w of data.works) {
+          if (w.target !== lead) continue;
+          if (w.state === 'QUEUED') { w.state = 'ABORTED_NO_EFFECTS'; w.completedAt = stamp; w.result = `Leader switch ${from} -> ${lead}: never claimed, aborted without effects`; }
+          else if (w.state === 'RUNNING' || w.state === 'WAITING_INPUT') {
+            if (w.role === 'implementer') w.state = 'OUTCOME_UNKNOWN';
+            else { w.state = 'FAILED'; w.completedAt = stamp; w.result = `Leader switch ${from} -> ${lead}: interrupted while running`; }
+            w.leaseUntil = null;
+          }
+        }
+        // Worker messages to the former leader go to the new one (one leader per process).
+        for (const m of data.messages) {
+          if (m.to !== from || m.from === from) continue;
+          const w = m.workId ? data.works.find(x => x.id === m.workId) : undefined;
+          if (!w || w.target === m.from) { m.to = lead; m.inboxRevision = 0; }
+        }
+        if (!data.profiles.some(p => p.host === lead)) data.profiles.push({ host: lead, actorId: `actor-${lead}`,
+          modelRequest: hostRequest(leaderPolicyProfile()).model, effortRequest: 'max', roles: ['orchestrator'], revision: 1 });
+        data.leader = lead;
+      }
       const historical: Record<Host, number> = { 'gpt-a': 0, 'gpt-b': 0, 'grok': 0, 'gemini': 0, 'claude': 0 };
       for (const m of data.messages) {
         check(isHost(m.to) && isHost(m.from), 'Invalid message actor');
@@ -64,10 +97,15 @@ export class MeshEngine {
       data.rearmIntents ??= [];
       data.grokWakeAttempts ??= [];
       data.claudeWakeAttempts ??= [];
-      // Leader switch: the leader profile is orchestrator-only and no worker keeps the orchestrator role.
+      // The leader profile is orchestrator-only with leader settings; workers keep worker settings only.
       for (const p of data.profiles) {
-        if (p.host === leaderHost()) { if (p.roles.join() !== 'orchestrator') p.roles = ['orchestrator']; }
-        else if (p.roles.includes('orchestrator')) p.roles = p.roles.filter(r => r !== 'orchestrator');
+        if (p.host === lead) {
+          if (p.roles.join() !== 'orchestrator') p.roles = ['orchestrator'];
+          delete p.scheduledPickupEnabled; delete p.scheduledPollIntervalSeconds;
+        } else {
+          if (p.roles.includes('orchestrator')) p.roles = p.roles.filter(r => r !== 'orchestrator');
+          delete p.coordinationMode; delete p.preferNativeSubagents; delete p.maxRequestedNativeWorkers;
+        }
       }
     };
     normalize(parsed);
@@ -135,7 +173,7 @@ export class MeshEngine {
       const before=d.profiles.find(p=>p.host===leaderHost());
       check((before?.revision??0)===expectedRevision,`Stale ${leaderLabel()} coordination revision`);
       const next:ActorProfile={...(before??{
-        host:leaderHost(),actorId:`actor-${leaderHost()}`,modelRequest:leaderHost()==='gpt-a'?'gpt-6-astra':'host-default',effortRequest:'max',roles:['orchestrator'],
+        host:leaderHost(),actorId:`actor-${leaderHost()}`,modelRequest:hostRequest(leaderPolicyProfile()).model,effortRequest:'max',roles:['orchestrator'],
         preferNativeSubagents:true,maxRequestedNativeWorkers:32,revision:0
       }),roles:['orchestrator'],coordinationMode,revision:expectedRevision+1};
       if(before)d.profiles[d.profiles.indexOf(before)]=next;else d.profiles.push(next);
@@ -307,8 +345,11 @@ export class MeshEngine {
     return this.write(d=>{
       const bindings=d.specialistBindings ??= [];
       const i=bindings.findIndex(b=>b.agentId===input.agentId);
-      check((bindings[i]?.revision??0)===expectedRevision,'Stale specialist binding revision');
-      const next:SpecialistBinding={agentId:definition.id,host:input.host,modelRequest:input.modelRequest,effortRequest:input.effortRequest,skillIds:skills,revision:expectedRevision+1};
+      // A binding to the current leader is inactive and hidden from callers, who see it as unbound (revision 0).
+      const stored=bindings[i]?.revision??0;
+      const visible=bindings[i]?.host===leaderHost()?0:stored;
+      check(visible===expectedRevision,'Stale specialist binding revision');
+      const next:SpecialistBinding={agentId:definition.id,host:input.host,modelRequest:input.modelRequest,effortRequest:input.effortRequest,skillIds:skills,revision:stored+1};
       if(i===-1)bindings.push(next);else bindings[i]=next;
       this.notify(d,leaderHost());
       return next;

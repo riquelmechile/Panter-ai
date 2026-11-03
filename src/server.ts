@@ -93,6 +93,10 @@ async function execute<T>(work: () => Promise<T>) {
 const store = await PanterStore.open(dataDir);
 const agents = await AgentEngine.open(dataDir, store);
 const mesh = await MeshEngine.open(dataDir);
+if (mesh.leaderSwitch) {
+  const moved = await agents.adoptLeaderPhases(mesh.leaderSwitch.from, mesh.leaderSwitch.to);
+  console.error(`Panter leader switch ${mesh.leaderSwitch.from} -> ${mesh.leaderSwitch.to}: ${moved} open native phases adopted`);
+}
 const workforceLongPoll = new WorkforceLongPoll(mesh);
 const grokRoutineWake = new GrokRoutineWake();
 const claudeRoutineWake = new ClaudeRoutineWake();
@@ -557,7 +561,7 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_gentle_catalog',{
     description:`List all ten Gentle Shell specialist definitions, thirteen MCP-hosted skills, 4R lenses and Judgment Day agents; only ${leaderLabel()} configures them.`,
     inputSchema:z.object({}),annotations:{readOnlyHint:true}
-  },async()=>execute(async()=>{requireLeader();return gentleCatalog()}));
+  },async()=>execute(async()=>{requireLeader();return {...gentleCatalog(),leaderHost:leaderHost()}}));
 
   server.registerTool('panter_gentle_orchestrator_read',{
     description:`${leaderLabel()} lazily reads one pinned ODD orchestration section from the upstream Gentle Shell assets; Pi-specific mechanisms are reference only.`,

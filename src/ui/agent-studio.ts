@@ -37,7 +37,7 @@ function card(host: Host, existing?: Profile) {
   const subtitle = document.createElement('p'); subtitle.textContent = existing ? `Perfil guardado · revisión ${existing.revision}` : 'Pendiente de configurar';
   article.append(heading, subtitle);
   const actor = field('Alias del actor (no es una credencial)', existing?.actorId ?? `actor-${host}`, 160);
-  const model = field('Modelo solicitado', existing?.modelRequest ?? (host===leader&&host==='gpt-a'?'gpt-6-astra':'host-default'), 120);
+  const model = field('Modelo solicitado', existing?.modelRequest ?? (host===leader&&(host==='gpt-a'||host==='gpt-b')?'gpt-6-astra':'host-default'), 120);
   const effort = field('Esfuerzo solicitado', existing?.effortRequest ?? 'max', 32);
   for (const inp of [actor, model, effort]) article.append(inp.parentElement!);
   const legend = document.createElement('label'); legend.textContent = 'Roles asignados';
@@ -100,7 +100,9 @@ async function load() {
   refresh.disabled = true;
   try {
     const profiles = await call('panter_mesh_profiles', {}) as Profile[];
-    leader = profiles.find(p => p.roles.includes('orchestrator'))?.host ?? 'gpt-a';
+    // The server names the leader; the stored orchestrator profile is only a fallback.
+    const catalog = await call('panter_gentle_catalog', {}) as { leaderHost?: string };
+    leader = catalog.leaderHost ?? profiles.find(p => p.roles.includes('orchestrator'))?.host ?? 'gpt-a';
     hostBox.replaceChildren(...hostNames.map(host => card(host, profiles.find(p => p.host === host))));
     await loadSpecialists();
   } catch (error) { setStatus(error instanceof Error ? error.message : 'No se pudo consultar MCP', true); }
