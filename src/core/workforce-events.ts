@@ -120,7 +120,9 @@ export class WorkforceEvents{
     this.db=SqliteLedger.open(directory);
   }
   list(actor:string){
-    assertActor(actor);
+    // Other authenticated Panter hosts still use the same MCP plugin;
+    // an empty event catalog must not disrupt their ordinary tool discovery.
+    if(actor!=='gpt-b'&&actor!=='gemini')return {events:[]};
     return {events:[{name:WORK_EVENT,
       description:'An authenticated '+actor+' work pointer is ready. Claim with panter_workforce_pickup.',
       delivery:['webhook'],
