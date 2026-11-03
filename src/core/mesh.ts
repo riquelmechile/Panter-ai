@@ -622,11 +622,12 @@ export class MeshEngine {
   /** A standing worker obtains a real fenced claim, without enumerating IDs.
    * No inference takes place here; the host executes the returned instructions.
    */
-  async pickup(caller:Host,leaseSeconds=300) {
+  async pickup(caller:Host,leaseSeconds=300,readOnlyOnly=false) {
     check(caller!=='gpt-a','Only workers may pick up delegated work');
     check(Number.isInteger(leaseSeconds)&&leaseSeconds>=30&&leaseSeconds<=3600,'Invalid lease');
     // Snapshot candidates only; claim() still validates authority and CAS under SQLite.
     const candidates=(await this.pending(caller))
+      .filter(w=>!readOnlyOnly||w.role!=='implementer')
       .sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.workId.localeCompare(b.workId));
     for(const candidate of candidates.slice(0,32)){
       try{
