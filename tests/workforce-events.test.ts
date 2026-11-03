@@ -18,13 +18,13 @@ const fixture=async(fn:(dir:string)=>Promise<void>)=>{
 
 test('native MCP events are GPT-B actor-bound and advertise only opaque pointer',()=>fixture(async dir=>{
   const e=new WorkforceEvents(dir,async()=>({status:200,body:'{}'}));
-  assert.throws(()=>e.list('gpt-a'),/GPT-B OAuth/);
+  assert.throws(()=>e.list('gpt-a'),/Only GPT-B or Gemini/);
   const catalog=e.list('gpt-b').events[0]!;
   assert.equal(catalog.name,WORK_EVENT);
   assert.deepEqual(Object.keys(catalog.payloadSchema.properties),['workId']);
   assert.equal(e.hasActive('gpt-b'),false);
-  await assert.rejects(e.subscribe('gemini',args),/GPT-B OAuth/);
-  await assert.rejects(e.subscribe('gpt-b',{...args,arguments:{host:'gpt-a'}}),/Only GPT-B/);
+  await assert.rejects(e.subscribe('gpt-a',args),/Only GPT-B or Gemini/);
+  await assert.rejects(e.subscribe('gpt-b',{...args,arguments:{host:'gpt-a'}}),/Event filter must match authenticated actor/);
 }));
 
 test('callback validation rejects private, loopback, credentials, redirects and non-HTTPS',()=>{
@@ -72,8 +72,8 @@ test('subscription verifies challenge, signs Standard Webhooks, deduplicates del
   const again=await engine.subscribe('gpt-b',args);
   assert.equal(again.id,sub.id);
   assert.equal(verificationCount,1,'refresh should not cause needless callback challenge');
-  assert.equal(engine.queue([workId,workId]),1);
-  assert.equal(engine.queue([workId]),0);
+  assert.equal(engine.queue('gpt-b',[workId,workId]),1);
+  assert.equal(engine.queue('gpt-b',[workId]),0);
   assert.equal(await engine.flush(),1);
   assert.equal(engine.status('gpt-a').accepted,1);
   assert.equal(await engine.flush(),0);
@@ -88,7 +88,7 @@ test('subscription verifies challenge, signs Standard Webhooks, deduplicates del
   assert.deepEqual(restored.unsubscribe('gpt-b',{
     name:WORK_EVENT,arguments:{host:'gpt-b'},delivery:{url:callback}}),{});
   assert.equal(restored.hasActive('gpt-b'),false);
-  assert.equal(restored.queue(['00000000-0000-4000-8000-000000000002']),0);
+  assert.equal(restored.queue('gpt-b',['00000000-0000-4000-8000-000000000002']),0);
   assert.equal(await restored.flush(),0);
   assert.throws(()=>restored.status('gpt-b'),/Only GPT-A/);
 }));
@@ -118,7 +118,7 @@ test('transient delivery attempts preserve event ID and never falsely record a c
   };
   const engine=new WorkforceEvents(dir,post);
   await engine.subscribe('gpt-b',args);
-  engine.queue([workId]);
+  engine.queue('gpt-b',[workId]);
   assert.equal(await engine.flush(),1);
   assert.equal(calls,1);
   assert.equal(engine.status('gpt-a').accepted,0);
