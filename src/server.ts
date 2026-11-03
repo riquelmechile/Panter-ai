@@ -1,3 +1,4 @@
+import { leaderHost, leaderLabel, appEventHosts } from './core/leadership.js';
 import { ExternalOAuthVerifier, staticBearerMatch } from './core/oauth.js';
 import { isAdminPrincipal, parseOwnerTrustedHosts } from './core/owner-trust.js';
 import { EmbeddedOAuth } from './core/embedded-oauth.js';
@@ -129,7 +130,7 @@ async function checkpoint(runId:string){
     reviewId:run.reviewId,judgmentId:run.judgmentId,deliveryStrategy:run.deliveryStrategy??null};
   const body=JSON.stringify(document);
   if(Buffer.byteLength(body)>15500)return 'MIRROR_TOO_LARGE';
-  try{await (await memoryFor(run.project)).save('gpt-a',{title:`ODD ${run.id}`,type:'architecture',topicKey:`odd/${run.id}/tasks`,content:body});
+  try{await (await memoryFor(run.project)).save(leaderHost(),{title:`ODD ${run.id}`,type:'architecture',topicKey:`odd/${run.id}/tasks`,content:body});
     return 'ENGRAM_SAVED';}catch{return 'ENGRAM_UNAVAILABLE';}
 }
 
@@ -139,7 +140,10 @@ for(const [host,secret] of Object.entries(peerTokens)){if(!isHost(host)||typeof 
 if(new Set(Object.values(peerTokens)).size!==Object.keys(peerTokens).length)throw new Error('Peer tokens must be unique');
 function principal(){return principalContext.getStore()??'unknown'}
 function hostPrincipal(){const p=principal();if(!isHost(p))throw new Error('Peer identity required');return p}
-function requireLeader(){if(principal()!=='gpt-a')throw new Error('GPT-A required')}
+function requireLeader(){if(principal()!==leaderHost())throw new Error(`${leaderLabel()} required`)}
+// Fail closed at boot on an invalid PANTER_LEAD_HOST; the leader never comes from tool input.
+const configuredLeader = leaderHost();
+console.error(`Panter leader host: ${configuredLeader}`);
 const ownerTrustedHosts = parseOwnerTrustedHosts(process.env.PANTER_OWNER_TRUSTED_HOSTS);
 function requireAdmin(){if(!isAdminPrincipal(principal(),ownerTrustedHosts))throw new Error('Admin token required')}
 const missionStatus = z.enum(['DRAFT', 'READY', 'RUNNING', 'VERIFYING', 'DONE', 'BLOCKED']);
@@ -148,7 +152,7 @@ const bounded = (max = 2048) => z.string().trim().min(1).max(max);
 const handler = createMcpHandler(reqCtx => {
   const server = new McpServer({ name: 'panter-ai', version: '0.15.0' }, {
     capabilities: { resources: { subscribe: true }, events: {} } as any,
-    instructions: 'Panter-ai is a host-operated development harness with NO provider inference. GPT-A is the coordinator. For a new user development request start with panter_harness_start (goal + permitted work and observed facts, NEVER ask the user to pick agents, roles, skills or review lenses). Then call panter_harness_tick and execute the returned phase automatically with host tools or native subagents; call panter_harness_report after observing actual results, and repeat until blocked by actual authorization/evidence or completed. The server automatically selects ODD discovery, planning, scoped implementation, independent verification and 4R by risk; Judgment Day only when explicitly requested. An initial Agent Studio preference may bind model/host but never requires per-task specialist selection. GPT_A_ONLY forbids remote delegation while preserving maximum requested model/effort, fast native worker processing, and maximum safe host-observed parallelism. If no remote peer is connected continue with GPT-A native/inline. The host owns model selection and subagent execution; claims of model, effort, speed or children are REQUESTED, not verified. Do not misstate packet preparation as subagent execution. Panter-RDD is an independently implemented SHA-bound review gate, not the official Gentle AI Go controller; human delivery authorization remains separate. Do not merge or deploy without separately authorized tools and exact-candidate proof.'
+    instructions: `Panter-ai is a host-operated development harness with NO provider inference. ${leaderLabel()} is the coordinator. For a new user development request start with panter_harness_start (goal + permitted work and observed facts, NEVER ask the user to pick agents, roles, skills or review lenses). Then call panter_harness_tick and execute the returned phase automatically with host tools or native subagents; call panter_harness_report after observing actual results, and repeat until blocked by actual authorization/evidence or completed. The server automatically selects ODD discovery, planning, scoped implementation, independent verification and 4R by risk; Judgment Day only when explicitly requested. An initial Agent Studio preference may bind model/host but never requires per-task specialist selection. GPT_A_ONLY forbids remote delegation while preserving maximum requested model/effort, fast native worker processing, and maximum safe host-observed parallelism. If no remote peer is connected continue with ${leaderLabel()} native/inline. The host owns model selection and subagent execution; claims of model, effort, speed or children are REQUESTED, not verified. Do not misstate packet preparation as subagent execution. Panter-RDD is an independently implemented SHA-bound review gate, not the official Gentle AI Go controller; human delivery authorization remains separate. Do not merge or deploy without separately authorized tools and exact-candidate proof.`
 
   });
 
@@ -322,19 +326,19 @@ const handler = createMcpHandler(reqCtx => {
     return {enabled:engramEnabled,project:project?projectKey(project):'panter-ai',backend:engramEnabled?'engram-mcp-stdio':'disabled',ready:'NOT_PROBED'};
   }));
   server.registerTool('panter_memory_context', {
-    description:'GPT-A loads compact, project-scoped Engram recovery context. Historical observations are not current instructions.',
+    description:`${leaderLabel()} loads compact, project-scoped Engram recovery context. Historical observations are not current instructions.`,
     inputSchema:z.object({project:bounded(100).optional(),maxBytes:z.number().int().min(512).max(16384).default(8192)}),annotations:{readOnlyHint:true},
   }, async ({project,maxBytes}) => execute(async () => {
     requireLeader();return (await memoryFor(project)).context(hostPrincipal(), maxBytes);
   }));
   server.registerTool('panter_memory_search', {
-    description:'GPT-A searches curated Engram project memory; no all-project or private/personal memory access.',
+    description:`${leaderLabel()} searches curated Engram project memory; no all-project or private/personal memory access.`,
     inputSchema:z.object({project:bounded(100).optional(),query:bounded(500),limit:z.number().int().min(1).max(20).default(8)}),annotations:{readOnlyHint:true},
   }, async ({project,query,limit}) => execute(async () => {
     requireLeader();return (await memoryFor(project)).search(hostPrincipal(),query,limit);
   }));
   server.registerTool('panter_memory_save', {
-    description:'GPT-A saves one verified, durable engineering decision/discovery to upstream Engram with a canonical topic key. Do not save secrets or unverified worker reports.',
+    description:`${leaderLabel()} saves one verified, durable engineering decision/discovery to upstream Engram with a canonical topic key. Do not save secrets or unverified worker reports.`,
     inputSchema:z.object({project:bounded(100).optional(),title:bounded(160),type:memoryTypes,topicKey:bounded(160),content:bounded(16000)}),
   }, async item => execute(async () => {
     requireLeader();const {project,...save}=item;
@@ -348,11 +352,11 @@ const handler = createMcpHandler(reqCtx => {
 
   const hostEnum = z.enum(HOSTS);
   const roleEnum = z.enum(['orchestrator','explorer','architect','implementer','verifier','reviewer']);
-  server.registerTool('panter_mesh_profile_set',{description:'GPT-A configures a host agent profile, model and effort are requests only.',inputSchema:z.object({host:hostEnum,actorId:bounded(160),modelRequest:z.string().max(120),effortRequest:z.string().max(32),roles:z.array(roleEnum).min(1),coordinationMode:z.enum(['AUTO','GPT_A_ONLY']).optional(),preferNativeSubagents:z.boolean().optional(),maxRequestedNativeWorkers:z.number().int().min(0).max(32).optional(),scheduledPickupEnabled:z.boolean().optional(),scheduledPollIntervalSeconds:z.number().int().min(3600).max(86400).optional(),expectedRevision:z.number().int().nonnegative()})},async x=>execute(()=>mesh.setProfile(hostPrincipal(),x,x.expectedRevision)));
+  server.registerTool('panter_mesh_profile_set',{description:`${leaderLabel()} configures a host agent profile, model and effort are requests only.`,inputSchema:z.object({host:hostEnum,actorId:bounded(160),modelRequest:z.string().max(120),effortRequest:z.string().max(32),roles:z.array(roleEnum).min(1),coordinationMode:z.enum(['AUTO','GPT_A_ONLY']).optional(),preferNativeSubagents:z.boolean().optional(),maxRequestedNativeWorkers:z.number().int().min(0).max(32).optional(),scheduledPickupEnabled:z.boolean().optional(),scheduledPollIntervalSeconds:z.number().int().min(3600).max(86400).optional(),expectedRevision:z.number().int().nonnegative()})},async x=>execute(()=>mesh.setProfile(hostPrincipal(),x,x.expectedRevision)));
   server.registerTool('panter_mesh_profiles',{description:'List configured host profiles.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.profiles()));
-  server.registerTool('panter_mesh_delegate',{description:'GPT-A creates actor-bound A2A work for one configured host.',inputSchema:z.object({missionId:bounded(120),target:hostEnum,role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160)})},async x=>execute(()=>mesh.delegate(hostPrincipal(),x)));
+  server.registerTool('panter_mesh_delegate',{description:`${leaderLabel()} creates actor-bound A2A work for one configured host.`,inputSchema:z.object({missionId:bounded(120),target:hostEnum,role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160)})},async x=>execute(()=>mesh.delegate(hostPrincipal(),x)));
   server.registerTool('panter_mesh_delegate_auto',{
-    description:'GPT-A routes to the least-loaded recently authenticated standing peer with the requested role; returns LOCAL_FALLBACK_REQUIRED when no live peer is evidenced. Does not prove cold-start wake.',
+    description:`${leaderLabel()} routes to the least-loaded recently authenticated standing peer with the requested role; returns LOCAL_FALLBACK_REQUIRED when no live peer is evidenced. Does not prove cold-start wake.`,
     inputSchema:z.object({missionId:bounded(120),role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160)}).strict(),
   },async x=>execute(async()=>{
     const caller=hostPrincipal();
@@ -365,7 +369,7 @@ const handler = createMcpHandler(reqCtx => {
     const profiles=await mesh.profiles();
     // The live MCP waiter already took precedence. Compatible subscribers
     // can receive webhook pointers but do not prove an idle chat woke.
-    for(const host of ['gpt-b','gemini'] as const){
+    for(const host of appEventHosts()){
       if(!workforceEvents.hasActive(host)||!profiles.some(p=>p.host===host&&p.roles.includes(x.role)))continue;
       try {
         const work=await mesh.delegate(caller,{...x,target:host,wakeOnly:true});
@@ -411,15 +415,15 @@ const handler = createMcpHandler(reqCtx => {
     return mesh.delegateScheduled(caller,x);
   }));
   server.registerTool('panter_workforce_event_status',{
-    description:'GPT-A reads redacted event subscription and delivery counts; HTTP acceptance does not prove worker execution.',
+    description:`${leaderLabel()} reads redacted event subscription and delivery counts; HTTP acceptance does not prove worker execution.`,
     inputSchema:z.object({}).strict(),annotations:{readOnlyHint:true}
   },async()=>execute(async()=>workforceEvents.status(hostPrincipal())));
   server.registerTool('panter_workforce_grok_wake_status',{
-    description:'GPT-A reads redacted durable Grok webhook attempt for an own work ID. Accepted HTTP is not evidence the worker ran.',
+    description:`${leaderLabel()} reads redacted durable Grok webhook attempt for an own work ID. Accepted HTTP is not evidence the worker ran.`,
     inputSchema:z.object({workId:z.uuid()}).strict(),annotations:{readOnlyHint:true}
   },async x=>execute(()=>mesh.grokWakeStatus(hostPrincipal(),x.workId)));
   server.registerTool('panter_workforce_claude_wake_status',{
-    description:'GPT-A reads durable Claude Code Routine fire state and redacted session ID. HTTP accepted does not prove task execution.',
+    description:`${leaderLabel()} reads durable Claude Code Routine fire state and redacted session ID. HTTP accepted does not prove task execution.`,
     inputSchema:z.object({workId:z.uuid()}).strict(),annotations:{readOnlyHint:true}
   },async x=>execute(()=>mesh.claudeWakeStatus(hostPrincipal(),x.workId)));
   server.registerTool('panter_mesh_pending',{description:'Return pointers to work assigned to authenticated host.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.pending(hostPrincipal())));
@@ -431,14 +435,14 @@ const handler = createMcpHandler(reqCtx => {
   },async x=>execute(()=>appWorkforceTurn(mesh,hostPrincipal(),
     reqCtx.era==='modern'?'2026-07-28':'2025-11-25',x.leaseSeconds)));
   server.registerTool('panter_workforce_schedule_pickup',{
-    description:'For a host-owned recurring Task or Skill: authenticate the scheduled MCP poll and claim at most one actor-owned non-writer task. Requires GPT-A scheduled-worker opt-in. The server never starts the host, and self-reported mode does not prove autonomous wake.',
+    description:`For a host-owned recurring Task or Skill: authenticate the scheduled MCP poll and claim at most one actor-owned non-writer task. Requires ${leaderLabel()} scheduled-worker opt-in. The server never starts the host, and self-reported mode does not prove autonomous wake.`,
     inputSchema:z.object({
       intervalSeconds:z.number().int().min(3600).max(86400).default(3600),
       leaseSeconds:z.number().int().min(30).max(3600).default(300),
     }).strict(),
   },async x=>execute(async()=>{
     const actor=hostPrincipal();
-    if(actor==='gpt-a')throw Error('Only workers may run host schedules');
+    if(actor===leaderHost())throw Error('Only workers may run host schedules');
     const profile=(await mesh.profiles()).find(p=>p.host===actor);
     if(profile?.scheduledPickupEnabled!==true||
        profile.scheduledPollIntervalSeconds!==x.intervalSeconds)
@@ -481,7 +485,7 @@ const handler = createMcpHandler(reqCtx => {
     }).strict(),
   },async (x,ctx)=>execute(()=>workforceLongPoll.wait(hostPrincipal(), x.protocolEra, x.waitSeconds * 1000,ctx.mcpReq.signal)));
   server.registerTool('panter_workforce_status',{
-    description:'GPT-A read-only four-worker presence, claims, receipts and unverified wake-route reports. No invented READY or wake proof.',
+    description:`${leaderLabel()} read-only four-worker presence, claims, receipts and unverified wake-route reports. No invented READY or wake proof.`,
     inputSchema:z.object({}),annotations:{readOnlyHint:true},
   },async()=>execute(()=>mesh.workforceStatus(hostPrincipal())));
   // Task schema bridge (NOT extension-native tasks/get): transport pointers only.
@@ -519,29 +523,29 @@ const handler = createMcpHandler(reqCtx => {
     inputSchema:z.object({}),annotations:{readOnlyHint:true}
   },async()=>execute(()=>mesh.rearmStatus(hostPrincipal())));
   server.registerTool('panter_workforce_result_get',{
-    description:'GPT-A retrieves complete terminal result from authoritative backend, not worker chat output.',
+    description:`${leaderLabel()} retrieves complete terminal result from authoritative backend, not worker chat output.`,
     inputSchema:z.object({workId:z.uuid()}).strict(),annotations:{readOnlyHint:true}
   },async x=>execute(()=>mesh.resultGet(hostPrincipal(),x.workId)));
   server.registerTool('panter_mesh_claim',{description:'Claim actor-owned work with a fenced attempt and obtain instructions.',inputSchema:z.object({workId:z.uuid(),leaseSeconds:z.number().int().min(30).max(3600).default(300)})},async x=>execute(()=>mesh.claim(hostPrincipal(),x.workId,x.leaseSeconds)));
   server.registerTool('panter_mesh_heartbeat',{description:'Renew exact worker lease.',inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),leaseSeconds:z.number().int().min(30).max(3600).default(300)})},async x=>execute(()=>mesh.heartbeat(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.leaseSeconds)));
-  server.registerTool('panter_mesh_complete',{description:'Persist terminal result in backend, enqueue compact GPT-A receipt, create durable rearm intent; return only compact ack.',inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),result:z.string().max(50000),success:z.boolean().default(true)})},async x=>execute(()=>mesh.complete(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.result,x.success)));
-  server.registerTool('panter_mesh_message',{description:'Send actor-bound A2A question, answer or progress update to collaborator or GPT-A.',inputSchema:z.object({missionId:bounded(120),to:hostEnum,workId:z.uuid(),kind:z.enum(['QUESTION','ANSWER','UPDATE']),text:bounded(10000)})},async x=>execute(()=>mesh.message(hostPrincipal(),x)));
+  server.registerTool('panter_mesh_complete',{description:`Persist terminal result in backend, enqueue compact ${leaderLabel()} receipt, create durable rearm intent; return only compact ack.`,inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),result:z.string().max(50000),success:z.boolean().default(true)})},async x=>execute(()=>mesh.complete(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.result,x.success)));
+  server.registerTool('panter_mesh_message',{description:`Send actor-bound A2A question, answer or progress update to collaborator or ${leaderLabel()}.`,inputSchema:z.object({missionId:bounded(120),to:hostEnum,workId:z.uuid(),kind:z.enum(['QUESTION','ANSWER','UPDATE']),text:bounded(10000)})},async x=>execute(()=>mesh.message(hostPrincipal(),x)));
   // Compact receipts for routine GPT-A orchestration: full result is fetched explicitly.
   server.registerTool('panter_workforce_receipts',{
-    description:'Authenticated inbox with compact terminal receipt pointers. GPT-A retrieves full result only when necessary.',
+    description:`Authenticated inbox with compact terminal receipt pointers. ${leaderLabel()} retrieves full result only when necessary.`,
     inputSchema:z.object({since:z.number().int().nonnegative().default(0)}),annotations:{readOnlyHint:true}
   },async x=>execute(()=>mesh.inbox(hostPrincipal(),x.since)));
   // Compatibility for preexisting connected clients that expect terminal RESULT text.
   // Workers still receive compact ACK on complete; only GPT-A can dereference results.
   server.registerTool('panter_mesh_inbox',{
-    description:'Legacy actor inbox. GPT-A RESULT messages include text for existing clients; use panter_workforce_receipts for compact operation.',
+    description:`Legacy actor inbox. ${leaderLabel()} RESULT messages include text for existing clients; use panter_workforce_receipts for compact operation.`,
     inputSchema:z.object({since:z.number().int().nonnegative().default(0)}),annotations:{readOnlyHint:true}
   },async x=>execute(async()=>{
     const actor=hostPrincipal(),inbox=await mesh.inbox(actor,x.since);
-    if(actor!=='gpt-a')return inbox;
+    if(actor!==leaderHost())return inbox;
     const messages=await Promise.all(inbox.messages.map(async m=>{
       if(m.kind!=='RESULT'||!m.workId)return m;
-      const full=await mesh.resultGet('gpt-a',m.workId);
+      const full=await mesh.resultGet(leaderHost(),m.workId);
       return {...m,text:full.result??m.text};
     }));
     return {...inbox,messages};
@@ -550,24 +554,24 @@ const handler = createMcpHandler(reqCtx => {
   // The catalog is centrally stored in MCP: hosts receive only a frozen,
   // relevant packet after assignment. Skills do not grant execution rights.
   server.registerTool('panter_gentle_catalog',{
-    description:'List all ten Gentle Shell specialist definitions, thirteen MCP-hosted skills, 4R lenses and Judgment Day agents; only GPT-A configures them.',
+    description:`List all ten Gentle Shell specialist definitions, thirteen MCP-hosted skills, 4R lenses and Judgment Day agents; only ${leaderLabel()} configures them.`,
     inputSchema:z.object({}),annotations:{readOnlyHint:true}
   },async()=>execute(async()=>{requireLeader();return gentleCatalog()}));
 
   server.registerTool('panter_gentle_orchestrator_read',{
-    description:'GPT-A lazily reads one pinned ODD orchestration section from the upstream Gentle Shell assets; Pi-specific mechanisms are reference only.',
+    description:`${leaderLabel()} lazily reads one pinned ODD orchestration section from the upstream Gentle Shell assets; Pi-specific mechanisms are reference only.`,
     inputSchema:z.object({section:z.enum(GENTLE_ORCHESTRATOR_SECTIONS)}),annotations:{readOnlyHint:true}
   },async ({section})=>execute(async()=>{requireLeader();return readOrchestratorSection(section)}));
   server.registerTool('panter_gentle_agent_read',{
-    description:'GPT-A reads one allowlisted, version-pinned upstream agent definition.',
+    description:`${leaderLabel()} reads one allowlisted, version-pinned upstream agent definition.`,
     inputSchema:z.object({id:z.enum(GENTLE_AGENTS.map(a=>a.id) as [string,...string[]])}),annotations:{readOnlyHint:true}
   },async ({id})=>execute(async()=>{requireLeader();return readAgent(id)}));
   server.registerTool('panter_gentle_skill_read',{
-    description:'GPT-A reads one MCP-hosted skill; worker packets contain only assigned skills.',
+    description:`${leaderLabel()} reads one MCP-hosted skill; worker packets contain only assigned skills.`,
     inputSchema:z.object({id:z.enum(GENTLE_SKILLS.map(s=>s.id) as [string,...string[]])}),annotations:{readOnlyHint:true}
   },async ({id})=>execute(async()=>{requireLeader();return readSkill(id)}));
   server.registerTool('panter_specialist_bind',{
-    description:'GPT-A assigns an individual specialist to one authenticated host, requested model/effort and selected MCP skills. Separate from host credentials.',
+    description:`${leaderLabel()} assigns an individual specialist to one authenticated host, requested model/effort and selected MCP skills. Separate from host credentials.`,
     inputSchema:z.object({agentId:z.enum(GENTLE_AGENTS.map(a=>a.id) as [string,...string[]]),host:hostEnum,
       modelRequest:z.string().max(120),effortRequest:z.string().max(32),skillIds:z.array(z.enum(GENTLE_SKILLS.map(s=>s.id) as [string,...string[]])).max(8),expectedRevision:z.number().int().nonnegative()})
   },async ({expectedRevision,...input})=>execute(()=>mesh.bindSpecialist(hostPrincipal(),input,expectedRevision)));
@@ -576,7 +580,7 @@ const handler = createMcpHandler(reqCtx => {
     inputSchema:z.object({}),annotations:{readOnlyHint:true}
   },async()=>execute(async()=>{requireLeader();return mesh.specialistBindings()}));
   server.registerTool('panter_specialist_delegate',{
-    description:'GPT-A dispatches a centrally versioned agent + assigned skills as a frozen A2A task to its configured host; result returns to GPT-A inbox.',
+    description:`${leaderLabel()} dispatches a centrally versioned agent + assigned skills as a frozen A2A task to its configured host; result returns to ${leaderLabel()} inbox.`,
     inputSchema:z.object({missionId:bounded(120),agentId:z.enum(GENTLE_AGENTS.map(a=>a.id) as [string,...string[]]),objective:bounded(6000),idempotencyKey:bounded(160),candidateSha:z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/).optional(),allowedEditSurfaces:z.array(z.string().min(1).max(256)).max(16).optional()})
   },async input=>execute(()=>mesh.delegateBoundSpecialist(hostPrincipal(),input)));
 
@@ -594,16 +598,16 @@ const handler = createMcpHandler(reqCtx => {
         candidateSha:z.string().regex(/^[a-f0-9]{40}$/),runId:bounded(160)}).optional()})
   },async x=>execute(async()=>{requireAdmin();return mesh.reconcileWriter(x)}));
   server.registerTool('panter_odd_route',{
-    description:'GPT-A applies the Gentle Shell ODD small/inline vs exploratory/coordinated and risk-based verification rules; planning-only.',
+    description:`${leaderLabel()} applies the Gentle Shell ODD small/inline vs exploratory/coordinated and risk-based verification rules; planning-only.`,
     inputSchema:z.object({requirementsClear:z.boolean(),resumableFromDiff:z.boolean(),risk:z.enum(['low','high']),unknownCodeArea:z.boolean(),independentWorkUnits:z.number().int().min(0).max(32),writesAuthorized:z.boolean()}),
     annotations:{readOnlyHint:true}
   },async input=>execute(async()=>{requireLeader();return routeFlow(input)}));
   server.registerTool('panter_review_start',{
-    description:'GPT-A atomically delegates 4R four independent lenses or exactly two blind Judgment Day judges to their configured hosts using one frozen candidate SHA. No automatic approval or fix.',
+    description:`${leaderLabel()} atomically delegates 4R four independent lenses or exactly two blind Judgment Day judges to their configured hosts using one frozen candidate SHA. No automatic approval or fix.`,
     inputSchema:z.object({missionId:bounded(120),kind:z.enum(['4r','judgment-day']),objective:bounded(6000),candidateSha:z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/),idempotencyKey:bounded(160)})
   },async input=>execute(()=>mesh.startReview(hostPrincipal(),input)));
   server.registerTool('panter_review_status',{
-    description:'Read durable 4R / Judgment Day receipts for a review session. When complete, GPT-A must independently assess outputs; this is not native provider approval.',
+    description:`Read durable 4R / Judgment Day receipts for a review session. When complete, ${leaderLabel()} must independently assess outputs; this is not native provider approval.`,
     inputSchema:z.object({reviewId:z.uuid()}),annotations:{readOnlyHint:true}
   },async ({reviewId})=>execute(()=>mesh.reviewStatus(hostPrincipal(),reviewId)));
   server.registerTool('panter_review_blueprints',{
@@ -618,40 +622,40 @@ const handler = createMcpHandler(reqCtx => {
   // GPT-A uses the existing durable ODD AgentEngine without the legacy
   // administrator bearer. No collaborator is needed to make progress.
   server.registerTool('panter_native_mission_create',{
-    description:'GPT-A creates a durable engineering mission for ODD fallback. Does not authorize filesystem writes.',
+    description:`${leaderLabel()} creates a durable engineering mission for ODD fallback. Does not authorize filesystem writes.`,
     inputSchema:z.object({project:bounded(100),goal:bounded(4000)})
   },async x=>execute(async()=>{requireLeader();return store.createMission(x.project,x.goal)}));
   server.registerTool('panter_native_flow_start',{
-    description:'GPT-A records the verbatim request, risk, authorizations and review requirement to recover ODD across sessions.',
+    description:`${leaderLabel()} records the verbatim request, risk, authorizations and review requirement to recover ODD across sessions.`,
     inputSchema:z.object({missionId:z.uuid(),spec:bounded(30000),signals:flowSignals,reviewRequired:z.boolean().default(false)})
   },async x=>execute(async()=>{requireLeader();return agents.createFlow(x.missionId,x.spec,x.signals,x.reviewRequired)}));
   server.registerTool('panter_native_phase_enqueue',{
-    description:'GPT-A records a durable scout/designer/builder phase for inline or genuine native-subagent execution; never self-registers as an independent reviewer.',
+    description:`${leaderLabel()} records a durable scout/designer/builder phase for inline or genuine native-subagent execution; never self-registers as an independent reviewer.`,
     inputSchema:z.object({flowId:z.uuid(),role:z.enum(['scout','designer','builder']),objective:bounded(10000),
       scopes:z.array(bounded(256)).max(32).default([]),workspace:bounded(100).default('default'),dependsOn:z.array(z.uuid()).max(32).default([]),idempotencyKey:bounded(160)})
-  },async x=>execute(async()=>{requireLeader();if(x.role==='builder')throw new Error('Legacy native builders require the operator-granted automatic harness');return agents.addTask({...x,target:'gpt-a'})}));
+  },async x=>execute(async()=>{requireLeader();if(x.role==='builder')throw new Error('Legacy native builders require the operator-granted automatic harness');return agents.addTask({...x,target:leaderHost()})}));
   server.registerTool('panter_native_phase_claim',{
-    description:'GPT-A claims the next dependency-ready native phase. This is a durable lease, NOT proof of model invocation.',
+    description:`${leaderLabel()} claims the next dependency-ready native phase. This is a durable lease, NOT proof of model invocation.`,
     inputSchema:z.object({leaseSeconds:z.number().int().min(30).max(3600).default(300)})
-  },async ({leaseSeconds})=>execute(async()=>{requireLeader();return agents.claim('gpt-a','gpt-a',leaseSeconds)}));
+  },async ({leaseSeconds})=>execute(async()=>{requireLeader();return agents.claim(leaderHost(),leaderHost(),leaseSeconds)}));
   server.registerTool('panter_native_phase_packet',{
-    description:'GPT-A reads the exact ODD requirement and handoff of a recorded phase. Use panter_native_packet for agent+skill instructions.',
+    description:`${leaderLabel()} reads the exact ODD requirement and handoff of a recorded phase. Use panter_native_packet for agent+skill instructions.`,
     inputSchema:z.object({taskId:z.uuid()}),annotations:{readOnlyHint:true}
-  },async ({taskId})=>execute(async()=>{requireLeader();const task=await agents.getTask(taskId);if(task?.target!=='gpt-a')throw new Error('Not GPT-A native phase');return agents.packet(taskId)}));
+  },async ({taskId})=>execute(async()=>{requireLeader();const task=await agents.getTask(taskId);if(task?.target!==leaderHost())throw new Error(`Not ${leaderLabel()} native phase`);return agents.packet(taskId)}));
   server.registerTool('panter_native_phase_complete',{
-    description:'GPT-A records a claimed inline/native-subagent phase result and its host-reported evidence. Independent verification is never inferred.',
+    description:`${leaderLabel()} records a claimed inline/native-subagent phase result and its host-reported evidence. Independent verification is never inferred.`,
     inputSchema:z.object({taskId:z.uuid(),leaseGeneration:z.number().int().positive(),result:z.object({summary:bounded(10000),evidence:z.array(bounded(1000)).max(40)}),success:z.boolean().default(true)})
-  },async x=>execute(async()=>{requireLeader();const task=await agents.getTask(x.taskId);if(task?.target!=='gpt-a'||!['scout','designer','builder'].includes(task.role))throw new Error('Not a permitted GPT-A native phase');return agents.report(x.taskId,'gpt-a',x.leaseGeneration,x.result,x.success)}));
+  },async x=>execute(async()=>{requireLeader();const task=await agents.getTask(x.taskId);if(task?.target!==leaderHost()||!['scout','designer','builder'].includes(task.role))throw new Error(`Not a permitted ${leaderLabel()} native phase`);return agents.report(x.taskId,leaderHost(),x.leaseGeneration,x.result,x.success)}));
   server.registerTool('panter_native_flow_status',{
-    description:'Recover a durable GPT-A ODD flow and its native-phase evidence after context loss or disconnection.',
+    description:`Recover a durable ${leaderLabel()} ODD flow and its native-phase evidence after context loss or disconnection.`,
     inputSchema:z.object({flowId:z.uuid()}),annotations:{readOnlyHint:true}
   },async ({flowId})=>execute(async()=>{requireLeader();return agents.summary(flowId)}));
   server.registerTool('panter_native_candidate_freeze',{
-    description:'GPT-A records the candidate commit SHA for subsequent independent verification; a SHA string is not independently verified.',
+    description:`${leaderLabel()} records the candidate commit SHA for subsequent independent verification; a SHA string is not independently verified.`,
     inputSchema:z.object({flowId:z.uuid(),candidateSha:z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/),expectedRevision:z.number().int().positive()})
   },async x=>execute(async()=>{requireLeader();return agents.freezeCandidate(x.flowId,x.candidateSha,x.expectedRevision)}));
   server.registerTool('panter_native_flow_close',{
-    description:'Close a completed GPT-A ODD flow only if the stored verification/review gates allow it. High-risk flows cannot self-approve.',
+    description:`Close a completed ${leaderLabel()} ODD flow only if the stored verification/review gates allow it. High-risk flows cannot self-approve.`,
     inputSchema:z.object({flowId:z.uuid(),expectedRevision:z.number().int().positive()})
   },async x=>execute(async()=>{requireLeader();return agents.closeFlow(x.flowId,x.expectedRevision)}));
 
@@ -670,18 +674,18 @@ const handler = createMcpHandler(reqCtx => {
     },async x=>execute(async()=>{requireAdmin();return {revokedGrants:await embedded.revokeClient(x.clientId)};}));
   }
   server.registerTool('panter_harness_write_grant',{
-    description:'Admin-only explicit bounded write authorization for a particular project/objective; GPT-A cannot issue its own permission.',
+    description:`Admin-only explicit bounded write authorization for a particular project/objective; ${leaderLabel()} cannot issue its own permission.`,
     inputSchema:z.object({project:bounded(100),objective:bounded(6000),allowedPaths:z.array(bounded(256)).min(1).max(16),ttlSeconds:z.number().int().min(60).max(86400)})
   },async x=>execute(async()=>{requireAdmin();return harness.grantWrite(x)}));
   server.registerTool('panter_harness_start',{ 
-    description:'Automatically classify an engineering objective and persist ODD phases. GPT-A does NOT select agents/skills; no inference or edits run on the MCP.',
+    description:`Automatically classify an engineering objective and persist ODD phases. ${leaderLabel()} does NOT select agents/skills; no inference or edits run on the MCP.`,
     inputSchema:z.object({project:bounded(100),githubRepository:z.string().max(120).optional(),githubPrNumber:z.number().int().positive().optional(),githubExpectedBase:z.string().max(100).optional(),objective:bounded(6000),idempotencyKey:bounded(160),writesAuthorized:z.boolean(),writeGrantId:z.uuid().optional(),
       changeSurfaces:z.array(z.string().min(1).max(256)).max(16).optional(),
       judgmentDayRequested:z.boolean().optional(),
       observations:z.object({requirementsClear:z.boolean().optional(),resumableFromDiff:z.boolean().optional(),
         unknownCodeArea:z.boolean().optional(),independentWorkUnits:z.number().int().min(0).max(32).optional()}).optional(),
       capabilities:harnessRuntimeSchema.optional()})
-  },async x=>execute(async()=>{requireLeader();const profile=(await mesh.profiles()).find(p=>p.host==='gpt-a');
+  },async x=>execute(async()=>{requireLeader();const profile=(await mesh.profiles()).find(p=>p.host===leaderHost());
     const {capabilities,...spec}=x;const run=await harness.start({...spec,coordinationMode:profile?.coordinationMode??'AUTO'});
     const memoryCheckpoint=await checkpoint(run.id);
     return capabilities?{run,next:await harness.tick(run.id,capabilities),memoryCheckpoint}:{run,memoryCheckpoint};}));
@@ -697,17 +701,17 @@ const handler = createMcpHandler(reqCtx => {
   },async x=>execute(async()=>{requireLeader();await harness.report(x.runId,x.stepId,x.report);const memoryCheckpoint=await checkpoint(x.runId);
     return {...await harness.tick(x.runId,x.capabilities),memoryCheckpoint}}));
   server.registerTool('panter_harness_github_bind',{
-    description:'GPT-A attaches a verified, previously authorized existing/created PR to an automatic ODD run. Metadata only: no GitHub writes, no agent selection, no approval.',
+    description:`${leaderLabel()} attaches a verified, previously authorized existing/created PR to an automatic ODD run. Metadata only: no GitHub writes, no agent selection, no approval.`,
     inputSchema:z.object({runId:z.uuid(),repository:bounded(120),prNumber:z.number().int().positive(),
       expectedBase:z.string().max(100).optional(),expectedRevision:z.number().int().positive()})
   },async x=>execute(async()=>{requireLeader();return harness.bindGithub(x.runId,{repository:x.repository,
     prNumber:x.prNumber,expectedBase:x.expectedBase},x.expectedRevision)}));
   server.registerTool('panter_harness_correction_report',{
-    description:'GPT-A registers an authorized bounded correction with a fresh real Git SHA. Automatically resets verifier, 4R and Judgment Day, and invalidates old review evidence.',
+    description:`${leaderLabel()} registers an authorized bounded correction with a fresh real Git SHA. Automatically resets verifier, 4R and Judgment Day, and invalidates old review evidence.`,
     inputSchema:z.object({runId:z.uuid(),expectedRevision:z.number().int().positive(),report:z.object({candidateSha:z.string().regex(/^[a-f0-9]{40}$/),runId:bounded(160),evidence:z.array(bounded(1000)).min(1).max(30)})})
   },async x=>execute(async()=>{requireLeader();return harness.recordCorrection(x.runId,x.report,x.expectedRevision)}));
   server.registerTool('panter_harness_units_set',{
-    description:'GPT-A automatically decomposes completed design into disjoint, scoped implementation units. Requires actual separate host worktrees for parallel writers.',
+    description:`${leaderLabel()} automatically decomposes completed design into disjoint, scoped implementation units. Requires actual separate host worktrees for parallel writers.`,
     inputSchema:z.object({runId:z.uuid(),expectedRevision:z.number().int().positive(),units:z.array(z.object({objective:bounded(3000),paths:z.array(bounded(256)).min(1).max(12)})).min(2).max(16)})
   },async x=>execute(async()=>{requireLeader();return harness.defineUnits(x.runId,x.units,x.expectedRevision)}));
   server.registerTool('panter_harness_unit_report',{
@@ -736,7 +740,7 @@ const handler = createMcpHandler(reqCtx => {
         'Resolve blockers through separately authorized GitHub operations; do not infer delivery permission.'};
   }));
   server.registerTool('panter_rdd_status',{
-    description:'GPT-A inspects and refreshes the self-hosted Panter-RDD review for a harness run. Reviewer output cannot grant GitHub delivery permission.',
+    description:`${leaderLabel()} inspects and refreshes the self-hosted Panter-RDD review for a harness run. Reviewer output cannot grant GitHub delivery permission.`,
     inputSchema:z.object({runId:z.uuid()}),annotations:{readOnlyHint:true}
   },async x=>execute(async()=>{requireLeader();const run=await harness.get(x.runId);
     if(!run)throw new Error('Harness not found');if(!run.reviewId)return {status:'REVIEW_NOT_STARTED'};
@@ -753,16 +757,16 @@ const handler = createMcpHandler(reqCtx => {
   },async x=>execute(async()=>{requireLeader();return harness.get(x.runId)}));
 
   server.registerTool('panter_native_mode_set',{
-    description:'GPT-A persists user choice AUTO or GPT_A_ONLY. Solo mode refuses remote delegation while requesting maximum native model, effort, speed and parallelism.',
+    description:`${leaderLabel()} persists user choice AUTO or GPT_A_ONLY. Solo mode refuses remote delegation while requesting maximum native model, effort, speed and parallelism.`,
     inputSchema:z.object({coordinationMode:z.enum(['AUTO','GPT_A_ONLY']),expectedRevision:z.number().int().nonnegative()})
-  },async x=>execute(async()=>{requireLeader();return mesh.setCoordinationMode('gpt-a',x.coordinationMode,x.expectedRevision)}));
+  },async x=>execute(async()=>{requireLeader();return mesh.setCoordinationMode(leaderHost(),x.coordinationMode,x.expectedRevision)}));
 
   server.registerTool('panter_native_plan',{ 
-    description:'GPT-A requests maximum model/effort, fast native subagents and maximum safe parallelism even when working alone. GPT_A_ONLY forbids remote delegation regardless of peer availability. Reports capability gaps; does not launch models.',
+    description:`${leaderLabel()} requests maximum model/effort, fast native subagents and maximum safe parallelism even when working alone. GPT_A_ONLY forbids remote delegation regardless of peer availability. Reports capability gaps; does not launch models.`,
     inputSchema:z.object({signals:z.object({requirementsClear:z.boolean(),resumableFromDiff:z.boolean(),risk:z.enum(['low','high']),unknownCodeArea:z.boolean(),independentWorkUnits:z.number().int().min(0).max(32),writesAuthorized:z.boolean()}), assignments:z.array(nativeAssignmentSchema).min(1).max(32),peerStates:z.partialRecord(z.enum(HOSTS),z.enum(['CONNECTED','UNAVAILABLE','UNKNOWN'])).optional(),coordinationMode:z.enum(['AUTO','GPT_A_ONLY']).optional(),capabilities:z.object({nativeSubagents:z.boolean(),maxParallelSubagents:z.number().int().min(0).max(32),toolsAvailable:z.boolean(),observedModel:z.string().max(120).optional(),observedReasoningEffort:z.string().max(32).optional(),observedWorkerProcessing:z.string().max(32).optional()})}),annotations:{readOnlyHint:true}
-  },async x=>execute(async()=>{requireLeader();const owner=(await mesh.profiles()).find(p=>p.host==='gpt-a');const requested=owner?.maxRequestedNativeWorkers??32;const enabled=owner?.preferNativeSubagents!==false;return planHostNative({signals:x.signals,assignments:x.assignments,bindings:await mesh.specialistBindings(),peerStates:x.peerStates??{},coordinationMode:x.coordinationMode??owner?.coordinationMode??'AUTO',requestedNativeWorkers:enabled?requested:0,capabilities:{...x.capabilities,nativeSubagents:x.capabilities.nativeSubagents&&enabled,evidence:'HOST_REPORTED_UNVERIFIED'}})}));
+  },async x=>execute(async()=>{requireLeader();const owner=(await mesh.profiles()).find(p=>p.host===leaderHost());const requested=owner?.maxRequestedNativeWorkers??32;const enabled=owner?.preferNativeSubagents!==false;return planHostNative({signals:x.signals,assignments:x.assignments,bindings:await mesh.specialistBindings(),peerStates:x.peerStates??{},coordinationMode:x.coordinationMode??owner?.coordinationMode??'AUTO',requestedNativeWorkers:enabled?requested:0,capabilities:{...x.capabilities,nativeSubagents:x.capabilities.nativeSubagents&&enabled,evidence:'HOST_REPORTED_UNVERIFIED'}})}));
   server.registerTool('panter_native_packet',{
-    description:'GPT-A loads a pinned specialist + MCP-hosted skills for inline/direct or truly available native-subagent execution. Does not require a remote host.',inputSchema:nativeAssignmentSchema.extend({skillIds:z.array(z.enum(GENTLE_SKILLS.map(s=>s.id) as [string,...string[]])).max(8).optional(),modelRequest:z.string().max(120).optional(),effortRequest:z.string().max(32).optional()}),annotations:{readOnlyHint:true}
+    description:`${leaderLabel()} loads a pinned specialist + MCP-hosted skills for inline/direct or truly available native-subagent execution. Does not require a remote host.`,inputSchema:nativeAssignmentSchema.extend({skillIds:z.array(z.enum(GENTLE_SKILLS.map(s=>s.id) as [string,...string[]])).max(8).optional(),modelRequest:z.string().max(120).optional(),effortRequest:z.string().max(32).optional()}),annotations:{readOnlyHint:true}
   },async input=>execute(async()=>{requireLeader();return nativePacket(input)}));
   server.registerTool('panter_native_odd_instructions',{
     description:'Lazily retrieve the full pinned Gentle Shell coordinator ODD instructions with a warning that Pi-specific mechanisms do not execute in ChatGPT.',inputSchema:z.object({}),annotations:{readOnlyHint:true}
@@ -774,7 +778,7 @@ const handler = createMcpHandler(reqCtx => {
   // are prepared as separate frozen packets. GPT-A asks its host to launch
   // native subagents in parallel; the MCP does not start model inference.
   server.registerTool('panter_native_review_create',{
-    description:'GPT-A prepares four independent 4R slots or two blind Judgment Day slots, with versioned MCP skills and frozen candidate SHA. Works in GPT_A_ONLY without any remote workers.',
+    description:`${leaderLabel()} prepares four independent 4R slots or two blind Judgment Day slots, with versioned MCP skills and frozen candidate SHA. Works in GPT_A_ONLY without any remote workers.`,
     inputSchema:z.object({missionId:bounded(120),kind:z.enum(['4r','judgment-day']),objective:bounded(6000),candidateSha:z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/),idempotencyKey:bounded(160)})
   },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.create(x)}));
   server.registerTool('panter_native_review_packet',{
@@ -782,7 +786,7 @@ const handler = createMcpHandler(reqCtx => {
     inputSchema:z.object({reviewId:z.uuid(),slotId:z.uuid()}),annotations:{readOnlyHint:true}
   },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.packet(x.reviewId,x.slotId)}));
   server.registerTool('panter_native_review_batch',{
-    description:'Automatically selects native subagent 4R/Judgment Day packets when supported. With zero native slots, returns exactly one sequential GPT-A SOLO 4R lens at a time; use panter_native_review_submit_solo. Solo reports are never independent or RDD-approved. Judgment Day requires real separate judges.',
+    description:`Automatically selects native subagent 4R/Judgment Day packets when supported. With zero native slots, returns exactly one sequential ${leaderLabel()} SOLO 4R lens at a time; use panter_native_review_submit_solo. Solo reports are never independent or RDD-approved. Judgment Day requires real separate judges.`,
     inputSchema:z.object({reviewId:z.uuid(),observedNativeParallelism:z.number().int().min(0).max(32)}),annotations:{readOnlyHint:true}
   },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.batch(x.reviewId,x.observedNativeParallelism)}));
   server.registerTool('panter_native_review_submit',{
@@ -790,7 +794,7 @@ const handler = createMcpHandler(reqCtx => {
     inputSchema:z.object({reviewId:z.uuid(),slotId:z.uuid(),report:z.object({agentId:bounded(100),candidateSha:z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/),packetDigest:z.string().regex(/^[0-9a-f]{64}$/),subagentRunId:bounded(160),evidence:z.array(bounded(1000)).min(1).max(40),findings:z.array(z.object({id:bounded(100),location:bounded(400),severity:z.enum(['BLOCKER','CRITICAL','WARNING','SUGGESTION']),claim:bounded(2000),proofRefs:z.array(bounded(600)).min(1).max(12)})).max(80),attestation:z.object({keyId:bounded(80),signature:bounded(160)}).optional()})})
   },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.submit(x.reviewId,x.slotId,x.report)}));
   server.registerTool('panter_native_review_submit_solo',{
-    description:'Record one GPT-A self-reviewed 4R lens when native subagents are unavailable. Explicitly UNVERIFIED: never independently attested or Panter-RDD-approved.',
+    description:`Record one ${leaderLabel()} self-reviewed 4R lens when native subagents are unavailable. Explicitly UNVERIFIED: never independently attested or Panter-RDD-approved.`,
     inputSchema:z.object({reviewId:z.uuid(),slotId:z.uuid(),report:z.object({
       agentId:bounded(100),candidateSha:z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/),
       packetDigest:z.string().regex(/^[a-f0-9]{64}$/),
@@ -800,7 +804,7 @@ const handler = createMcpHandler(reqCtx => {
         claim:bounded(2000),proofRefs:z.array(bounded(600)).min(1).max(12)})).max(80)})})
   },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.submitSolo(x.reviewId,x.slotId,x.report)}));
   server.registerTool('panter_native_review_progress',{
-    description:'Recover native 4R/JD and GPT-A solo four-lens progress, severe findings and explicit unverified/independent status. Never marks review officially approved.',
+    description:`Recover native 4R/JD and ${leaderLabel()} solo four-lens progress, severe findings and explicit unverified/independent status. Never marks review officially approved.`,
     inputSchema:z.object({reviewId:z.uuid()}),annotations:{readOnlyHint:true}
   },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.status(x.reviewId)}));
   server.registerTool('panter_native_review_capabilities',{
@@ -825,7 +829,7 @@ const handler = createMcpHandler(reqCtx => {
   const studioUri = 'ui://panter/agent-studio.html';
   registerAppTool(server, 'panter_agent_studio', {
     title: 'Panter Agent Studio',
-    description: 'GPT-A configures five hosts plus all Gentle Shell specialist agents, requested models and centrally hosted skills. Only GPT-A saves settings.',
+    description: `${leaderLabel()} configures five hosts plus all Gentle Shell specialist agents, requested models and centrally hosted skills. Only ${leaderLabel()} saves settings.`,
     inputSchema: z.object({}),
     _meta: { ui: { resourceUri: studioUri } },
   }, async () => execute(async () => { requireLeader(); return { profiles: await mesh.profiles(), specialists: await mesh.specialistBindings(), catalog: gentleCatalog(), hosts: HOSTS, modelPoliciesAreRequests: true }; }));
@@ -848,14 +852,13 @@ const handler = createMcpHandler(reqCtx => {
 // Reconcile only real queued work pointers with subscribed event receivers.
 // The event payload cannot authorize writes or expose instructions.
 const reconcileEvents=()=>{
-  void reconcileWorkforceEventOutbox(['gpt-b','gemini'],
+  void reconcileWorkforceEventOutbox(appEventHosts(),
     host=>mesh.pending(host),workforceEvents)
     .then(({enqueueFailures})=>{
       if(enqueueFailures)console.error('MCP event outbox enqueue deferred');
     }).catch(()=>console.error('MCP event outbox reconciliation failed'));
 };
-mesh.events.on('gpt-b',reconcileEvents);
-mesh.events.on('gemini',reconcileEvents);
+for(const host of appEventHosts())mesh.events.on(host,reconcileEvents);
 const eventRetry=setInterval(reconcileEvents,30_000);
 eventRetry.unref();
 reconcileEvents();

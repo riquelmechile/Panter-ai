@@ -1,3 +1,4 @@
+import { leaderHost } from './leadership.js';
 import { SqliteLedger } from './sqlite-ledger.js';
 /** Self-hosted OAuth authorization boundary for Panter-ai (single-owner preview).
  * No model inference and no third-party identity provider are required.
@@ -277,12 +278,12 @@ export class EmbeddedOAuth {
       check(!existing || existing.host === host, 'Client cannot switch host without revocation');
       // Clients such as Gemini request every advertised scope. The leader scope is
       // never granted to a non-coordinator host: drop it instead of failing consent.
-      const requested = host === 'gpt-a' ? p.requestedScopes : p.requestedScopes.filter(s => s !== 'panter:lead');
+      const requested = host === leaderHost() ? p.requestedScopes : p.requestedScopes.filter(s => s !== 'panter:lead');
       // Operator-approved connections always get a rotating refresh token. ChatGPT does not
       // request offline_access and would otherwise be disconnected when the 1h access token
       // expires; refresh rotation and replay-family revocation still apply.
       const scopes = [...new Set([...requested, 'mcp', 'panter:mesh', 'offline_access'])];
-      if (host === 'gpt-a') scopes.push('panter:lead');
+      if (host === leaderHost()) scopes.push('panter:lead');
       if (!existing) d.grants.push({ clientId: p.clientId, host, redirectUri: p.redirectUri, scopes: [...new Set(scopes)], approvedAt: ts(), revoked: false });
       const code = secureId(32);
       d.codes.push({ digest: hash(code), clientId: p.clientId, host, redirectUri: p.redirectUri, challenge: p.challenge, scopes: [...new Set(scopes)], expiresAt: ts() + CODE_TTL, consumed: false });

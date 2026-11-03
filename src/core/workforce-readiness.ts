@@ -2,9 +2,10 @@
  * A claimed route is not an observed wake. One existing Mesh/SQLite ledger owns work.
  */
 import type { ActorProfile, MeshWork } from './mesh.js';
+import { workerHosts, type LeaderHost } from './leadership.js';
 
-export const WORKER_HOSTS = ['gpt-b', 'claude', 'grok', 'gemini'] as const;
-export type WorkerHost = (typeof WORKER_HOSTS)[number];
+/** Workers are every host except the configured leader (see leadership.ts). */
+export type WorkerHost = LeaderHost;
 export const DELIVERY_MODES = [
   'DELIVERY_ONLY', 'TASKS_2026', 'TASKS_2025', 'TASK_BRIDGE_2025',
   'LONG_POLL', 'EXTERNAL_WAKE', 'SCHEDULED_POLL',
@@ -59,7 +60,7 @@ export function summarizeWorkforce(
   works: MeshWork[],
   nowMs: number = Date.now(),
 ) {
-  return WORKER_HOSTS.map(host => {
+  return workerHosts().map(host => {
     const record = observations[host];
     const lastSeenAt = lastTimestamp(record?.lastPollAt, record?.lastClaimAt, record?.lastReceiptAt);
     const age = lastSeenAt ? nowMs - Date.parse(lastSeenAt) : Infinity;

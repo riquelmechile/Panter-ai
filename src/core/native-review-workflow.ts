@@ -1,6 +1,8 @@
 /** GPT-A native-subagent review handoffs and durable evidence collection.
  * Host owns subagent execution. This ledger never confers official Gentle AI RDD approval.
  */
+import type { LeaderHost } from './leadership.js';
+import { leaderHost, leaderLabel } from './leadership.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -22,7 +24,7 @@ export type NativeReviewSlot = {
 };
 export type NativeReviewRecord = {
   id: string; missionId: string; kind: ReviewKind; objective: string; candidateSha: string;
-  idempotencyKey: string; owner: 'gpt-a'; slots: NativeReviewSlot[];
+  idempotencyKey: string; owner: LeaderHost; slots: NativeReviewSlot[];
   createdAt: string; revision: number;
 };
 type State = {version:1; reviews:NativeReviewRecord[]};
@@ -73,7 +75,7 @@ export class NativeSubagentReview {
       const prior=d.reviews.find(r=>r.missionId===input.missionId&&r.idempotencyKey===input.idempotencyKey);
       if(prior){requireValid(prior.kind===input.kind&&prior.candidateSha===input.candidateSha&&prior.objective===input.objective,'Review idempotency conflict');return this.publicStatus(prior);}
       const now=new Date().toISOString();
-      const review:NativeReviewRecord={id:randomUUID(),...input,owner:'gpt-a',revision:1,createdAt:now,
+      const review:NativeReviewRecord={id:randomUUID(),...input,owner:leaderHost(),revision:1,createdAt:now,
         slots:packets.map(packet=>({id:randomUUID(),agentId:packet.agentId,candidateSha:input.candidateSha,
           packetDigest:packet.digest,assetDigests:packet.assetDigests,state:'AWAITING_SUBAGENT',receiptDigest:null,
           subagentRunId:null,report:null,createdAt:now,completedAt:null}))};
@@ -93,7 +95,7 @@ export class NativeSubagentReview {
       stage:soloComplete?'SOLO_4R_COMPLETED_UNVERIFIED':!all?'AWAITING_SUBAGENT_REPORTS':severe.length?'FINDINGS_REQUIRE_TRIAGE':'READY_FOR_RDD_CONTROLLER',
       evidenceComplete:all,soloEvidenceComplete:soloComplete,reviewMode:soloComplete?'GPT_A_SOLO_UNVERIFIED':all?'HOST_NATIVE_SUBAGENTS':'IN_PROGRESS',
       independentNativeRunsAttested:false,approved:false,nativeRddAuthority:false,
-      next:soloComplete?'GPT-A finished four self-review lenses. No independent verification, RDD approval or merge permission.':!all?'Launch native subagents or perform four explicitly unverified solo lenses sequentially.':
+      next:soloComplete?`${leaderLabel()} finished four self-review lenses. No independent verification, RDD approval or merge permission.`:!all?'Launch native subagents or perform four explicitly unverified solo lenses sequentially.':
         severe.length?'Review severe findings, authorize and freeze any corrections, then initiate fresh SHA-bound review.':
         'Check exact candidate and subagent run provenance with official Gentle AI RDD or independent trusted Git/CI evidence before approving.'};
   }
@@ -125,7 +127,7 @@ export class NativeSubagentReview {
     const selected=solo?available.slice(0,1):observedNativeParallelism>0?available:[];
     const originalPackets=await Promise.all(selected.map(s=>this.packet(reviewId,s.slotId)));
     const packets=solo?originalPackets.map(p=>({...p,execution:'GPT_A_SOLO_LENS_REQUESTED' as const,
-      independenceRequirement:'GPT-A itself reviews this lens; it is not an independent subagent, no independent attestation and no RDD approval.',
+      independenceRequirement:`${leaderLabel()} itself reviews this lens; it is not an independent subagent, no independent attestation and no RDD approval.`,
       returnContract:'Inspect one lens of this exact candidate, then submit agentId/candidateSha/packetDigest/evidence/findings with panter_native_review_submit_solo. Do not invent a child run ID.'})):originalPackets;
     const capacity=hostRequest('chatgpt');
     return {reviewId,kind:status.kind,candidateSha:status.candidateSha,
@@ -135,7 +137,7 @@ export class NativeSubagentReview {
       remainingSlots:available.length,requestedNativeParallelism:observedNativeParallelism,
       requestedModel:capacity.model,requestedReasoning:capacity.reasoningEffort,
       requestedWorkerSpeed:capacity.worker.preferredProcessing,packets,
-      requirements:solo?'GPT-A runs one self-review lens at a time, recording the evidence. Self-review is not independent and cannot pass Panter-RDD.':
+      requirements:solo?`${leaderLabel()} runs one self-review lens at a time, recording the evidence. Self-review is not independent and cannot pass Panter-RDD.`:
       'Launch actual separate host-native children; never fabricate subagent execution or attestations.',
       modelsStartedByMcp:0,approved:false};
   }
@@ -158,7 +160,7 @@ export class NativeSubagentReview {
       const slot=review.slots.find(s=>s.id===slotId);requireValid(slot,'Review slot not found');
       requireValid(report.agentId===slot.agentId&&report.candidateSha===review.candidateSha&&
         report.packetDigest===slot.packetDigest,'Solo report does not match frozen SHA and reviewer slot');
-      const stored:NativeReviewReport={...report,subagentRunId:'gpt-a'};
+      const stored:NativeReviewReport={...report,subagentRunId:leaderHost()};
       const receipt=blake(JSON.stringify({reviewId,slotId,solo:true,report:stored}));
       if(slot.state==='REPORTED_SOLO'){
         requireValid(slot.receiptDigest===receipt,'Conflicting immutable solo report');
@@ -167,7 +169,7 @@ export class NativeSubagentReview {
       requireValid(slot.state==='AWAITING_SUBAGENT'&&!review.slots.some(s=>s.state==='REPORTED'),
         'Solo and native reviewer reports cannot be mixed');
       requireValid(review.slots.find(s=>s.state==='AWAITING_SUBAGENT')?.id===slotId,
-        'GPT-A solo 4R requires sequential lens reporting');
+        `${leaderLabel()} solo 4R requires sequential lens reporting`);
       slot.state='REPORTED_SOLO';slot.report=stored;slot.receiptDigest=receipt;
       slot.subagentRunId=null;slot.completedAt=new Date().toISOString();review.revision++;
       return {receiptDigest:receipt,idempotent:false,status:this.publicStatus(review)};
@@ -175,7 +177,7 @@ export class NativeSubagentReview {
   }
   submit(reviewId:string,slotId:string,report:NativeReviewReport){
     requireValid(report!==null&&typeof report==='object','Invalid native review report');
-    requireValid(typeof report.subagentRunId==='string'&&/^[A-Za-z0-9._:-]{8,160}$/.test(report.subagentRunId)&&report.subagentRunId!=='gpt-a','Unique native subagent run ID required');
+    requireValid(typeof report.subagentRunId==='string'&&/^[A-Za-z0-9._:-]{8,160}$/.test(report.subagentRunId)&&report.subagentRunId!==leaderHost(),'Unique native subagent run ID required');
     requireValid(Array.isArray(report.evidence)&&report.evidence.length>0&&report.evidence.length<=40&&report.evidence.every(s=>typeof s==='string'&&s.trim().length>0&&s.length<=1000),'Concrete evidence required, including clean results');
     requireValid(Array.isArray(report.findings)&&report.findings.length<=80,'Invalid findings');
     for(const f of report.findings){
@@ -194,7 +196,7 @@ export class NativeSubagentReview {
         return {receiptDigest:digest,idempotent:true,status:this.publicStatus(r)};
       }
       requireValid(slot.state==='AWAITING_SUBAGENT'&&!r.slots.some(s=>s.state==='REPORTED_SOLO'),
-        'Cannot promote or mix GPT-A solo self-review into independently attested native review');
+        `Cannot promote or mix ${leaderLabel()} solo self-review into independently attested native review`);
       requireValid(!r.slots.some(s=>s.id!==slotId&&s.subagentRunId===report.subagentRunId),'Native subagent run ID reused across independent reviewers');
       slot.state='REPORTED';slot.report=report;slot.receiptDigest=digest;slot.subagentRunId=report.subagentRunId;
       slot.completedAt=new Date().toISOString();r.revision++;

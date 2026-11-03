@@ -4,7 +4,8 @@
  */
 import { performance } from 'node:perf_hooks';
 import type { Host, MeshEngine } from './mesh.js';
-import { WORKER_HOSTS, type WorkerHost, type ProtocolEra } from './workforce-readiness.js';
+import { type WorkerHost, type ProtocolEra } from './workforce-readiness.js';
+import { isWorker } from './leadership.js';
 
 export class WorkforceLongPoll {
   /** Bound the live wait surfaces to one per worker: four total at most. */
@@ -16,7 +17,7 @@ export class WorkforceLongPoll {
   isListening(host: WorkerHost): boolean { return this.active.has(host); }
 
   async wait(caller: Host, protocolEra: ProtocolEra, waitMs: number, signal?:AbortSignal) {
-    if (!(WORKER_HOSTS as readonly string[]).includes(caller))
+    if (!isWorker(caller))
       throw new Error('Only authenticated workers may wait for work');
     if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > 3_600_000)
       throw new Error('Long-poll wait must be 0..3600000 milliseconds');
