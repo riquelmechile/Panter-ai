@@ -141,6 +141,12 @@ export class MeshEngine {
           delete p.coordinationMode; delete p.preferNativeSubagents; delete p.maxRequestedNativeWorkers;
         }
       }
+      // Ledgers written before request validation may hold free text; it must never reach the
+      // connection contract or frozen packets, so fall back to the neutral defaults.
+      for (const r of [...data.profiles, ...data.specialistBindings]) {
+        if (typeof r.modelRequest !== 'string' || !MODEL_REQUEST_PATTERN.test(r.modelRequest)) r.modelRequest = 'host-default';
+        if (typeof r.effortRequest !== 'string' || !EFFORT_REQUEST_PATTERN.test(r.effortRequest)) r.effortRequest = 'max';
+      }
       return switched;
     };
     normalize(parsed);
@@ -254,10 +260,13 @@ export class MeshEngine {
   profiles() { return this.read(d => d.profiles); }
   /** Committed in-memory profile, for building the per-connection MCP instructions synchronously. */
   profileSnapshot(host: string): ActorProfile | undefined {
-    // Re-read the committed ledger, as read() does, so another writer's update is visible.
-    this.state = this.sqlite.read('mesh', this.state);
+    // Every MCP request builds its instructions: re-parse the ledger only when its committed revision
+    // moved (another writer included), not on every request.
+    const revision = this.sqlite.revision('mesh');
+    if (revision !== this.snapshotRevision) { this.state = this.sqlite.read('mesh', this.state); this.snapshotRevision = revision; }
     return structuredClone(this.state.profiles.find(p => p.host === host));
   }
+  private snapshotRevision = -1;
   /** Authenticated worker poll; exposes a QUEUED candidate only. Claim may still reject expired authorization. */
   async workforcePoll(caller: Host, report: WorkerRouteReport) {
     check(caller !== leaderHost(), 'Only workers may poll');

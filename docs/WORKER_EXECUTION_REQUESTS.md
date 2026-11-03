@@ -40,3 +40,9 @@ GPT-B:
 ```
 
 `expectedRevision` es la revisión actual del perfil de ese host: 0 si todavía no existe.
+
+## Datos guardados antes de la validación
+
+Un ledger anterior puede tener `modelRequest` o `effortRequest` con texto libre. Al abrir, Panter los cambia a `host-default` y `max` en perfiles y bindings, así que ese texto nunca llega a las instrucciones de conexión ni a los paquetes congelados. Después de actualizar, revisa esos perfiles y vuelve a configurarlos.
+
+Las instrucciones de conexión se arman en cada request MCP, pero el ledger solo se vuelve a leer cuando cambia su revisión.
