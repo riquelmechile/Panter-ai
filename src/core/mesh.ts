@@ -17,7 +17,8 @@ export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;ef
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
 export type WorkforceTaskBridge = {taskId:string;host:WorkerHost;protocolEra:'2025-11-25'|'2026-07-28';status:'ARMED'|'DELIVERED'|'CANCELLED'|'EXPIRED';createdAt:string;expiresAt:string;workId:string|null};
 export type WorkforceRearmIntent = {workId:string;host:WorkerHost;status:'PENDING'|'ACKED';createdAt:string;acknowledgedAt?:string};
-type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
+export type GrokWakeAttempt = {workId:string;state:'RESERVED'|'SIGNAL_ACCEPTED'|'SIGNAL_FAILED';reservedAt:string;statusCode:number|null;claimedAt?:string};
+type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
 const hosts = new Set<string>(HOSTS);
 const roles = new Set<MeshRole>(['orchestrator', 'explorer', 'architect', 'implementer', 'verifier', 'reviewer']);
 export function isHost(x: string): x is Host { return hosts.has(x); }
@@ -58,6 +59,7 @@ export class MeshEngine {
       data.workforce ??= {};
       data.taskBridges ??= [];
       data.rearmIntents ??= [];
+      data.grokWakeAttempts ??= [];
     };
     normalize(parsed);
     // Persist upgrades inside a transaction; subsequent reads cannot lose historical cursors.
@@ -285,7 +287,7 @@ export class MeshEngine {
     return this.delegate(caller,{missionId:input.missionId,target:binding.host,role:packet.role,instruction:packet.instruction,idempotencyKey:input.idempotencyKey,
       specialist:{agentId:packet.agentId,skillIds:packet.skillIds,packetDigest:packet.digest,assetDigests:packet.assetDigests,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,bindingRevision:binding.revision,candidateSha:input.candidateSha,allowedEditSurfaces:packet.allowedEditSurfaces}});
   }
-  async delegate(caller: Host, input: { missionId: string; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?:NonNullable<MeshWork['specialist']> }) {
+  async delegate(caller: Host, input: { missionId: string; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?:NonNullable<MeshWork['specialist']>; wakeOnly?:boolean }) {
     check(caller === 'gpt-a', 'Only GPT-A can delegate');
     check(input.missionId.length > 0 && input.missionId.length <= 120, 'Invalid mission');
     check(isHost(input.target) && input.target !== 'gpt-a', 'Invalid target');
@@ -311,6 +313,12 @@ export class MeshEngine {
         check(dup.target === input.target && dup.role === input.role && dup.instruction === input.instruction && JSON.stringify(dup.specialist??null)===JSON.stringify(input.specialist??null), 'Idempotency conflict');
         return dup;
       }
+      if(input.wakeOnly){
+        check(input.target==='grok' && input.role!=='implementer','Grok wake cannot authorize remote writes');
+        check(!d.works.some(w=>w.target==='grok' &&
+          ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state)),
+          'Grok wake peer busy');
+      }
       if(input.specialist?.allowedEditSurfaces?.length){
         const conflict=d.works.find(w=>w.missionId===input.missionId && w.role==='implementer' && ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state) && (w.specialist?.allowedEditSurfaces??[]).some(a=>input.specialist!.allowedEditSurfaces.some(b=>a===b || a.startsWith(b+'/') || b.startsWith(a+'/'))));
         check(!conflict,'Overlapping active writer edit surfaces');
@@ -323,6 +331,47 @@ export class MeshEngine {
       this.notify(d, input.target);
       this.notify(d, 'gpt-a');
       return w;
+    });
+  }
+
+  /** Reserve one outbound doorbell after the authoritative work is committed.
+   * A lost response is never blindly resent: RESERVED is an uncertain outcome.
+   */
+  async reserveGrokWake(caller:Host,workId:string){
+    check(caller==='gpt-a','Only GPT-A may signal delegated work');
+    return this.write(d=>{
+      const w=d.works.find(w=>w.id===workId&&w.from==='gpt-a'&&w.target==='grok');
+      check(w,'Grok work not found');
+      const existing=(d.grokWakeAttempts??[]).find(a=>a.workId===workId);
+      if(existing)return {send:false,attempt:existing};
+      check(w.state==='QUEUED','Only queued Grok work can receive wake');
+      const attempt:GrokWakeAttempt={workId,state:'RESERVED',reservedAt:iso(),statusCode:null};
+      (d.grokWakeAttempts??=[]).push(attempt);
+      this.notify(d,'gpt-a');
+      return {send:true,attempt};
+    });
+  }
+  async finishGrokWake(caller:Host,workId:string,accepted:boolean,statusCode:number|null){
+    check(caller==='gpt-a','Only GPT-A may record wake delivery');
+    return this.write(d=>{
+      const attempt=(d.grokWakeAttempts??[]).find(a=>a.workId===workId);
+      check(attempt,'Wake attempt not found');
+      if(attempt.state!=='RESERVED')return attempt;
+      attempt.state=accepted?'SIGNAL_ACCEPTED':'SIGNAL_FAILED';
+      attempt.statusCode=statusCode;
+      this.notify(d,'gpt-a');
+      return attempt;
+    });
+  }
+  async grokWakeStatus(caller:Host,workId:string){
+    check(caller==='gpt-a','Only GPT-A may inspect Grok wake attempts');
+    return this.read(d=>{
+      const w=d.works.find(w=>w.id===workId&&w.from==='gpt-a'&&w.target==='grok');
+      check(w,'Grok work not found');
+      const a=(d.grokWakeAttempts??[]).find(x=>x.workId===workId);
+      return {workId,state:a?.state??'DELIVERY_ONLY',statusCode:a?.statusCode??null,
+        wakeObserved:a?.state==='SIGNAL_ACCEPTED'&&Boolean(a.claimedAt),
+        claimedAt:a?.claimedAt??null};
     });
   }
 
@@ -460,6 +509,8 @@ export class MeshEngine {
       if (caller !== 'gpt-a') {
         const presence = (d.workforce ??= {})[caller as WorkerHost] ??= {};
         presence.lastClaimAt = iso();
+        const wake=(d.grokWakeAttempts??[]).find(a=>a.workId===w.id);
+        if(wake?.state==='SIGNAL_ACCEPTED')wake.claimedAt=presence.lastClaimAt;
       }
       w.leaseUntil = new Date(Date.now() + leaseSeconds * 1000).toISOString();
       this.notify(d, 'gpt-a');
