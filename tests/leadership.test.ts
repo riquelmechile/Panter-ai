@@ -46,7 +46,7 @@ test('Claude configures, delegates to GPT-A and reads the result; GPT-A cannot l
   assert.equal(work.from, 'claude');
   assert.equal(work.target, 'gpt-a');
   const claimed = await m.claim('gpt-a', work.id);
-  await assert.rejects(m.claim('claude', work.id), /./);
+  await assert.rejects(m.claim('claude', work.id), /Only workers may claim delegated work/);
   const done = await m.complete('gpt-a', work.id, claimed.attemptId!, claimed.leaseGeneration, 'REVIEW_OK');
   assert.equal(done.state, 'COMPLETED');
   await assert.rejects(m.resultGet('gpt-a', work.id), /Only Claude may read Workforce results/);
@@ -161,6 +161,68 @@ test('switching gpt-a -> claude with persisted data: no leader worker paths, old
     assert.ok((await m.inbox('claude')).works.some(w => w.id === toB.id));
     const mode = await m.setCoordinationMode('claude', 'AUTO', profiles.find(p => p.host === 'claude')!.revision);
     assert.deepEqual(mode.roles, ['orchestrator']);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('leader switch migration: stuck work closed, messages re-addressed, profiles cleaned, rebinding works', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-switch2-'));
+  try {
+    process.env.PANTER_LEAD_HOST = 'gpt-a';
+    const a = await MeshEngine.open(dir);
+    assert.equal(a.leaderSwitch, null);
+    await a.setCoordinationMode('gpt-a', 'AUTO', 0);
+    await a.setProfile('gpt-a', { host: 'claude', actorId: 'actor-claude', modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer', 'implementer'] }, 0);
+    await a.setProfile('gpt-a', worker('gpt-b'), 0);
+    await a.bindSpecialist('gpt-a', { agentId: 'review-risk', host: 'claude', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] }, 0);
+    const queued = await a.delegate('gpt-a', { missionId: 'm', target: 'claude', role: 'reviewer', instruction: 'q', idempotencyKey: 'q-1' });
+    const running = await a.delegate('gpt-a', { missionId: 'm', target: 'claude', role: 'reviewer', instruction: 'r', idempotencyKey: 'r-1' });
+    await a.claim('claude', running.id);
+    const forB = await a.delegate('gpt-a', { missionId: 'm', target: 'gpt-b', role: 'reviewer', instruction: 'b', idempotencyKey: 'b-1' });
+    await a.message('gpt-b', { missionId: 'm', workId: forB.id, to: 'gpt-a', kind: 'QUESTION', text: 'Which file?' });
+
+    process.env.PANTER_LEAD_HOST = 'claude';
+    const m = await MeshEngine.open(dir);
+    assert.deepEqual(m.leaderSwitch, { from: 'gpt-a', to: 'claude' });
+    const works = (await m.inbox('claude')).works;
+    assert.equal(works.find(w => w.id === queued.id)?.state, 'ABORTED_NO_EFFECTS');
+    assert.equal(works.find(w => w.id === running.id)?.state, 'FAILED');
+    assert.equal((await m.pending('claude')).length, 0);
+    assert.ok((await m.inbox('claude')).messages.some(x => x.kind === 'QUESTION' && x.text === 'Which file?'));
+    const profiles = await m.profiles();
+    const oldLead = profiles.find(p => p.host === 'gpt-a')!;
+    assert.equal(oldLead.coordinationMode, undefined);
+    assert.equal(oldLead.preferNativeSubagents, undefined);
+    assert.deepEqual(profiles.find(p => p.host === 'claude')?.roles, ['orchestrator']);
+    // The hidden binding to the new leader is rebound as if unbound.
+    assert.equal((await m.specialistBindings()).length, 0);
+    const rebound = await m.bindSpecialist('claude', { agentId: 'review-risk', host: 'gpt-b', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] }, 0);
+    assert.equal(rebound.host, 'gpt-b');
+    assert.equal(rebound.revision, 2);
+    // Reopening with the same leader is not another switch.
+    assert.equal((await MeshEngine.open(dir)).leaderSwitch, null);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('leader switch creates the leader profile when missing and keeps old native reviews and phases usable', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-switch3-'));
+  try {
+    process.env.PANTER_LEAD_HOST = 'gpt-a';
+    const { NativeSubagentReview } = await import('../src/core/native-review-workflow.js');
+    const before = await NativeSubagentReview.open(dir);
+    const review = await before.create({ missionId: 'm', kind: '4r', objective: 'Review exact candidate', candidateSha: 'c'.repeat(40), idempotencyKey: 'nr-1' });
+    await (await MeshEngine.open(dir)).setProfile('gpt-a', worker('gpt-b'), 0);
+    process.env.PANTER_LEAD_HOST = 'claude';
+    const m = await MeshEngine.open(dir);
+    assert.deepEqual(m.leaderSwitch, { from: 'gpt-a', to: 'claude' });
+    assert.deepEqual((await m.profiles()).find(p => p.host === 'claude')?.roles, ['orchestrator']);
+    const after = await NativeSubagentReview.open(dir);
+    const packet = await after.packet(review.reviewId, review.slots[0]!.slotId);
+    assert.equal(packet.digest, review.slots[0]!.packetDigest);
+    const { AgentEngine } = await import('../src/core/agents.js');
+    const { PanterStore } = await import('../src/core/store.js');
+    const store = await PanterStore.open(dir);
+    const agents = await AgentEngine.open(dir, store);
+    assert.equal(await agents.adoptLeaderPhases('gpt-a', 'claude'), 0);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

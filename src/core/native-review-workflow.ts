@@ -25,11 +25,19 @@ export type NativeReviewSlot = {
 export type NativeReviewRecord = {
   id: string; missionId: string; kind: ReviewKind; objective: string; candidateSha: string;
   idempotencyKey: string; owner: LeaderHost; slots: NativeReviewSlot[];
+  /** Model/effort frozen into the slot packets at creation; absent on records created before leaders were configurable. */
+  policyModel?: string; policyEffort?: string;
   createdAt: string; revision: number;
 };
 type State = {version:1; reviews:NativeReviewRecord[]};
 const coreRoles = { '4r': [...REVIEW_4R], 'judgment-day':['jd-judge-a','jd-judge-b'] } as const;
 
+/** The model/effort a review's packets were frozen with; legacy records used their owner's host policy. */
+function frozenPolicy(r:NativeReviewRecord){
+  if(r.policyModel&&r.policyEffort)return {model:r.policyModel,effort:r.policyEffort};
+  const p=hostRequest(r.owner==='gpt-a'||r.owner==='gpt-b'?'chatgpt':'host-native');
+  return {model:p.model,effort:p.reasoningEffort};
+}
 export class NativeSubagentReview {
   private data: State = {version:1,reviews:[]};
   private chain:Promise<unknown> = Promise.resolve();
@@ -75,7 +83,7 @@ export class NativeSubagentReview {
       const prior=d.reviews.find(r=>r.missionId===input.missionId&&r.idempotencyKey===input.idempotencyKey);
       if(prior){requireValid(prior.kind===input.kind&&prior.candidateSha===input.candidateSha&&prior.objective===input.objective,'Review idempotency conflict');return this.publicStatus(prior);}
       const now=new Date().toISOString();
-      const review:NativeReviewRecord={id:randomUUID(),...input,owner:leaderHost(),revision:1,createdAt:now,
+      const review:NativeReviewRecord={id:randomUUID(),...input,owner:leaderHost(),policyModel:policy.model,policyEffort:policy.reasoningEffort,revision:1,createdAt:now,
         slots:packets.map(packet=>({id:randomUUID(),agentId:packet.agentId,candidateSha:input.candidateSha,
           packetDigest:packet.digest,assetDigests:packet.assetDigests,state:'AWAITING_SUBAGENT',receiptDigest:null,
           subagentRunId:null,report:null,createdAt:now,completedAt:null}))};
@@ -104,15 +112,15 @@ export class NativeSubagentReview {
   async packet(reviewId:string,slotId:string){
     const r=await this.read(d=>d.reviews.find(x=>x.id===reviewId));requireValid(r,'Review not found');
     const slot=r.slots.find(x=>x.id===slotId);requireValid(slot,'Review slot not found');
-    const policy=hostRequest(leaderPolicyProfile());
+    const policy=frozenPolicy(r);
     const packet=await specialistPacket({agentId:slot.agentId,objective:r.objective,candidateSha:r.candidateSha,
-      skillIds:r.kind==='judgment-day'?['judgment-day']:['gentle-ai'],modelRequest:policy.model,effortRequest:policy.reasoningEffort});
+      skillIds:r.kind==='judgment-day'?['judgment-day']:['gentle-ai'],modelRequest:policy.model,effortRequest:policy.effort});
     requireValid(packet.digest===slot.packetDigest,'Catalog assets changed: frozen packet mismatch');
     return {reviewId:r.id,slotId:slot.id,kind:r.kind,candidateSha:r.candidateSha,
       ...packet,packetDigest:packet.digest,execution:'HOST_NATIVE_SUBAGENT_REQUESTED' as const,
       independenceRequirement:'Launch a new, separate native child context for this exact slot, never share other lens or blind judge reports. Do not let the implementing agent review its own work.',
       returnContract:'Child returns JSON with agentId, candidateSha, packetDigest, a unique subagentRunId, evidence[], and findings[]. Each finding includes id, location, severity, claim and proofRefs[]. Parent submits this JSON via panter_native_review_submit. For a production Panter-RDD approval, a trusted host runner must attach an Ed25519 attestation of the immutable slot invocation; model-reported child IDs alone are not sufficient.',
-      capacityRequest:{model:policy.worker.model,reasoning:policy.worker.reasoningEffort,processing:policy.worker.preferredProcessing},
+      capacityRequest:(()=>{const w=hostRequest(leaderPolicyProfile()).worker;return {model:w.model,reasoning:w.reasoningEffort,processing:w.preferredProcessing};})(),
       launchPerformed:false};
   }
   /** One call prepares all independent native child handoffs for parallel host dispatch.
