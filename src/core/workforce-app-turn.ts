@@ -1,3 +1,4 @@
+import { LISTEN_WAIT_SECONDS } from './workforce-long-poll.js';
 /** Native in-app workforce entrypoint for ChatGPT and Gemini. The MODEL/HOST
  * initiates this MCP call using its own approved OAuth connection: Panter has
  * no provider API, CLI runner, background model process, or authority to make
@@ -21,6 +22,7 @@ export async function appWorkforceTurn(mesh:MeshEngine,caller:Host,
     status:'EMPTY' as const,actor:caller,
     instruction:'No work assigned. Do not invent completion. If you run as a standing Panter worker, call panter_workforce_wait next: it blocks on the server until work arrives or the wait times out, so it is not a tight loop. Otherwise stop.',
     nextTool:'panter_workforce_wait' as const,
+    nextArguments:{protocolEra,waitSeconds:LISTEN_WAIT_SECONDS},
     transport:'IN_APP_MCP_TOOL' as const,autonomousWakeVerified:false as const
   };
   if(pickup.status==='OUTCOME_UNKNOWN')return {

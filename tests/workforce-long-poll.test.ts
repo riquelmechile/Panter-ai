@@ -113,3 +113,18 @@ test('live listeners refresh authenticated presence without an external event',(
   await assert.rejects(pending,/cancelled/);
   assert.equal(m.events.listenerCount('grok'),0);
 }));
+
+test('listen hints: a candidate points to pickup, every empty outcome to a blocking non-zero wait', async () => {
+  const { withListenHint, LISTEN_WAIT_SECONDS } = await import('../src/core/workforce-long-poll.js');
+  const found = withListenHint({ waitOutcome: 'CANDIDATE', next: { workId: 'w' } }, '2025-11-25');
+  assert.equal(found.nextTool, 'panter_workforce_pickup');
+  assert.deepEqual(found.nextArguments, {});
+  assert.equal(found.next.workId, 'w');
+  assert.ok(LISTEN_WAIT_SECONDS > 0);
+  for (const waitOutcome of ['IMMEDIATE_EMPTY', 'TIMED_OUT']) {
+    const empty = withListenHint({ waitOutcome }, '2026-07-28');
+    assert.equal(empty.nextTool, 'panter_workforce_wait');
+    assert.deepEqual(empty.nextArguments, { protocolEra: '2026-07-28', waitSeconds: LISTEN_WAIT_SECONDS });
+    assert.match(empty.instruction, /not a tight loop/);
+  }
+});

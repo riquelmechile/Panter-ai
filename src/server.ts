@@ -13,7 +13,7 @@ import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from '@model
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { MeshEngine, HOSTS, isHost } from './core/mesh.js';
 import { registerTaskWire } from './core/workforce-task-wire.js';
-import { WorkforceLongPoll } from './core/workforce-long-poll.js';
+import { WorkforceLongPoll, withListenHint } from './core/workforce-long-poll.js';
 import { GrokRoutineWake } from './core/grok-routine-wake.js';
 import { WorkforceEvents, reconcileWorkforceEventOutbox } from './core/workforce-events.js';
 import { registerWorkforceEventWire } from './core/workforce-event-wire.js';
@@ -164,12 +164,6 @@ function connectionContract(actor:string):string{
   if(!isHost(actor))return '';
   const leader=actor===leaderHost();
   return buildConnectionContract(actor,leader,mesh.profileSnapshot(actor),leader?hostRequest(leaderPolicyProfile()):undefined);
-}
-/** Tell a standing worker what to do next after a wait, in plain visible fields. */
-function withListenHint<T extends {waitOutcome:string}>(r:T){
-  return r.waitOutcome==='CANDIDATE'
-    ?{...r,nextTool:'panter_workforce_pickup' as const,instruction:'Work is queued for you: claim it with panter_workforce_pickup.'}
-    :{...r,nextTool:'panter_workforce_wait' as const,instruction:'No work yet. A standing Panter worker calls panter_workforce_wait again; it blocks on the server, so this is not a tight loop.'};
 }
 const handler = createMcpHandler(reqCtx => {
   const server = new McpServer({ name: 'panter-ai', version: '0.15.0' }, {
@@ -506,7 +500,7 @@ const handler = createMcpHandler(reqCtx => {
       protocolEra:z.enum(['2026-07-28','2025-11-25','UNKNOWN']),
       waitSeconds:z.number().int().min(0).max(3600).default(300),
     }).strict(),
-  },async (x,ctx)=>execute(async()=>withListenHint(await workforceLongPoll.wait(hostPrincipal(), x.protocolEra, x.waitSeconds * 1000,ctx.mcpReq.signal))));
+  },async (x,ctx)=>execute(async()=>withListenHint(await workforceLongPoll.wait(hostPrincipal(), x.protocolEra, x.waitSeconds * 1000,ctx.mcpReq.signal),x.protocolEra)));
   server.registerTool('panter_workforce_status',{
     description:`${leaderLabel()} read-only four-worker presence, claims, receipts and unverified wake-route reports. No invented READY or wake proof.`,
     inputSchema:z.object({}),annotations:{readOnlyHint:true},
