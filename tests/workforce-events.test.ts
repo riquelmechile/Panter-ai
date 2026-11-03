@@ -50,7 +50,7 @@ test('callback validation rejects private, loopback, credentials, redirects and 
 
 test('subscription verifies challenge, signs Standard Webhooks, deduplicates delivery, and unsubscribes',()=>fixture(async dir=>{
   let verificationCount=0;
-  const received:Array<{body:unknown;headers:Record<string,string>} >=[];
+  const received: Array<{body:unknown;headers:Record<string,string>}> = [];
   const post:EventPost=async(url,headers,body)=>{
     assert.equal(url,callback);
     assert.deepEqual(headers,webhookHeaders(secret,headers['webhook-id']!,
