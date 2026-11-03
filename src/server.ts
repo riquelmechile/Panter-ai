@@ -14,6 +14,7 @@ import { MeshEngine, HOSTS, isHost } from './core/mesh.js';
 import { registerTaskWire } from './core/workforce-task-wire.js';
 import { WorkforceLongPoll } from './core/workforce-long-poll.js';
 import { GrokRoutineWake } from './core/grok-routine-wake.js';
+import { ClaudeRoutineWake } from './core/claude-routine-wake.js';
 import { createServer } from 'node:http';
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
@@ -86,6 +87,7 @@ const agents = await AgentEngine.open(dataDir, store);
 const mesh = await MeshEngine.open(dataDir);
 const workforceLongPoll = new WorkforceLongPoll(mesh);
 const grokRoutineWake = new GrokRoutineWake();
+const claudeRoutineWake = new ClaudeRoutineWake();
 mesh.setStandingListenerCheck(host=>workforceLongPoll.isListening(host));
 const nativeSubagentReview = await NativeSubagentReview.open(dataDir);
 const githubGate = new GitHubDeliveryGate({
@@ -348,34 +350,54 @@ const handler = createMcpHandler(reqCtx => {
   },async x=>execute(async()=>{
     const caller=hostPrincipal();
     const direct=await mesh.delegateAuto(caller,x);
-    if(direct.status!=='LOCAL_FALLBACK_REQUIRED' ||
-      direct.reason!=='NO_FRESH_STANDBY_PEER' ||
-      !grokRoutineWake.configured||x.role==='implementer')return direct;
-    // External Grok Bot Routine is a cold-start doorbell only. No writes until
-    // a separate, host-authorized grant exists. Do not queue on a busy peer.
+    if(direct.status!=='LOCAL_FALLBACK_REQUIRED'||
+       direct.reason!=='NO_FRESH_STANDBY_PEER'||x.role==='implementer')return direct;
+    // A real connected live waiter takes priority. Without one, use only
+    // native host Routines that have been explicitly configured by operator.
+    // All remote wake is fail-closed, pointer-only, read-only.
     const profiles=await mesh.profiles();
-    if(!profiles.some(p=>p.host==='grok'&&p.roles.includes(x.role)))return direct;
-    let work:Awaited<ReturnType<typeof mesh.delegate>>;
-    try{work=await mesh.delegate(caller,{...x,target:'grok',wakeOnly:true});}
-    catch(error){
-      if(error instanceof Error&&error.message==='Grok wake peer busy')
-        return {...direct,reason:'GROK_WAKE_PEER_BUSY' as const};
-      throw error;
+    for(const host of ['grok','claude'] as const){
+      const available=host==='grok'?grokRoutineWake.configured:claudeRoutineWake.configured;
+      if(!available||!profiles.some(p=>p.host===host&&p.roles.includes(x.role)))continue;
+      let work:Awaited<ReturnType<typeof mesh.delegate>>;
+      try{work=await mesh.delegate(caller,{...x,target:host,wakeOnly:true});}
+      catch(error){
+        if(error instanceof Error&&error.message===
+           (host==='grok'?'Grok wake peer busy':'Claude wake peer busy'))continue;
+        throw error;
+      }
+      if(host==='grok'){
+        const reserved=await mesh.reserveGrokWake(caller,work.id);
+        if(reserved.send){
+          const response=await grokRoutineWake.dispatch(work.id);
+          await mesh.finishGrokWake(caller,work.id,response.accepted,response.statusCode);
+        }
+        return {status:'DELEGATED' as const,selectedHost:'grok' as const,
+          work,selectionEvidence:'CONFIGURED_GROK_ROUTINE_WEBHOOK' as const,
+          wake:await mesh.grokWakeStatus(caller,work.id),
+          autonomousWakeVerified:false as const};
+      }
+      const reserved=await mesh.reserveClaudeWake(caller,work.id);
+      if(reserved.send){
+        const response=await claudeRoutineWake.dispatch(work.id);
+        await mesh.finishClaudeWake(caller,work.id,response.accepted,
+          response.statusCode,response.sessionId);
+      }
+      return {status:'DELEGATED' as const,selectedHost:'claude' as const,
+        work,selectionEvidence:'CONFIGURED_CLAUDE_ROUTINE_API' as const,
+        wake:await mesh.claudeWakeStatus(caller,work.id),
+        autonomousWakeVerified:false as const};
     }
-    const reserved=await mesh.reserveGrokWake(caller,work.id);
-    if(reserved.send){
-      const response=await grokRoutineWake.dispatch(work.id);
-      await mesh.finishGrokWake(caller,work.id,response.accepted,response.statusCode);
-    }
-    return {status:'DELEGATED' as const,selectedHost:'grok' as const,
-      work,selectionEvidence:'CONFIGURED_GROK_ROUTINE_WEBHOOK' as const,
-      wake:await mesh.grokWakeStatus(caller,work.id),
-      autonomousWakeVerified:false as const};
+    return direct;
   }));
   server.registerTool('panter_workforce_grok_wake_status',{
     description:'GPT-A reads redacted durable Grok webhook attempt for an own work ID. Accepted HTTP is not evidence the worker ran.',
     inputSchema:z.object({workId:z.uuid()}).strict(),annotations:{readOnlyHint:true}
   },async x=>execute(()=>mesh.grokWakeStatus(hostPrincipal(),x.workId)));
+  server.registerTool('panter_workforce_claude_wake_status',{
+    description:'GPT-A reads durable Claude Code Routine fire state and redacted session ID. HTTP accepted does not prove task execution.',
+    inputSchema:z.object({workId:z.uuid()}).strict(),annotations:{readOnlyHint:true}
+  },async x=>execute(()=>mesh.claudeWakeStatus(hostPrincipal(),x.workId)));
   server.registerTool('panter_mesh_pending',{description:'Return pointers to work assigned to authenticated host.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.pending(hostPrincipal())));
   // An authenticated worker may check ONLY its own oldest queued pointer.
   // Self-reported wake routes are never promoted to verified autonomous delivery.
