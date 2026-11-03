@@ -382,6 +382,29 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_mesh_pending',{description:'Return pointers to work assigned to authenticated host.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.pending(hostPrincipal())));
   // An authenticated worker may check ONLY its own oldest queued pointer.
   // Self-reported wake routes are never promoted to verified autonomous delivery.
+  server.registerTool('panter_workforce_schedule_pickup',{
+    description:'For a host-owned recurring Task or Skill: authenticate the scheduled MCP poll and claim at most one actor-owned non-writer task. Requires GPT-A scheduled-worker opt-in. The server never starts the host, and self-reported mode does not prove autonomous wake.',
+    inputSchema:z.object({
+      intervalSeconds:z.number().int().min(3600).max(86400).default(3600),
+      leaseSeconds:z.number().int().min(30).max(3600).default(300),
+    }).strict(),
+  },async x=>execute(async()=>{
+    const actor=hostPrincipal();
+    if(actor==='gpt-a')throw Error('Only workers may run host schedules');
+    const profile=(await mesh.profiles()).find(p=>p.host===actor);
+    if(profile?.scheduledPickupEnabled!==true||
+       profile.scheduledPollIntervalSeconds!==x.intervalSeconds)
+      throw Error('Scheduled pickup is not configured for this authenticated actor');
+    const poll=await mesh.workforcePoll(actor,{
+      protocolEra:reqCtx.era==='modern'?'2026-07-28':'2025-11-25',
+      deliveryMode:'SCHEDULED_POLL',pollIntervalSeconds:x.intervalSeconds
+    });
+    if(!poll.next)return {status:'EMPTY' as const,
+      delivery:'AUTHENTICATED_SCHEDULE_POLL' as const,autonomousWakeVerified:false as const};
+    const claim=await mesh.pickup(actor,x.leaseSeconds,true);
+    return {...claim,delivery:'AUTHENTICATED_SCHEDULE_POLL' as const,
+      autonomousWakeVerified:false as const};
+  }));
   server.registerTool('panter_workforce_next',{
     description:'Actor-bound next QUEUED candidate pointer; claim revalidates authorization. Updates observed MCP presence but never wakes or grants execution.',
     inputSchema:z.object({
