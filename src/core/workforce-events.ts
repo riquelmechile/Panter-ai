@@ -13,7 +13,8 @@ export const WORK_EVENT='panter.work.ready';
 export type EventHost='gpt-b'|'gemini';
 type Subscription={id:string;owner:EventHost;url:string;secret:string;expiresAt:string;verifiedAt:string};
 type Delivery={id:string;subId:string;workId:string;state:'PENDING'|'SENDING'|'ACCEPTED'|'FAILED';
-  attempts:number;nextAt:number;lastStatus:number|null;terminalAt?:number};
+  attempts:number;nextAt:number;lastStatus:number|null;terminalAt?:number;
+  failureReason?:'SUBSCRIPTION_INACTIVE'};
 type EventData={version:1;subscriptions:Subscription[];deliveries:Delivery[]};
 type PostResult={status:number;body:string};
 export type EventPost=(url:string,headers:Record<string,string>,body:string)=>Promise<PostResult>;
@@ -227,7 +228,18 @@ export class WorkforceEvents{
       for(const sub of d.subscriptions.filter(s=>s.owner===actor&&isLive(s)))
         for(const workId of ids){
           const id='evt_'+hash(sub.id+':'+workId).slice(0,32);
-          if(d.deliveries.some(x=>x.id===id))continue;
+          const existing=d.deliveries.find(x=>x.id===id);
+          if(existing){
+            // Only an expiration-failed event can be rearmed, and only when
+            // the actor is subscribed again AND the work remains queued.
+            if(existing.state==='FAILED'&&existing.failureReason==='SUBSCRIPTION_INACTIVE'){
+              if(outstanding>=MAX_OUTSTANDING)throw Error('MCP event backlog limit reached');
+              existing.state='PENDING';existing.attempts=0;existing.nextAt=now();
+              existing.lastStatus=null;existing.terminalAt=undefined;
+              existing.failureReason=undefined;outstanding++;added++;
+            }
+            continue;
+          }
           if(outstanding>=MAX_OUTSTANDING)throw Error('MCP event backlog limit reached');
           outstanding++;
           d.deliveries.push({id,subId:sub.id,workId,state:'PENDING',
@@ -246,7 +258,7 @@ export class WorkforceEvents{
           (x.state==='SENDING'&&x.nextAt<=t));
         if(!next)return null;
         const sub=d.subscriptions.find(s=>s.id===next.subId&&isLive(s,t));
-        if(!sub){next.state='FAILED';next.terminalAt=t;return null;}
+        if(!sub){next.state='FAILED';next.terminalAt=t;next.failureReason='SUBSCRIPTION_INACTIVE';return null;}
         if(next.attempts>=5){next.state='FAILED';next.terminalAt=t;return null;}
         next.attempts++;next.state='SENDING';next.nextAt=t+60_000;
         return {delivery:{...next},sub:{...sub}};
@@ -283,4 +295,18 @@ export class WorkforceEvents{
       failed:data.deliveries.filter(x=>x.state==='FAILED').length,
       autonomousWakeVerified:false as const};
   }
+}
+
+/** Always drain existing webhooks even if one actor's enqueue hits its limit. */
+export async function reconcileWorkforceEventOutbox(
+  hosts:readonly EventHost[],
+  pending:(host:EventHost)=>Promise<ReadonlyArray<{workId:string}>>,
+  events:Pick<WorkforceEvents,'queue'|'flush'>
+):Promise<{enqueueFailures:number;flushed:number}>{
+  const attempts=await Promise.allSettled(hosts.map(async host=>{
+    const rows=await pending(host);
+    events.queue(host,rows.map(x=>x.workId));
+  }));
+  const flushed=await events.flush();
+  return {enqueueFailures:attempts.filter(x=>x.status==='rejected').length,flushed};
 }

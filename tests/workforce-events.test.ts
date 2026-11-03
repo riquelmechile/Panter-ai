@@ -4,7 +4,7 @@ import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {randomBytes} from 'node:crypto';
-import {WorkforceEvents,WORK_EVENT,publicIp,validCallback,webhookHeaders,pinnedAddressLookup,
+import {WorkforceEvents,WORK_EVENT,publicIp,validCallback,webhookHeaders,pinnedAddressLookup,reconcileWorkforceEventOutbox,
   type EventPost} from '../src/core/workforce-events.js';
 
 const callback='https://connectors.api.openai.com/mcp-events/test-callback';
@@ -196,4 +196,56 @@ test('lifetime webhook successes cannot exhaust the active backlog limit',()=>fi
   assert.equal(events.queue('gpt-b',[workId]),0,
     'terminal dedup remains while corresponding work is still queued');
   assert.equal(events.status('gpt-a').pending,0);
+}));
+
+
+test('reconcile drains existing deliveries despite another host enqueue failure',async()=>{
+  let flushCount=0;
+  const called:string[]=[];
+  const result=await reconcileWorkforceEventOutbox(['gpt-b','gemini'],
+    async host=>[{workId:host==='gpt-b'?workId:'00000000-0000-4000-8000-000000000002'}],
+    {
+      queue:(host)=>{
+        called.push(host);
+        if(host==='gpt-b')throw Error('MCP event backlog limit reached');
+        return 1;
+      },
+      flush:async()=>{flushCount++;return 1;}
+    });
+  assert.deepEqual(called,['gpt-b','gemini']);
+  assert.deepEqual(result,{enqueueFailures:1,flushed:1});
+  assert.equal(flushCount,1);
+});
+
+test('renewed subscription retries expiration-failed events for still-queued work',()=>fixture(async dir=>{
+  let deliveries=0,verifications=0;
+  const post:EventPost=async(_url,_headers,body)=>{
+    const payload=JSON.parse(body) as {type?:string;challenge?:string};
+    if(payload.type==='verification'){
+      verifications++;
+      return {status:200,body:JSON.stringify({challenge:payload.challenge})};
+    }
+    deliveries++;
+    return {status:204,body:''};
+  };
+  const engine=new WorkforceEvents(dir,post);
+  await engine.subscribe('gpt-b',args);
+  assert.equal(engine.queue('gpt-b',[workId]),1);
+  const {SqliteLedger}=await import('../src/core/sqlite-ledger.js');
+  const ledger=SqliteLedger.open(dir);
+  const seed:any={version:1,subscriptions:[],deliveries:[]};
+  ledger.mutate('events',seed,(d:any)=>{
+    const sub=d.subscriptions.find((x:any)=>x.owner==='gpt-b');
+    sub.expiresAt=new Date(Date.now()-60_000).toISOString();
+  });
+  assert.equal(await engine.flush(),0);
+  assert.equal(engine.status('gpt-a').failed,1);
+  assert.equal(deliveries,0);
+  await engine.subscribe('gpt-b',args);
+  assert.equal(verifications,2);
+  assert.equal(engine.queue('gpt-b',[workId]),1);
+  assert.equal(engine.queue('gpt-b',[workId]),0);
+  assert.equal(await engine.flush(),1);
+  assert.equal(deliveries,1);
+  assert.equal(engine.queue('gpt-b',[workId]),0);
 }));

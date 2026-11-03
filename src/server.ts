@@ -14,7 +14,7 @@ import { MeshEngine, HOSTS, isHost } from './core/mesh.js';
 import { registerTaskWire } from './core/workforce-task-wire.js';
 import { WorkforceLongPoll } from './core/workforce-long-poll.js';
 import { GrokRoutineWake } from './core/grok-routine-wake.js';
-import { WorkforceEvents } from './core/workforce-events.js';
+import { WorkforceEvents, reconcileWorkforceEventOutbox } from './core/workforce-events.js';
 import { registerWorkforceEventWire } from './core/workforce-event-wire.js';
 import { appWorkforceTurn } from './core/workforce-app-turn.js';
 import { ClaudeRoutineWake } from './core/claude-routine-wake.js';
@@ -848,11 +848,11 @@ const handler = createMcpHandler(reqCtx => {
 // Reconcile only real queued work pointers with subscribed event receivers.
 // The event payload cannot authorize writes or expose instructions.
 const reconcileEvents=()=>{
-  void Promise.all((['gpt-b','gemini'] as const).map(async host=>{
-    const rows=await mesh.pending(host);
-    workforceEvents.queue(host,rows.map(w=>w.workId));
-  })).then(()=>workforceEvents.flush()).catch(()=>
-    console.error('MCP event outbox reconciliation failed'));
+  void reconcileWorkforceEventOutbox(['gpt-b','gemini'],
+    host=>mesh.pending(host),workforceEvents)
+    .then(({enqueueFailures})=>{
+      if(enqueueFailures)console.error('MCP event outbox enqueue deferred');
+    }).catch(()=>console.error('MCP event outbox reconciliation failed'));
 };
 mesh.events.on('gpt-b',reconcileEvents);
 mesh.events.on('gemini',reconcileEvents);
