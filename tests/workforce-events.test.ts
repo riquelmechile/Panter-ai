@@ -249,3 +249,21 @@ test('renewed subscription retries expiration-failed events for still-queued wor
   assert.equal(deliveries,1);
   assert.equal(engine.queue('gpt-b',[workId]),0);
 }));
+
+test('subscriptions last up to 7 days and ask for renewal with a quarter of the lifetime as margin',()=>fixture(async dir=>{
+  const echo:EventPost=async(_url,_headers,body)=>{
+    const parsed=JSON.parse(body) as {challenge?:string};
+    return {status:200,body:JSON.stringify({challenge:parsed.challenge})};
+  };
+  const e=new WorkforceEvents(dir,echo);
+  const t0=Date.now();
+  const open=await e.subscribe('gpt-b',{...args,ttlMs:null});
+  const refresh=Date.parse(open.refreshBefore!)-t0;
+  assert.ok(refresh>5.2*86_400_000&&refresh<=5.25*86_400_000+5_000,`refreshBefore ${refresh}`);
+  const capped=await e.subscribe('gpt-b',{...args,ttlMs:30*86_400_000});
+  assert.ok(Date.parse(capped.refreshBefore!)-Date.now()<=5.25*86_400_000+5_000);
+  const short=await e.subscribe('gpt-b',{...args,ttlMs:3_600_000});
+  const s=Date.parse(short.refreshBefore!)-Date.now();
+  assert.ok(s>2_600_000&&s<=2_700_000+5_000,`short refreshBefore ${s}`);
+  await assert.rejects(e.subscribe('gpt-b',{...args,ttlMs:1000}),/Invalid event subscription TTL/);
+}));

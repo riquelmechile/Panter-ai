@@ -48,10 +48,14 @@ again when it calls the MCP pickup tool.
 
 ChatGPT will send `events/subscribe` with its HTTPS callback URL and
 `whsec_` signing secret. Panter verifies the callback using a signed
-challenge before persisting a 24-hour renewable subscription. ChatGPT
-refreshes the subscription before expiration.
+challenge before persisting a renewable subscription of up to 7 days (also
+when `ttlMs` is null or omitted). `refreshBefore` is set a quarter of the
+granted lifetime before expiry, so ChatGPT renews with margin; delivery
+stops only at `expiresAt`. Renewal is still an observed host behaviour:
+check that the subscription's expiry moves forward before relying on it.
 
-Only a real subscribed GPT-B actor is eligible for this event wake path.
+Only a real subscribed ChatGPT or Gemini app worker (GPT-A, GPT-B or Gemini,
+never the configured leader) is eligible for this event wake path.
 A connected OAuth registration alone is insufficient. The route is
 read-only by default: `implementer` remains subject to separate
 authorization/explicit host approval paths and is not cold-started by the

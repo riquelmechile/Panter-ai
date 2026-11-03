@@ -141,6 +141,7 @@ function subId(owner:EventHost,url:string){
   return 'sub_'+hash(owner+'\n'+url+'\n'+WORK_EVENT+'\n'+JSON.stringify({host:owner})).slice(0,32);
 }
 const isLive=(s:Subscription,t=now())=>Date.parse(s.expiresAt)>t;
+export const MAX_EVENT_TTL_MS=7*86_400_000;
 
 export class WorkforceEvents{
   private readonly db:SqliteLedger;
@@ -173,9 +174,11 @@ export class WorkforceEvents{
     const u=validCallback(args.delivery.url);
     const secret=args.delivery.secret;
     secretBytes(secret);
-    const requested=args.ttlMs===undefined||args.ttlMs===null?86_400_000:args.ttlMs;
+    // Up to 7 days per grant (also for ttlMs null/omitted). refreshBefore leaves a quarter of the
+    // lifetime as margin so the host renews well before delivery would stop.
+    const requested=args.ttlMs===undefined||args.ttlMs===null?MAX_EVENT_TTL_MS:args.ttlMs;
     if(!Number.isInteger(requested)||requested<60_000)throw Error('Invalid event subscription TTL');
-    const ttl=Math.min(86_400_000,requested);
+    const ttl=Math.min(MAX_EVENT_TTL_MS,requested);
     const id=subId(actor,u.toString());
     const exists=this.db.read('events',seed).subscriptions.find(s=>s.id===id&&isLive(s)&&s.secret===secret);
     if(!exists){
@@ -204,7 +207,8 @@ export class WorkforceEvents{
       // Preserve durable pending events on refresh and key rotation.
       // The exact raw body is re-signed on each attempt with the current key.
     });
-    return {id,refreshBefore:expiresAt,cursor:null,truncated:false};
+    const refreshBefore=new Date(Date.parse(expiresAt)-Math.floor(ttl/4)).toISOString();
+    return {id,refreshBefore,cursor:null,truncated:false};
   }
   unsubscribe(actor:string,args:{name:string;arguments:unknown;delivery:{url:string}}){
     assertActor(actor);if(args.name!==WORK_EVENT)throw Error('Unknown event');
