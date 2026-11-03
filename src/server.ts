@@ -34,6 +34,7 @@ import { AutomaticHarness } from './core/auto-harness.js';
 import { GitHubDeliveryGate } from './core/github-delivery.js';
 import { PanterRdd } from './core/panter-rdd.js';
 import { LocalGitVerifier } from './core/local-git-verifier.js';
+import { buildConnectionContract } from './core/connection-contract.js';
 
 // Fail closed before any store opens on an invalid PANTER_LEAD_HOST; the leader is frozen
 // for this process and never comes from tool input.
@@ -150,10 +151,14 @@ function requireAdmin(){if(!isAdminPrincipal(principal(),ownerTrustedHosts))thro
 const missionStatus = z.enum(['DRAFT', 'READY', 'RUNNING', 'VERIFYING', 'DONE', 'BLOCKED']);
 const bounded = (max = 2048) => z.string().trim().min(1).max(max);
 
+function connectionContract(actor:string):string{
+  return isHost(actor)?buildConnectionContract(actor,actor===leaderHost(),mesh.profileSnapshot(actor)):'';
+}
 const handler = createMcpHandler(reqCtx => {
   const server = new McpServer({ name: 'panter-ai', version: '0.15.0' }, {
     capabilities: { resources: { subscribe: true }, events: {} } as any,
     instructions: `Panter-ai is a host-operated development harness with NO provider inference. ${leaderLabel()} is the coordinator. For a new user development request start with panter_harness_start (goal + permitted work and observed facts, NEVER ask the user to pick agents, roles, skills or review lenses). Then call panter_harness_tick and execute the returned phase automatically with host tools or native subagents; call panter_harness_report after observing actual results, and repeat until blocked by actual authorization/evidence or completed. The server automatically selects ODD discovery, planning, scoped implementation, independent verification and 4R by risk; Judgment Day only when explicitly requested. An initial Agent Studio preference may bind model/host but never requires per-task specialist selection. GPT_A_ONLY forbids remote delegation while preserving maximum requested model/effort, fast native worker processing, and maximum safe host-observed parallelism. If no remote peer is connected continue with ${leaderLabel()} native/inline. The host owns model selection and subagent execution; claims of model, effort, speed or children are REQUESTED, not verified. Do not misstate packet preparation as subagent execution. Panter-RDD is an independently implemented SHA-bound review gate, not the official Gentle AI Go controller; human delivery authorization remains separate. Do not merge or deploy without separately authorized tools and exact-candidate proof.`
+      + connectionContract(principal()),
 
   });
 

@@ -162,6 +162,8 @@ export class MeshEngine {
     });
   }
   profiles() { return this.read(d => d.profiles); }
+  /** Committed in-memory profile, for building the per-connection MCP instructions synchronously. */
+  profileSnapshot(host: string): ActorProfile | undefined { return this.state.profiles.find(p => p.host === host); }
   /** Authenticated worker poll; exposes a QUEUED candidate only. Claim may still reject expired authorization. */
   async workforcePoll(caller: Host, report: WorkerRouteReport) {
     check(caller !== leaderHost(), 'Only workers may poll');
