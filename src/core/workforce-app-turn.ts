@@ -19,7 +19,8 @@ export async function appWorkforceTurn(mesh:MeshEngine,caller:Host,
   const pickup=await mesh.pickup(caller,leaseSeconds);
   if(pickup.status==='EMPTY')return {
     status:'EMPTY' as const,actor:caller,
-    instruction:'No work assigned; do not poll in a tight loop or invent completion.',
+    instruction:'No work assigned. Do not invent completion. If you run as a standing Panter worker, call panter_workforce_wait next: it blocks on the server until work arrives or the wait times out, so it is not a tight loop. Otherwise stop.',
+    nextTool:'panter_workforce_wait' as const,
     transport:'IN_APP_MCP_TOOL' as const,autonomousWakeVerified:false as const
   };
   if(pickup.status==='OUTCOME_UNKNOWN')return {
