@@ -161,7 +161,7 @@ test('leader switch migration: stuck work closed, messages re-addressed, profile
     assert.deepEqual(m.leaderSwitch, { from: 'gpt-a', to: 'claude' });
     const works = (await m.inbox('claude')).works;
     assert.equal(works.find(w => w.id === queued.id)?.state, 'ABORTED_NO_EFFECTS');
-    assert.equal(works.find(w => w.id === running.id)?.state, 'FAILED');
+    assert.equal(works.find(w => w.id === running.id)?.state, 'ABORTED_NO_EFFECTS');
     assert.equal((await m.pending('claude')).length, 0);
     assert.ok((await m.inbox('claude')).messages.some(x => x.kind === 'QUESTION' && x.text === 'Which file?'));
     const profiles = await m.profiles();
@@ -169,6 +169,7 @@ test('leader switch migration: stuck work closed, messages re-addressed, profile
     assert.equal(oldLead.coordinationMode, undefined);
     assert.equal(oldLead.preferNativeSubagents, undefined);
     assert.deepEqual(profiles.find(p => p.host === 'claude')?.roles, ['orchestrator']);
+    assert.equal(profiles.find(p => p.host === 'claude')?.coordinationMode, 'AUTO');
     // The hidden binding to the new leader is rebound as if unbound.
     assert.equal((await m.specialistBindings()).length, 0);
     const rebound = await m.bindSpecialist('claude', { agentId: 'review-risk', host: 'gpt-b', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] }, 0);
@@ -246,6 +247,77 @@ test('a remote review interrupted by a leader switch reports INTERRUPTED instead
     process.env.PANTER_LEAD_HOST = 'claude';
     const m = await MeshEngine.open(dir);
     assert.equal((await m.reviewStatus('claude', review.id)).stage, 'INTERRUPTED');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('leader-only policy (GPT_A_ONLY) follows the leader role in both switch directions', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-switch7-'));
+  try {
+    process.env.PANTER_LEAD_HOST = 'gpt-a';
+    const a = await MeshEngine.open(dir);
+    await a.setProfile('gpt-a', { host: 'gpt-a', actorId: 'actor-gpt-a', modelRequest: 'host-default', effortRequest: 'max', roles: ['orchestrator'],
+      coordinationMode: 'GPT_A_ONLY', preferNativeSubagents: true, maxRequestedNativeWorkers: 16 }, 0);
+    process.env.PANTER_LEAD_HOST = 'claude';
+    const toClaude = await (await MeshEngine.open(dir)).profiles();
+    const claude = toClaude.find(p => p.host === 'claude')!;
+    assert.equal(claude.coordinationMode, 'GPT_A_ONLY');
+    assert.equal(claude.preferNativeSubagents, true);
+    assert.equal(claude.maxRequestedNativeWorkers, 16);
+    assert.equal(toClaude.find(p => p.host === 'gpt-a')!.coordinationMode, undefined);
+    process.env.PANTER_LEAD_HOST = 'gpt-a';
+    const back = await (await MeshEngine.open(dir)).profiles();
+    assert.equal(back.find(p => p.host === 'gpt-a')!.coordinationMode, 'GPT_A_ONLY');
+    assert.equal(back.find(p => p.host === 'gpt-a')!.maxRequestedNativeWorkers, 16);
+    assert.equal(back.find(p => p.host === 'claude')!.coordinationMode, undefined);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('a running read-only lens aborts on switch, the review is INTERRUPTED and its queued siblings are closed', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-switch8-'));
+  try {
+    process.env.PANTER_LEAD_HOST = 'gpt-a';
+    const a = await MeshEngine.open(dir);
+    await a.setProfile('gpt-a', { host: 'claude', actorId: 'actor-claude', modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer'] }, 0);
+    await a.setProfile('gpt-a', worker('gpt-b'), 0);
+    await a.bindSpecialist('gpt-a', { agentId: 'review-risk', host: 'claude', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] }, 0);
+    for (const agentId of ['review-readability', 'review-reliability', 'review-resilience'])
+      await a.bindSpecialist('gpt-a', { agentId, host: 'gpt-b', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] }, 0);
+    const review = await a.startReview('gpt-a', { missionId: 'm', kind: '4r', objective: 'Review', candidateSha: 'e'.repeat(40), idempotencyKey: 'r-8' });
+    const claudeLens = (await a.pending('claude'))[0]!;
+    await a.claim('claude', claudeLens.workId);
+    process.env.PANTER_LEAD_HOST = 'claude';
+    const m = await MeshEngine.open(dir);
+    const status = await m.reviewStatus('claude', review.id);
+    assert.equal(status.stage, 'INTERRUPTED');
+    assert.equal(status.work.find(w => w.workId === claudeLens.workId)?.state, 'ABORTED_NO_EFFECTS');
+    assert.equal((await m.pending('gpt-b')).length, 3);
+    assert.equal(await m.abortInterruptedReview('claude', review.id), 3);
+    assert.equal((await m.pending('gpt-b')).length, 0);
+    await assert.rejects(m.abortInterruptedReview('gpt-b', review.id), /may reset a review/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('phase adoption marker survives a crash until cleared, and accumulates across chained switches', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-switch9-'));
+  try {
+    process.env.PANTER_LEAD_HOST = 'gpt-a';
+    await (await MeshEngine.open(dir)).setProfile('gpt-a', worker('gpt-b'), 0);
+    assert.deepEqual((await MeshEngine.open(dir)).pendingPhaseAdoption, []);
+    process.env.PANTER_LEAD_HOST = 'claude';
+    assert.deepEqual((await MeshEngine.open(dir)).pendingPhaseAdoption, ['gpt-a']);
+    // Crash before clearing: the next boot (same leader) still sees the marker and is not a new switch.
+    const again = await MeshEngine.open(dir);
+    assert.equal(again.leaderSwitch, null);
+    assert.deepEqual(again.pendingPhaseAdoption, ['gpt-a']);
+    // A second switch before adoption finished keeps both former leaders.
+    process.env.PANTER_LEAD_HOST = 'gemini';
+    const chained = await MeshEngine.open(dir);
+    assert.deepEqual(chained.pendingPhaseAdoption, ['gpt-a', 'claude']);
+    await chained.clearPhaseAdoption(chained.pendingPhaseAdoption);
+    assert.deepEqual((await MeshEngine.open(dir)).pendingPhaseAdoption, []);
+    // Switching back to a host still pending drops it: it is the leader again.
+    process.env.PANTER_LEAD_HOST = 'claude';
+    assert.deepEqual((await MeshEngine.open(dir)).pendingPhaseAdoption, ['gemini']);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

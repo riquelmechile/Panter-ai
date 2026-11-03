@@ -21,7 +21,7 @@ export type WorkforceTaskBridge = {taskId:string;host:WorkerHost;protocolEra:'20
 export type WorkforceRearmIntent = {workId:string;host:WorkerHost;status:'PENDING'|'ACKED';createdAt:string;acknowledgedAt?:string};
 export type GrokWakeAttempt = {workId:string;state:'RESERVED'|'SIGNAL_ACCEPTED'|'SIGNAL_FAILED';reservedAt:string;statusCode:number|null;claimedAt?:string};
 export type ClaudeWakeAttempt = GrokWakeAttempt & {sessionId:string|null};
-type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; claudeWakeAttempts?: ClaudeWakeAttempt[]; leader?: Host; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
+type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; claudeWakeAttempts?: ClaudeWakeAttempt[]; leader?: Host; pendingPhaseAdoption?: Host[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
 const hosts = new Set<string>(HOSTS);
 const roles = new Set<MeshRole>(['orchestrator', 'explorer', 'architect', 'implementer', 'verifier', 'reviewer']);
 export function isHost(x: string): x is Host { return hosts.has(x); }
@@ -55,9 +55,7 @@ export class MeshEngine {
     // An empty ledger has no prior leader to migrate from.
     const storedLeader = (d: MeshData): Host => d.leader && isHost(d.leader) ? d.leader
       : (d.profiles.length || d.works.length || d.messages.length) ? 'gpt-a' : lead;
-    const previous = storedLeader(parsed);
-    x.leaderSwitch = previous === lead ? null : { from: previous, to: lead };
-    const normalize = (data: MeshData) => {
+    const normalize = (data: MeshData): { from: Host; to: Host } | null => {
       const from = storedLeader(data);
       if (from !== lead) {
         const stamp = iso();
@@ -66,8 +64,10 @@ export class MeshEngine {
           if (w.target !== lead) continue;
           if (w.state === 'QUEUED') { w.state = 'ABORTED_NO_EFFECTS'; w.completedAt = stamp; w.result = `Leader switch ${from} -> ${lead}: never claimed, aborted without effects`; }
           else if (w.state === 'RUNNING' || w.state === 'WAITING_INPUT') {
+            // A writer may have produced effects: reconcile it. Read-only work had none, so it aborts
+            // cleanly and any review it belonged to reads as INTERRUPTED instead of a failed lens.
             if (w.role === 'implementer') w.state = 'OUTCOME_UNKNOWN';
-            else { w.state = 'FAILED'; w.completedAt = stamp; w.result = `Leader switch ${from} -> ${lead}: interrupted while running`; }
+            else { w.state = 'ABORTED_NO_EFFECTS'; w.completedAt = stamp; w.result = `Leader switch ${from} -> ${lead}: interrupted while running, read-only, no effects`; }
             w.leaseUntil = null;
           }
         }
@@ -82,8 +82,25 @@ export class MeshEngine {
         data.inboxRevision[lead] = Math.max(data.inboxRevision[lead] ?? 0, next);
         if (!data.profiles.some(p => p.host === lead)) data.profiles.push({ host: lead, actorId: `actor-${lead}`,
           modelRequest: hostRequest(leaderPolicyProfile()).model, effortRequest: 'max', roles: ['orchestrator'], revision: 1 });
+        // Leader-only policy (e.g. GPT_A_ONLY: no remote delegation) belongs to the role, not the host:
+        // carry it over before the per-profile cleanup strips it from the former leader.
+        const prior = data.profiles.find(p => p.host === from);
+        const target = data.profiles.find(p => p.host === lead)!;
+        if (prior) {
+          if (prior.coordinationMode !== undefined) target.coordinationMode = prior.coordinationMode;
+          if (prior.preferNativeSubagents !== undefined) target.preferNativeSubagents = prior.preferNativeSubagents;
+          if (prior.maxRequestedNativeWorkers !== undefined) target.maxRequestedNativeWorkers = prior.maxRequestedNativeWorkers;
+        }
+        // Durable marker: other stores adopt the former leader's phases at boot, and keep retrying
+        // across crashes until clearPhaseAdoption() confirms it.
+        data.pendingPhaseAdoption = [...new Set([...(data.pendingPhaseAdoption ?? []), from])];
+      }
+      if (data.pendingPhaseAdoption) {
+        data.pendingPhaseAdoption = data.pendingPhaseAdoption.filter(h => isHost(h) && h !== lead);
+        if (!data.pendingPhaseAdoption.length) delete data.pendingPhaseAdoption;
       }
       // Always record the leader, including on an empty ledger, so the next switch migrates from the right host.
+      const switched = from !== lead ? { from, to: lead } : null;
       data.leader = lead;
       const historical: Record<Host, number> = { 'gpt-a': 0, 'gpt-b': 0, 'grok': 0, 'gemini': 0, 'claude': 0 };
       for (const m of data.messages) {
@@ -111,12 +128,40 @@ export class MeshEngine {
           delete p.coordinationMode; delete p.preferNativeSubagents; delete p.maxRequestedNativeWorkers;
         }
       }
+      return switched;
     };
     normalize(parsed);
     // Persist upgrades inside a transaction; subsequent reads cannot lose historical cursors.
-    x.state = JSON.stringify(parsed) === before ? parsed
-      : x.sqlite.mutate('mesh', x.state, data => normalize(data)).after;
+    // The switch is taken from the committed transaction, not from the pre-read snapshot.
+    if (JSON.stringify(parsed) === before) x.state = parsed;
+    else { const r = x.sqlite.mutate('mesh', x.state, data => normalize(data)); x.state = r.after; x.leaderSwitch = r.result; }
     return x;
+  }
+  /** Former leaders whose open phases other stores still have to adopt (survives crashes). */
+  get pendingPhaseAdoption(): Host[] { return [...(this.state.pendingPhaseAdoption ?? [])]; }
+  /** Called only after every adoption resolved; a crash before this re-runs the (idempotent) adoption. */
+  async clearPhaseAdoption(done: Host[]) {
+    return this.write(d => {
+      if (!d.pendingPhaseAdoption) return;
+      d.pendingPhaseAdoption = d.pendingPhaseAdoption.filter(h => !done.includes(h));
+      if (!d.pendingPhaseAdoption.length) delete d.pendingPhaseAdoption;
+    });
+  }
+  /** After a review read as INTERRUPTED, close its still-queued lenses so no worker picks them up later. */
+  async abortInterruptedReview(caller: Host, reviewId: string) {
+    check(caller === leaderHost(), `Only ${leaderLabel()} may reset a review`);
+    return this.write(d => {
+      const review = (d.reviews ?? []).find(r => r.id === reviewId);
+      check(review, 'Review not found');
+      const works = review.workIds.map(id => d.works.find(w => w.id === id)).filter((w): w is MeshWork => !!w);
+      check(works.some(w => w.state === 'ABORTED_NO_EFFECTS'), 'Review is not interrupted');
+      let aborted = 0;
+      for (const w of works) if (w.state === 'QUEUED') {
+        w.state = 'ABORTED_NO_EFFECTS'; w.completedAt = iso(); w.result = 'Review interrupted by leader switch: sibling lens aborted without effects';
+        this.notify(d, w.target); aborted++;
+      }
+      return aborted;
+    });
   }
 
   private async write<T>(fn: (d: MeshData) => T): Promise<T> {
