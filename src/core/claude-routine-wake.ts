@@ -3,7 +3,6 @@
  * session was created, NOT that authenticated Panter pickup or execution ran.
  * https://platform.claude.com/docs/en/api/claude-code/routines-fire
  */
-import {type WakeSender} from './grok-routine-wake.js';
 export type ClaudeWakeSignal={
   attempted:boolean;accepted:boolean;
   state:'DELIVERY_ONLY'|'SIGNAL_ACCEPTED'|'SIGNAL_FAILED';
