@@ -127,3 +127,28 @@ test('transient delivery attempts preserve event ID and never falsely record a c
   assert.equal(await engine.flush(),0);
   assert.equal(calls,1);
 }));
+
+
+test('Gemini and GPT-B callbacks are separate OAuth actor subscriptions, not aliases',()=>fixture(async dir=>{
+  const received: Array<{subscriber:string;workId:string}>=[];
+  const post:EventPost=async(_url,headers,body)=>{
+    const parsed=JSON.parse(body) as {type?:string;challenge?:string;data?:{workId:string}};
+    if(parsed.type==='verification')
+      return {status:200,body:JSON.stringify({challenge:parsed.challenge})};
+    received.push({subscriber:headers['X-MCP-Subscription-Id']!,workId:parsed.data!.workId});
+    return {status:200,body:''};
+  };
+  const engine=new WorkforceEvents(dir,post);
+  const chat=await engine.subscribe('gpt-b',args);
+  const gemini=await engine.subscribe('gemini',{...args,arguments:{host:'gemini'}});
+  assert.notEqual(chat.id,gemini.id);
+  assert.equal(engine.list('gemini').events[0]!.inputSchema.properties.host.enum[0],'gemini');
+  await assert.rejects(engine.subscribe('gemini',args),/Event filter must match/);
+  assert.equal(engine.queue('gemini',[workId]),1);
+  await engine.flush();
+  assert.deepEqual(received,[{subscriber:gemini.id,workId}]);
+  assert.equal(engine.queue('gpt-b',[workId]),1);
+  await engine.flush();
+  assert.deepEqual(received.map(x=>x.subscriber),[gemini.id,chat.id]);
+  assert.equal(engine.status('gpt-a').hosts.length,2);
+}));
