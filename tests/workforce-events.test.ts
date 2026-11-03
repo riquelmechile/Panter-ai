@@ -18,7 +18,7 @@ const fixture=async(fn:(dir:string)=>Promise<void>)=>{
 
 test('native MCP events are GPT-B actor-bound and advertise only opaque pointer',()=>fixture(async dir=>{
   const e=new WorkforceEvents(dir,async()=>({status:200,body:'{}'}));
-  assert.throws(()=>e.list('gpt-a'),/Only GPT-B or Gemini/);
+  assert.deepEqual(e.list('gpt-a'),{events:[]});
   const catalog=e.list('gpt-b').events[0]!;
   assert.equal(catalog.name,WORK_EVENT);
   assert.deepEqual(Object.keys(catalog.payloadSchema.properties),['workId']);
