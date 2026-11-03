@@ -4,6 +4,8 @@ Follow [`docs/CANONICAL_HARNESS_POLICY.md`](docs/CANONICAL_HARNESS_POLICY.md) fi
 
 # Panter-ai host and agent contract
 
+**Leader:** the single coordinator is the host configured by `PANTER_LEAD_HOST` (default `gpt-a`). Wherever this file says GPT-A coordinates, read "the configured leader"; with another leader, GPT-A is an ordinary worker. See `docs/LEADERSHIP.md`.
+
 This is a remote MCP control plane. Model selection, login and reasoning belong to the connected AI host, **not** to this server. No provider inference APIs or server-side model workers are permitted.
 
 ## Model and coordination requests

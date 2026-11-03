@@ -1,4 +1,4 @@
-import { leaderHost, leaderLabel, appEventHosts } from './core/leadership.js';
+import { leaderHost, leaderLabel, appEventHosts, freezeLeaderHost } from './core/leadership.js';
 import { ExternalOAuthVerifier, staticBearerMatch } from './core/oauth.js';
 import { isAdminPrincipal, parseOwnerTrustedHosts } from './core/owner-trust.js';
 import { EmbeddedOAuth } from './core/embedded-oauth.js';
@@ -35,6 +35,10 @@ import { GitHubDeliveryGate } from './core/github-delivery.js';
 import { PanterRdd } from './core/panter-rdd.js';
 import { LocalGitVerifier } from './core/local-git-verifier.js';
 
+// Fail closed before any store opens on an invalid PANTER_LEAD_HOST; the leader is frozen
+// for this process and never comes from tool input.
+const configuredLeader = freezeLeaderHost();
+console.error(`Panter leader host: ${configuredLeader}`);
 const port = Number(process.env.PANTER_PORT ?? '8080');
 const bind = process.env.PANTER_BIND_HOST ?? '127.0.0.1';
 const authMode = process.env.PANTER_AUTH_MODE ?? 'dev-static';
@@ -141,9 +145,6 @@ if(new Set(Object.values(peerTokens)).size!==Object.keys(peerTokens).length)thro
 function principal(){return principalContext.getStore()??'unknown'}
 function hostPrincipal(){const p=principal();if(!isHost(p))throw new Error('Peer identity required');return p}
 function requireLeader(){if(principal()!==leaderHost())throw new Error(`${leaderLabel()} required`)}
-// Fail closed at boot on an invalid PANTER_LEAD_HOST; the leader never comes from tool input.
-const configuredLeader = leaderHost();
-console.error(`Panter leader host: ${configuredLeader}`);
 const ownerTrustedHosts = parseOwnerTrustedHosts(process.env.PANTER_OWNER_TRUSTED_HOSTS);
 function requireAdmin(){if(!isAdminPrincipal(principal(),ownerTrustedHosts))throw new Error('Admin token required')}
 const missionStatus = z.enum(['DRAFT', 'READY', 'RUNNING', 'VERIFYING', 'DONE', 'BLOCKED']);
@@ -380,7 +381,7 @@ const handler = createMcpHandler(reqCtx => {
         if(!(error instanceof Error&&error.message==='MCP event peer busy'))throw error;
       }
     }
-    for(const host of ['grok','claude'] as const){
+    for(const host of (['grok','claude'] as const).filter(h=>h!==leaderHost())){
       const available=host==='grok'?grokRoutineWake.configured:claudeRoutineWake.configured;
       if(!available||!profiles.some(p=>p.host===host&&p.roles.includes(x.role)))continue;
       let work:Awaited<ReturnType<typeof mesh.delegate>>;

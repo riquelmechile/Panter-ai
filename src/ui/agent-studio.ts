@@ -3,6 +3,8 @@ import { App } from '@modelcontextprotocol/ext-apps';
 const app = new App({ name: 'Panter Agent Studio', version: '0.4.0' });
 const hostNames = ['gpt-a', 'gpt-b', 'grok', 'gemini', 'claude'] as const;
 const roleNames = ['explorer', 'architect', 'implementer', 'verifier', 'reviewer'] as const;
+/** The server keeps exactly one orchestrator profile (PANTER_LEAD_HOST); default GPT-A when none is stored yet. */
+let leader: string = 'gpt-a';
 type Host = typeof hostNames[number];
 type Profile = { host: Host; actorId: string; modelRequest: string; effortRequest: string; roles: string[]; revision: number; preferNativeSubagents?:boolean; maxRequestedNativeWorkers?:number; coordinationMode?:'AUTO'|'GPT_A_ONLY' };
 const hostBox = document.getElementById('hosts')!;
@@ -31,34 +33,34 @@ async function call(name: string, args: Record<string, unknown>): Promise<unknow
 }
 function card(host: Host, existing?: Profile) {
   const article = document.createElement('article'); article.className = 'host';
-  const heading = document.createElement('h2'); heading.textContent = `${host.toUpperCase()}${host === 'gpt-a' ? ' · Orquestador' : ''}`;
+  const heading = document.createElement('h2'); heading.textContent = `${host.toUpperCase()}${host === leader ? ' · Orquestador' : ''}`;
   const subtitle = document.createElement('p'); subtitle.textContent = existing ? `Perfil guardado · revisión ${existing.revision}` : 'Pendiente de configurar';
   article.append(heading, subtitle);
   const actor = field('Alias del actor (no es una credencial)', existing?.actorId ?? `actor-${host}`, 160);
-  const model = field('Modelo solicitado', existing?.modelRequest ?? (host==='gpt-a'?'gpt-6-astra':'host-default'), 120);
+  const model = field('Modelo solicitado', existing?.modelRequest ?? (host===leader&&host==='gpt-a'?'gpt-6-astra':'host-default'), 120);
   const effort = field('Esfuerzo solicitado', existing?.effortRequest ?? 'max', 32);
   for (const inp of [actor, model, effort]) article.append(inp.parentElement!);
   const legend = document.createElement('label'); legend.textContent = 'Roles asignados';
   article.append(legend);
   const roles = document.createElement('div'); roles.className = 'roles';
   const checkboxes: Array<[string, HTMLInputElement]> = [];
-  for (const role of host === 'gpt-a' ? ['orchestrator'] : roleNames) {
+  for (const role of host === leader ? ['orchestrator'] : roleNames) {
     const label = document.createElement('label');
-    const check = document.createElement('input'); check.type = 'checkbox'; check.checked = host === 'gpt-a' || !!existing?.roles.includes(role);
-    check.disabled = host === 'gpt-a';
+    const check = document.createElement('input'); check.type = 'checkbox'; check.checked = host === leader || !!existing?.roles.includes(role);
+    check.disabled = host === leader;
     label.append(check, document.createTextNode(role)); roles.append(label); checkboxes.push([role, check]);
   }
   article.append(roles);
   // Requested GPT-A capacity limits do not attest that the ChatGPT host really
   // exposes native subagents. Effective count is bounded again by host evidence.
-  const nativePrefs=host==='gpt-a'?document.createElement('div'):null;
+  const nativePrefs=host===leader?document.createElement('div'):null;
   let coordination:HTMLSelectElement|null=null;
   let prefer:HTMLInputElement|null=null;
   let maxWorkers:HTMLInputElement|null=null;
   if(nativePrefs){
-    const modeLabel=document.createElement('label');modeLabel.textContent='Coordinación: fuerza de trabajo o GPT-A solo';
+    const modeLabel=document.createElement('label');modeLabel.textContent=`Coordinación: fuerza de trabajo o ${host.toUpperCase()} solo`;
     coordination=document.createElement('select');
-    for(const [value,label] of [['AUTO','Automático: delegar si está disponible'],['GPT_A_ONLY','Solo GPT-A: no delegar fuera']] as const){
+    for(const [value,label] of [['AUTO','Automático: delegar si está disponible'],['GPT_A_ONLY',`Solo ${host.toUpperCase()}: no delegar fuera`]] as const){
       const option=document.createElement('option');option.value=value;option.textContent=label;
       if((existing?.coordinationMode??'AUTO')===value)option.selected=true;coordination.append(option);
     }
@@ -69,7 +71,7 @@ function card(host: Host, existing?: Profile) {
     const caption=document.createElement('label');caption.textContent='Máximo solicitado de subagentes en paralelo (0–32)';
     maxWorkers=document.createElement('input');maxWorkers.type='number';maxWorkers.min='0';maxWorkers.max='32';maxWorkers.step='1';maxWorkers.value=String(existing?.maxRequestedNativeWorkers??32);
     nativePrefs.append(caption,maxWorkers);
-    const explain=document.createElement('p');explain.textContent='GPT-A solicita gpt-6-astra, esfuerzo máximo (xhigh si no existe max), ramas nativas Fast y máximo paralelismo confirmado. Sin subagentes conserva la calidad del modelo raíz. Son solicitudes: el MCP no puede forzar ajustes del host.';nativePrefs.append(explain);
+    const explain=document.createElement('p');explain.textContent='El orquestador solicita su modelo, esfuerzo máximo, ramas nativas rápidas y máximo paralelismo confirmado. Son solicitudes: el MCP no puede forzar ajustes del host.';nativePrefs.append(explain);
     article.append(nativePrefs);
   }
   const save = document.createElement('button'); save.textContent = 'Guardar perfil'; save.type = 'button';
@@ -79,11 +81,11 @@ function card(host: Host, existing?: Profile) {
       const chosen = checkboxes.filter(([, box]) => box.checked).map(([role]) => role);
       if (!chosen.length) throw new Error('Selecciona al menos un rol');
       if (actor.value.trim().length < 3) throw new Error('El alias debe tener al menos 3 caracteres');
-      const count=host==='gpt-a'?Number(maxWorkers!.value):undefined;
-      if(host==='gpt-a'&&(!Number.isInteger(count)||count===undefined||count<0||count>32))throw new Error('Límite nativo inválido');
+      const count=host===leader?Number(maxWorkers!.value):undefined;
+      if(host===leader&&(!Number.isInteger(count)||count===undefined||count<0||count>32))throw new Error('Límite nativo inválido');
       const response = await call('panter_mesh_profile_set', {
         host, actorId: actor.value.trim(), modelRequest: model.value.trim(), effortRequest: effort.value.trim(),
-        roles: chosen, ...(host==='gpt-a'?{coordinationMode:coordination!.value,preferNativeSubagents:prefer!.checked,maxRequestedNativeWorkers:count}:{}), expectedRevision: existing?.revision ?? 0,
+        roles: chosen, ...(host===leader?{coordinationMode:coordination!.value,preferNativeSubagents:prefer!.checked,maxRequestedNativeWorkers:count}:{}), expectedRevision: existing?.revision ?? 0,
       }) as Profile;
       existing = response;
       subtitle.textContent = `Perfil guardado · revisión ${response.revision}`;
@@ -98,6 +100,7 @@ async function load() {
   refresh.disabled = true;
   try {
     const profiles = await call('panter_mesh_profiles', {}) as Profile[];
+    leader = profiles.find(p => p.roles.includes('orchestrator'))?.host ?? 'gpt-a';
     hostBox.replaceChildren(...hostNames.map(host => card(host, profiles.find(p => p.host === host))));
     await loadSpecialists();
   } catch (error) { setStatus(error instanceof Error ? error.message : 'No se pudo consultar MCP', true); }
@@ -119,9 +122,9 @@ function specialistCard(a:Specialist, skills:Skill[], current?:Assignment) {
   article.append(heading,info,subtitle);
   const label=document.createElement('label');label.textContent='Aplicación que ejecutará el agente';
   const select=document.createElement('select');
-  for(const host of hostNames.filter(x=>x!=='gpt-a')){
+  for(const host of hostNames.filter(x=>x!==leader)){
     const option=document.createElement('option');option.value=host;option.textContent=host.toUpperCase();
-    if ((current?.host??'gpt-b')===host)option.selected=true;
+    if ((current?.host??hostNames.find(x=>x!==leader))===host)option.selected=true;
     select.append(option);
   }
   article.append(label,select);

@@ -25,8 +25,15 @@ export function parseLeaderHost(raw: string | undefined): LeaderHost {
   return value as LeaderHost;
 }
 
-/** Read on every call so tests can switch leader per process; production sets it once at boot. */
-export function leaderHost(): LeaderHost { return parseLeaderHost(process.env.PANTER_LEAD_HOST); }
+let frozenLeader: LeaderHost | null = null;
+/** Called once at server boot, before any store opens: the leader is then fixed for the
+ * life of the process and later environment changes cannot move authority. */
+export function freezeLeaderHost(): LeaderHost {
+  if (frozenLeader) return frozenLeader;
+  frozenLeader = parseLeaderHost(process.env.PANTER_LEAD_HOST); return frozenLeader;
+}
+/** Frozen leader in the server; unit tests that never freeze read the environment per call. */
+export function leaderHost(): LeaderHost { return frozenLeader ?? parseLeaderHost(process.env.PANTER_LEAD_HOST); }
 export function isLeader(host: string | null | undefined): boolean { return host === leaderHost(); }
 /** Human-readable leader name used in error messages and tool descriptions. */
 export function leaderLabel(): string { return LABELS[leaderHost()]; }

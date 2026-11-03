@@ -293,6 +293,8 @@ export class EmbeddedOAuth {
     return { uri: result.uri };
   }
   private issue(d: Ledger, clientId: string, host: Host, scopes: string[], family: string = randomUUID()) {
+    // A former leader keeps no leader scope after a leader switch, even through refresh.
+    if (host !== leaderHost()) scopes = scopes.filter(s => s !== 'panter:lead');
     const now = ts();
     d.codes = d.codes.filter(c => c.expiresAt > now - 86400);
     d.tokens = d.tokens.filter(t => t.expiresAt > now - 86400);

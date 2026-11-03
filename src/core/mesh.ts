@@ -64,6 +64,11 @@ export class MeshEngine {
       data.rearmIntents ??= [];
       data.grokWakeAttempts ??= [];
       data.claudeWakeAttempts ??= [];
+      // Leader switch: the leader profile is orchestrator-only and no worker keeps the orchestrator role.
+      for (const p of data.profiles) {
+        if (p.host === leaderHost()) { if (p.roles.join() !== 'orchestrator') p.roles = ['orchestrator']; }
+        else if (p.roles.includes('orchestrator')) p.roles = p.roles.filter(r => r !== 'orchestrator');
+      }
     };
     normalize(parsed);
     // Persist upgrades inside a transaction; subsequent reads cannot lose historical cursors.
@@ -132,7 +137,7 @@ export class MeshEngine {
       const next:ActorProfile={...(before??{
         host:leaderHost(),actorId:`actor-${leaderHost()}`,modelRequest:leaderHost()==='gpt-a'?'gpt-6-astra':'host-default',effortRequest:'max',roles:['orchestrator'],
         preferNativeSubagents:true,maxRequestedNativeWorkers:32,revision:0
-      }),coordinationMode,revision:expectedRevision+1};
+      }),roles:['orchestrator'],coordinationMode,revision:expectedRevision+1};
       if(before)d.profiles[d.profiles.indexOf(before)]=next;else d.profiles.push(next);
       this.notify(d,leaderHost());return next;
     });
@@ -281,7 +286,7 @@ export class MeshEngine {
   async resultGet(caller:Host,workId:string){
     check(caller===leaderHost(),`Only ${leaderLabel()} may read Workforce results`);
     return this.read(d=>{
-      const w=d.works.find(w=>w.id===workId&&w.from===leaderHost());
+      const w=d.works.find(w=>w.id===workId);
       check(w&&['COMPLETED','FAILED'].includes(w.state),'Work result not found');
       return {workId:w.id,missionId:w.missionId,host:w.target,state:w.state,
         result:w.result,receiptDigest:w.receiptDigest,completedAt:w.completedAt};
@@ -386,7 +391,7 @@ export class MeshEngine {
   async reserveGrokWake(caller:Host,workId:string){
     check(caller===leaderHost(),`Only ${leaderLabel()} may signal delegated work`);
     return this.write(d=>{
-      const w=d.works.find(w=>w.id===workId&&w.from===leaderHost()&&w.target==='grok');
+      const w=d.works.find(w=>w.id===workId&&w.target==='grok');
       check(w,'Grok work not found');
       const existing=(d.grokWakeAttempts??[]).find(a=>a.workId===workId);
       if(existing)return {send:false,attempt:existing};
@@ -412,7 +417,7 @@ export class MeshEngine {
   async grokWakeStatus(caller:Host,workId:string){
     check(caller===leaderHost(),`Only ${leaderLabel()} may inspect Grok wake attempts`);
     return this.read(d=>{
-      const w=d.works.find(w=>w.id===workId&&w.from===leaderHost()&&w.target==='grok');
+      const w=d.works.find(w=>w.id===workId&&w.target==='grok');
       check(w,'Grok work not found');
       const a=(d.grokWakeAttempts??[]).find(x=>x.workId===workId);
       return {workId,state:a?.state??'DELIVERY_ONLY',statusCode:a?.statusCode??null,
@@ -489,7 +494,7 @@ export class MeshEngine {
   async reserveClaudeWake(caller:Host,workId:string){
     check(caller===leaderHost(),`Only ${leaderLabel()} may signal delegated work`);
     return this.write(d=>{
-      const w=d.works.find(w=>w.id===workId&&w.from===leaderHost()&&w.target==='claude');
+      const w=d.works.find(w=>w.id===workId&&w.target==='claude');
       check(w,'Claude work not found');
       const existing=(d.claudeWakeAttempts??[]).find(a=>a.workId===workId);
       if(existing)return {send:false,attempt:existing};
@@ -517,7 +522,7 @@ export class MeshEngine {
   async claudeWakeStatus(caller:Host,workId:string){
     check(caller===leaderHost(),`Only ${leaderLabel()} may inspect Claude wake attempts`);
     return this.read(d=>{
-      const w=d.works.find(w=>w.id===workId&&w.from===leaderHost()&&w.target==='claude');
+      const w=d.works.find(w=>w.id===workId&&w.target==='claude');
       check(w,'Claude work not found');
       const a=(d.claudeWakeAttempts??[]).find(x=>x.workId===workId);
       return {workId,state:a?.state??'DELIVERY_ONLY',statusCode:a?.statusCode??null,
@@ -611,6 +616,7 @@ export class MeshEngine {
         const binding=activeBindings(d).find(b=>b.agentId===ids[i]);
         const original=configured[i]!,packet=packets[i]!;
         check(binding?.revision===original.revision && binding.host===original.host,'Review binding changed during dispatch');
+        check(binding.host!==leaderHost(),'Specialists require a worker host');
         const profile=d.profiles.find(p=>p.host===binding.host);
         check(profile?.roles.includes('reviewer'),'Review host is not authorized for reviewer role');
         const work:MeshWork={id:randomUUID(),missionId:input.missionId,from:leaderHost(),target:binding.host,role:'reviewer',instruction:packet.instruction,
@@ -639,6 +645,7 @@ export class MeshEngine {
 
   pending(caller: Host) { return this.read(d => d.works.filter(w => w.target === caller && w.state === 'QUEUED').map(w => ({ workId: w.id, missionId: w.missionId, role: w.role, createdAt: w.createdAt }))); }
   async claim(caller: Host, workId: string, leaseSeconds = 300, requireQueued = false) {
+    check(caller!==leaderHost(),'Only workers may claim delegated work');
     check(leaseSeconds >= 30 && leaseSeconds <= 3600, 'Invalid lease');
     const offered=await this.read(d=>d.works.find(w=>w.id===workId&&w.target===caller)??null);
     if(offered?.role==='implementer'&&this.writeGuard)
@@ -711,6 +718,7 @@ export class MeshEngine {
     }
   }
   async heartbeat(caller: Host, id: string, attemptId: string, generation: number, leaseSeconds = 300) {
+    check(caller!==leaderHost(),'Only workers may renew delegated work');
     return this.write(d => {
       const w = d.works.find(w => w.id === id && w.target === caller);
       check(w && w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
@@ -721,6 +729,7 @@ export class MeshEngine {
     });
   }
   async complete(caller: Host, id: string, attemptId: string, generation: number, result: string, success = true) {
+    check(caller!==leaderHost(),'Only workers may complete delegated work');
     check(result.length <= 50000, 'Result too long');
     return this.write(d => {
       const w = d.works.find(w => w.id === id && w.target === caller);
@@ -819,7 +828,7 @@ export class MeshEngine {
     return this.read(d => ({
       revision: d.inboxRevision[caller],
       messages: d.messages.filter(m => m.to === caller && m.inboxRevision > sinceRevision),
-      works: d.works.filter(w => w.target === caller || (caller === leaderHost() && w.from === leaderHost())).map(w => ({ id: w.id, missionId: w.missionId, target: w.target, role: w.role, state: w.state, receiptDigest: w.receiptDigest, completedAt: w.completedAt })),
+      works: d.works.filter(w => w.target === caller || caller === leaderHost()).map(w => ({ id: w.id, missionId: w.missionId, target: w.target, role: w.role, state: w.state, receiptDigest: w.receiptDigest, completedAt: w.completedAt })),
     }));
   }
   /** Safe to publish across the host mesh: never include actor-specific counts or secrets. */

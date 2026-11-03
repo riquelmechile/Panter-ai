@@ -111,3 +111,40 @@ test('after switching leader, review bindings that target the new leader are ina
     /All review specialists must be configured first/);
   assert.equal((await m.pending('claude')).length, 0);
 }));
+
+test('switching gpt-a -> claude with persisted data: no leader worker paths, old results readable, roles normalized', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-switch-'));
+  try {
+    process.env.PANTER_LEAD_HOST = 'gpt-a';
+    const before = await MeshEngine.open(dir);
+    await before.setCoordinationMode('gpt-a', 'AUTO', 0);
+    await before.setProfile('gpt-a', { host: 'claude', actorId: 'actor-claude', modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer'] }, 0);
+    await before.setProfile('gpt-a', worker('gpt-b'), 0);
+    const toClaude = await before.delegate('gpt-a', { missionId: 'old', target: 'claude', role: 'reviewer', instruction: 'Old review', idempotencyKey: 'old-claude' });
+    const toB = await before.delegate('gpt-a', { missionId: 'old', target: 'gpt-b', role: 'reviewer', instruction: 'Old check', idempotencyKey: 'old-b' });
+    const c = await before.claim('gpt-b', toB.id);
+    await before.complete('gpt-b', toB.id, c.attemptId!, c.leaseGeneration, 'OLD_RESULT');
+
+    process.env.PANTER_LEAD_HOST = 'claude';
+    const m = await MeshEngine.open(dir);
+    const profiles = await m.profiles();
+    assert.deepEqual(profiles.find(p => p.host === 'claude')?.roles, ['orchestrator']);
+    assert.ok(!profiles.find(p => p.host === 'gpt-a')?.roles.includes('orchestrator'));
+    await assert.rejects(m.claim('claude', toClaude.id), /Only workers may claim delegated work/);
+    await assert.rejects(m.heartbeat('claude', toClaude.id, 'x', 0), /Only workers may renew delegated work/);
+    await assert.rejects(m.complete('claude', toClaude.id, 'x', 0, 'r'), /Only workers may complete delegated work/);
+    assert.match(JSON.stringify(await m.resultGet('claude', toB.id)), /OLD_RESULT/);
+    assert.ok((await m.inbox('claude')).works.some(w => w.id === toB.id));
+    const mode = await m.setCoordinationMode('claude', 'AUTO', profiles.find(p => p.host === 'claude')!.revision);
+    assert.deepEqual(mode.roles, ['orchestrator']);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+// Keep last: freezing is process-wide by design.
+test('freezeLeaderHost pins the leader for the process', async () => {
+  const mod = await import('../src/core/leadership.js');
+  process.env.PANTER_LEAD_HOST = 'claude';
+  assert.equal(mod.freezeLeaderHost(), 'claude');
+  process.env.PANTER_LEAD_HOST = 'gpt-a';
+  assert.equal(mod.leaderHost(), 'claude');
+});
