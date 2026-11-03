@@ -13,21 +13,22 @@ test('no Grok route sends no signal or network call',async()=>{
   assert.equal(calls,0);
 });
 test('Grok native POST uses Bearer and an opaque work ID, no prompt or results',async()=>{
-  let sent:{url:string;body:string;headers:Record<string,string>}|null=null;
+  const calls:Array<{url:string;body:string;headers:Record<string,string>}>=[];
   const wake=new GrokRoutineWake(endpoint,secret,async(url,body,headers)=>{
-    sent={url,body,headers};return 200;
+    calls.push({url,body,headers});return 200;
   });
   const id='00000000-0000-4000-8000-000000000001';
   const result=await wake.dispatch(id);
   assert.equal(result.state,'SIGNAL_ACCEPTED');
   assert.equal(result.accepted,true);
-  assert.ok(sent);
-  assert.equal(sent!.url,endpoint);
-  assert.equal(sent!.headers.authorization,'Bearer '+secret);
-  assert.deepEqual(JSON.parse(sent!.body),{source:'panter-ai',event:'workforce_task_ready',work_id:id});
+  assert.equal(calls.length,1);
+  const sent=calls[0]!;
+  assert.equal(sent.url,endpoint);
+  assert.equal(sent.headers.authorization,'Bearer '+secret);
+  assert.deepEqual(JSON.parse(sent.body),{source:'panter-ai',event:'workforce_task_ready',work_id:id});
   assert.equal(JSON.stringify(wake.describe()).includes(secret),false);
-  assert.ok(!sent!.body.includes('instruction'));
-  assert.ok(!sent!.body.includes('result'));
+  assert.ok(!sent.body.includes('instruction'));
+  assert.ok(!sent.body.includes('result'));
 });
 test('HTTP errors, redirects and timeouts never claim wake observed',async()=>{
   for(const code of [301,302,400,403,429,500,503]){
