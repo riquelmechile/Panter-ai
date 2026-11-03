@@ -688,7 +688,11 @@ const handler = createMcpHandler(reqCtx => {
     server.registerTool('panter_oauth_client_revoke',{
       description:'Admin-only: permanently revoke all active OAuth embedded grants, tokens, codes and pending consent requests for one client ID.',
       inputSchema:z.object({clientId:z.string().regex(/^pc_[A-Za-z0-9_-]{24,64}$/)})
-    },async x=>execute(async()=>{requireAdmin();return {revokedGrants:await embedded.revokeClient(x.clientId)};}));
+    },async x=>execute(async()=>{requireAdmin();
+      const hosts=await embedded.clientHosts(x.clientId);
+      const revokedGrants=await embedded.revokeClient(x.clientId);
+      // A revoked connection must stop receiving work events immediately, not at subscription expiry.
+      return {revokedGrants,droppedEventSubscriptions:workforceEvents.dropOwners(hosts)};}));
   }
   server.registerTool('panter_harness_write_grant',{
     description:`Admin-only explicit bounded write authorization for a particular project/objective; ${leaderLabel()} cannot issue its own permission.`,

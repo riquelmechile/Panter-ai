@@ -114,3 +114,7 @@ Reference: https://developers.google.com/connected-apps/mcp/server-optimization
   human interaction and no duplicate claims before declaring the wake live.
 - CI, independent GitHub review, and Xanxito 4R approval on exact SHA
   are required before deployment.
+
+## Revocar una conexión
+
+`panter_oauth_client_revoke` también borra en el acto las suscripciones a eventos de los hosts de ese cliente, y los avisos pendientes quedan `FAILED` (`SUBSCRIPTION_INACTIVE`). Las suscripciones van por host, no por cliente: si el host tiene otra conexión viva, esa conexión debe volver a suscribirse.

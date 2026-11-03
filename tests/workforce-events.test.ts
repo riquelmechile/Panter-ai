@@ -267,3 +267,23 @@ test('subscriptions last up to 7 days and ask for renewal with a quarter of the 
   assert.ok(s>2_600_000&&s<=2_700_000+5_000,`short refreshBefore ${s}`);
   await assert.rejects(e.subscribe('gpt-b',{...args,ttlMs:1000}),/Invalid event subscription TTL/);
 }));
+
+test('a revoked connection stops receiving work events at once, not at subscription expiry',()=>fixture(async dir=>{
+  let deliveries=0;
+  const post:EventPost=async(_u,_h,b)=>{
+    const body=JSON.parse(b) as {type?:string;challenge?:string};
+    if(body.type==='verification')return {status:200,body:JSON.stringify({challenge:body.challenge})};
+    deliveries++;return {status:200,body:''};
+  };
+  const engine=new WorkforceEvents(dir,post);
+  await engine.subscribe('gpt-b',args);
+  await engine.subscribe('gemini',{...args,arguments:{host:'gemini'},delivery:{...args.delivery,url:callback+'-gemini'}});
+  engine.queue('gpt-b',[workId]);
+  assert.equal(engine.dropOwners(['gpt-b']),1);
+  assert.equal(engine.hasActive('gpt-b'),false);
+  assert.equal(engine.hasActive('gemini'),true);
+  assert.equal(await engine.flush(),0);
+  assert.equal(deliveries,0);
+  assert.equal(engine.status('gpt-a').pending,0);
+  assert.equal(engine.dropOwners([]),0);
+}));

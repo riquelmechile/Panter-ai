@@ -356,6 +356,10 @@ export class EmbeddedOAuth {
         revoked:grants.length>0&&grants.every(g=>g.revoked)};
     }));
   }
+  /** Hosts this client currently holds a live grant for (read before revoking it). */
+  async clientHosts(clientId: string): Promise<Host[]> {
+    return this.read(d => [...new Set(d.grants.filter(g => g.clientId === clientId && !g.revoked).map(g => g.host))]);
+  }
   async revokeClient(clientId: string) {
     check(/^pc_[A-Za-z0-9_-]{24,64}$/.test(clientId),'Invalid client identifier');
     return this.change(d => {
