@@ -354,10 +354,11 @@ export class MeshEngine {
           'Scheduled worker busy');
       }
       if(input.wakeOnly){
-        check(input.target==='grok' && input.role!=='implementer','Grok wake cannot authorize remote writes');
-        check(!d.works.some(w=>w.target==='grok' &&
+        check((input.target==='grok'||input.target==='gpt-b')&&
+          input.role!=='implementer','External event wake cannot authorize remote writes');
+        check(!d.works.some(w=>w.target===input.target &&
           ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state)),
-          'Grok wake peer busy');
+          input.target==='grok'?'Grok wake peer busy':'GPT-B event peer busy');
       }
       if(input.specialist?.allowedEditSurfaces?.length){
         const conflict=d.works.find(w=>w.missionId===input.missionId && w.role==='implementer' && ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state) && (w.specialist?.allowedEditSurfaces??[]).some(a=>input.specialist!.allowedEditSurfaces.some(b=>a===b || a.startsWith(b+'/') || b.startsWith(a+'/'))));
