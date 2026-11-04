@@ -378,3 +378,23 @@ test('narrowing accepts the same folder with or without a trailing slash', () =>
   assert.deepEqual(g.paths, ['docs', 'docs/sub']);
   await assert.rejects(gh.grant('claude', { workId, repository: 'acme/site', ops: ['commit'], paths: ['docs-evil'] }), /can only narrow/);
 }));
+
+test('writer hosts: any grant with commit or pr, revoked or not, whatever the work role; kept with the workforce off', () => fixture({}, async ({ gh, workId, mesh }) => {
+  assert.deepEqual(gh.writerHosts(), []);
+  await gh.grant('claude', { workId, repository: 'acme/site', ops: ['commit', 'pr'] });
+  await gh.revoke('claude', workId);
+  assert.deepEqual(gh.writerHosts(), ['gpt-a']);
+  // The same ledger read by a process whose workforce token was removed.
+  const off = new GitHubWorkforce((gh as any).dir, mesh, leaderHost, {});
+  assert.equal(off.configured, false);
+  assert.deepEqual(off.writerHosts(), ['gpt-a']);
+}));
+
+test('writer hosts: a legacy commit grant narrowed to comment-only keeps its host as a writer', () => fixture({}, async ({ gh, workId, mesh }) => {
+  await gh.grant('claude', { workId, repository: 'acme/site', ops: ['commit', 'pr'] });
+  // Simulate a ledger written before the writers set existed.
+  const db = (gh as any).db;
+  db.mutate('github_workforce', { version: 1, grants: [], audit: [] }, (d: any) => { delete d.writers; });
+  await gh.grant('claude', { workId, repository: 'acme/site', ops: ['comment'] });
+  assert.deepEqual(gh.writerHosts(), ['gpt-a']);
+}));

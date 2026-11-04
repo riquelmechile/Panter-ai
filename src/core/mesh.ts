@@ -29,7 +29,7 @@ export type WorkforceTaskBridge = {taskId:string;host:WorkerHost;protocolEra:'20
 export type WorkforceRearmIntent = {workId:string;host:WorkerHost;status:'PENDING'|'ACKED';createdAt:string;acknowledgedAt?:string};
 export type GrokWakeAttempt = {workId:string;state:'RESERVED'|'SIGNAL_ACCEPTED'|'SIGNAL_FAILED';reservedAt:string;statusCode:number|null;claimedAt?:string};
 export type ClaudeWakeAttempt = GrokWakeAttempt & {sessionId:string|null};
-type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; claudeWakeAttempts?: ClaudeWakeAttempt[]; leader?: Host; pendingPhaseAdoption?: Host[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
+type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; claudeWakeAttempts?: ClaudeWakeAttempt[]; leader?: Host; formerLeaders?: Host[]; pendingPhaseAdoption?: Host[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
 const hosts = new Set<string>(HOSTS);
 const roles = new Set<MeshRole>(['orchestrator', 'explorer', 'architect', 'implementer', 'verifier', 'reviewer']);
 export function isHost(x: string): x is Host { return hosts.has(x); }
@@ -125,6 +125,8 @@ export class MeshEngine {
       }
       // Always record the leader, including on an empty ledger, so the next switch migrates from the right host.
       const switched = from !== lead ? { from, to: lead } : null;
+      // A former leader may have written candidates natively (not as mesh work): remember it.
+      if (switched) data.formerLeaders = [...new Set([...(data.formerLeaders ?? []), from])];
       data.leader = lead;
       const historical: Record<Host, number> = { 'gpt-a': 0, 'gpt-b': 0, 'grok': 0, 'gemini': 0, 'claude': 0 };
       for (const m of data.messages) {
@@ -984,6 +986,14 @@ export class MeshEngine {
       return {workId:w.id,state:w.state,receiptDigest:w.receiptDigest,completedAt:w.completedAt,
         resultAvailable:true,rearmPending:(d.rearmIntents??[]).some(i=>i.workId===id&&i.status==='PENDING')};
     });
+  }
+  /** Hosts that may have written code through Panter: any started writer work in any mission (a candidate is not
+   * tied to the mission that wrote it), and every former leader (native implementation is not mesh work). Their
+   * review receipts never count as independent of a candidate's authors. */
+  authorHosts(){
+    // Ever claimed counts, whatever happened after (an operator "no effects" reconciliation included).
+    return this.read(d=>[...new Set([...d.works.filter(w=>w.role==='implementer'&&w.leaseGeneration>0).map(w=>w.target),
+      ...(d.formerLeaders??[])])]);
   }
   /** Operator-only ledger view; does not expose credentials and cannot stop a worker. */
   uncertainWriters(){
