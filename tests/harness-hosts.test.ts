@@ -213,11 +213,22 @@ test('phase packets carry the leader access note and the completion format; a fe
   assert.match(text, /End of leader notes/);
   assert.match(text, /ACCESS-NOTE gpt-b DISCOVER/);
   assert.match(text, /exactly one JSON object/);
+  assert.match(text, /discoveredPaths/, 'discovery asks for the edit scope');
   const result = 'Done.\n```json\n{"summary": "mapped the area", "evidence": ["read src/a.ts"], "runId": "gpt-b-run-1"}\n```';
   await m.complete('gpt-b', first.next[0]!.workId as string, got.work.attemptId, got.work.leaseGeneration, result);
   const next = await h.tick(s.id, all);
   assert.notEqual(next.status, 'REMOTE_RESULT_NEEDS_STRUCTURED_EVIDENCE');
   assert.equal((await h.get(s.id))!.steps[0]!.status, 'COMPLETE');
+}));
+
+test('a discovery result with discoveredPaths sets the edit scope', () => withHosts(async (h, m) => {
+  const s = await h.start({ project: 'app', objective: 'Repair unknown issue', idempotencyKey: 'n3', writesAuthorized: true });
+  const first = await h.tick(s.id, all);
+  const got = await m.pickup('gpt-b', 300) as any;
+  await m.complete('gpt-b', first.next[0]!.workId as string, got.work.attemptId, got.work.leaseGeneration,
+    JSON.stringify({ summary: 'found it', evidence: ['read src/a.ts'], runId: 'gpt-b-run-2', discoveredPaths: ['src/a.ts'] }));
+  await h.tick(s.id, all);
+  assert.deepEqual((await h.get(s.id))!.paths, ['src/a.ts']);
 }));
 
 test('review lens packets carry the access note for their own host', () => withHosts(async (h, m) => {

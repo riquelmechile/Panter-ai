@@ -97,8 +97,11 @@ export function chooseHarness(input:HarnessInput){
 }
 
 /** How a remote phase reports back, so the harness can record it without the leader re-typing it. */
-const PHASE_COMPLETION_FORMAT='This completion format overrides any output format above. Complete this work with exactly one JSON object and nothing else: {"summary": "<what you did and found>", "evidence": ["<one observed fact per item: commands run and their results, files read, commits made>"], "candidateSha": "<the exact 40-hex commit you produced or verified, if any>", "runId": "<a unique id for this run of yours>"}. Never claim evidence you did not observe.';
-function phaseNotes(access?:string){return [access,PHASE_COMPLETION_FORMAT].filter(Boolean).join('\n\n');}
+function completionFormat(phase:HarnessPhase){
+  const discover=phase==='DISCOVER'?', "discoveredPaths": ["<each repository-relative file the change must edit, at most 16; this becomes the edit scope>"]':'';
+  return `This completion format overrides any output format above. Complete this work with exactly one JSON object and nothing else: {"summary": "<what you did and found>", "evidence": ["<one observed fact per item: commands run and their results, files read, commits made>"], "candidateSha": "<the exact 40-hex commit you produced or verified, if any>", "runId": "<a unique id for this run of yours>"${discover}}. Never claim evidence you did not observe.`;
+}
+function phaseNotes(phase:HarnessPhase,access?:string){return [access,completionFormat(phase)].filter(Boolean).join('\n\n');}
 type PhaseResult={summary:string;evidence:string[];runId?:string;candidateSha?:string;discoveredPaths?:string[]};
 /** Top-level balanced {...} spans of a text, string-aware. */
 function objectSpans(text:string){
@@ -699,7 +702,7 @@ export class AutomaticHarness {
         candidateSha:record.candidateSha??undefined,allowedEditSurfaces:phase.phase==='IMPLEMENT'?record.paths:undefined,
         idempotencyKey:`harness:${record.id}:${phase.id}:${record.candidateSha??'none'}:${record.correctionAttempts??0}:${phase.redispatchGeneration??0}`,
         material:this.hooks.materialFor?await this.hooks.materialFor(record,binding.host):undefined,
-        leaderNotes:phaseNotes(this.hooks.accessFor?.(record,binding.host,phase.phase))});
+        leaderNotes:phaseNotes(phase.phase,this.hooks.accessFor?.(record,binding.host,phase.phase))});
       await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;
         if(st.status==='PENDING'){st.status='ISSUED';st.execution='REMOTE_A2A';st.remoteWorkId=work.id;r.revision++;}});
       await this.dispatched(record,work.id,phase.phase,binding.host);
