@@ -684,9 +684,15 @@ const handler = createMcpHandler(reqCtx => {
       inputSchema:z.object({clientId:z.string().regex(/^pc_[A-Za-z0-9_-]{24,64}$/)})
     },async x=>execute(async()=>{requireAdmin();
       const hosts=await embedded.clientHosts(x.clientId);
-      const revokedGrants=await embedded.revokeClient(x.clientId);
       // A revoked connection must stop receiving work events immediately, not at subscription expiry.
-      return {revokedGrants,droppedEventSubscriptions:workforceEvents.dropOwners(hosts)};}));
+      // Drop before revoking (a crash in between leaves a still-valid client, which can resubscribe) and
+      // again after, so a subscribe verified across the revoke is refused by the epoch check.
+      let dropped=workforceEvents.dropOwners(hosts);
+      const revokedGrants=await embedded.revokeClient(x.clientId);
+      dropped+=workforceEvents.dropOwners(hosts);
+      return {revokedGrants,droppedEventSubscriptions:dropped,
+        hostsToResubscribe:hosts,
+        note:hosts.length?'Event subscriptions are per host: any other live connection of these hosts must subscribe again.':undefined};}));
   }
   server.registerTool('panter_harness_write_grant',{
     description:`Admin-only explicit bounded write authorization for a particular project/objective; ${leaderLabel()} cannot issue its own permission.`,

@@ -17,7 +17,8 @@ type Subscription={id:string;owner:EventHost;url:string;secret:string;expiresAt:
 type Delivery={id:string;subId:string;workId:string;state:'PENDING'|'SENDING'|'ACCEPTED'|'FAILED';
   attempts:number;nextAt:number;lastStatus:number|null;terminalAt?:number;
   failureReason?:'SUBSCRIPTION_INACTIVE'};
-type EventData={version:1;subscriptions:Subscription[];deliveries:Delivery[]};
+/** revocations: per-owner epoch bumped by dropOwners; a subscribe that started before a bump never persists. */
+type EventData={version:1;subscriptions:Subscription[];deliveries:Delivery[];revocations?:Record<string,number>};
 type PostResult={status:number;body:string};
 export type EventPost=(url:string,headers:Record<string,string>,body:string)=>Promise<PostResult>;
 const seed:EventData={version:1,subscriptions:[],deliveries:[]};
@@ -180,7 +181,10 @@ export class WorkforceEvents{
     if(!Number.isInteger(requested)||requested<60_000)throw Error('Invalid event subscription TTL');
     const ttl=Math.min(MAX_EVENT_TTL_MS,requested);
     const id=subId(actor,u.toString());
-    const exists=this.db.read('events',seed).subscriptions.find(s=>s.id===id&&isLive(s)&&s.secret===secret);
+    const current=this.db.read('events',seed);
+    // Revocation epoch seen before the (slow) callback verification; checked again when persisting.
+    const epoch=current.revocations?.[actor]??0;
+    const exists=current.subscriptions.find(s=>s.id===id&&isLive(s)&&s.secret===secret);
     if(!exists){
       const challenge=randomBytes(24).toString('base64url');
       const message='msg_verification_'+randomBytes(12).toString('hex');
@@ -201,6 +205,8 @@ export class WorkforceEvents{
     const saved:Subscription={id,owner:actor,url:u.toString(),secret,
       expiresAt,verifiedAt:new Date().toISOString()};
     this.db.mutate('events',seed,d=>{
+      // Revoked while verifying: the connection that asked is gone, so nothing is stored.
+      if((d.revocations?.[actor]??0)!==epoch)throw Error('Connection revoked during subscription');
       const i=d.subscriptions.findIndex(x=>x.id===id);
       if(i<0)d.subscriptions.push(saved);
       else d.subscriptions[i]=saved;
@@ -228,6 +234,8 @@ export class WorkforceEvents{
     const owners=new Set(hosts);
     if(!owners.size)return 0;
     return this.db.mutate('events',seed,d=>{
+      d.revocations??={};
+      for(const owner of owners)d.revocations[owner]=(d.revocations[owner]??0)+1;
       const dropped=new Set(d.subscriptions.filter(s=>owners.has(s.owner)).map(s=>s.id));
       d.subscriptions=d.subscriptions.filter(s=>!dropped.has(s.id));
       // Close their outbox entries in the same transaction so they never sit ahead of live hosts.
