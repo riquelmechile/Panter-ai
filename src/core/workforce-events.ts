@@ -228,9 +228,13 @@ export class WorkforceEvents{
     const owners=new Set(hosts);
     if(!owners.size)return 0;
     return this.db.mutate('events',seed,d=>{
-      const before=d.subscriptions.length;
-      d.subscriptions=d.subscriptions.filter(s=>!owners.has(s.owner));
-      return before-d.subscriptions.length;
+      const dropped=new Set(d.subscriptions.filter(s=>owners.has(s.owner)).map(s=>s.id));
+      d.subscriptions=d.subscriptions.filter(s=>!dropped.has(s.id));
+      // Close their outbox entries in the same transaction so they never sit ahead of live hosts.
+      const t=now();
+      for(const x of d.deliveries)if(dropped.has(x.subId)&&(x.state==='PENDING'||x.state==='SENDING')){
+        x.state='FAILED';x.terminalAt=t;x.failureReason='SUBSCRIPTION_INACTIVE';}
+      return dropped.size;
     }).result;
   }
   /** Reconcile only real QUEUED pointers for the authenticated host. */
@@ -272,14 +276,18 @@ export class WorkforceEvents{
     for(let n=0;n<Math.min(20,limit);n++){
       const item=this.db.mutate('events',seed,d=>{
         const t=now();
-        const next=d.deliveries.find(x=>(x.state==='PENDING'&&x.nextAt<=t)||
-          (x.state==='SENDING'&&x.nextAt<=t));
-        if(!next)return null;
-        const sub=d.subscriptions.find(s=>s.id===next.subId&&isLive(s,t));
-        if(!sub){next.state='FAILED';next.terminalAt=t;next.failureReason='SUBSCRIPTION_INACTIVE';return null;}
-        if(next.attempts>=5){next.state='FAILED';next.terminalAt=t;return null;}
-        next.attempts++;next.state='SENDING';next.nextAt=t+60_000;
-        return {delivery:{...next},sub:{...sub}};
+        // Dead entries (inactive subscription, attempts exhausted) are closed and skipped in the same
+        // pass, so they can never hold back deliverable events queued behind them.
+        for(;;){
+          const next=d.deliveries.find(x=>(x.state==='PENDING'&&x.nextAt<=t)||
+            (x.state==='SENDING'&&x.nextAt<=t));
+          if(!next)return null;
+          const sub=d.subscriptions.find(s=>s.id===next.subId&&isLive(s,t));
+          if(!sub){next.state='FAILED';next.terminalAt=t;next.failureReason='SUBSCRIPTION_INACTIVE';continue;}
+          if(next.attempts>=5){next.state='FAILED';next.terminalAt=t;continue;}
+          next.attempts++;next.state='SENDING';next.nextAt=t+60_000;
+          return {delivery:{...next},sub:{...sub}};
+        }
       }).result;
       if(!item)break;
       attempted++;

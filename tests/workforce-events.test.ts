@@ -287,3 +287,24 @@ test('a revoked connection stops receiving work events at once, not at subscript
   assert.equal(engine.status('gpt-a').pending,0);
   assert.equal(engine.dropOwners([]),0);
 }));
+
+test('dead outbox entries never hold back live deliveries queued behind them',()=>fixture(async dir=>{
+  const delivered:string[]=[];
+  const post:EventPost=async(url,_h,b)=>{
+    const body=JSON.parse(b) as {type?:string;challenge?:string;data?:{workId:string}};
+    if(body.type==='verification')return {status:200,body:JSON.stringify({challenge:body.challenge})};
+    delivered.push(url);return {status:200,body:''};
+  };
+  const engine=new WorkforceEvents(dir,post);
+  const geminiUrl=callback+'-gemini';
+  await engine.subscribe('gpt-b',args);
+  await engine.subscribe('gemini',{...args,arguments:{host:'gemini'},delivery:{...args.delivery,url:geminiUrl}});
+  const ids=Array.from({length:5},(_,i)=>`00000000-0000-4000-8000-00000000001${i}`);
+  engine.queue('gpt-b',ids);
+  engine.queue('gemini',['00000000-0000-4000-8000-000000000099']);
+  // Revoking GPT-B closes its five entries at once; the Gemini event is delivered on the next flush.
+  assert.equal(engine.dropOwners(['gpt-b']),1);
+  assert.equal(engine.status('gpt-a').pending,1);
+  assert.equal(await engine.flush(),1);
+  assert.deepEqual(delivered,[geminiUrl]);
+}));
