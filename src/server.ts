@@ -143,6 +143,8 @@ async function checkpoint(runId:string){
 }
 
 const principalContext = new AsyncLocalStorage<string>();
+/** Re-validates the current request's bearer later in the same request (revocation while in flight). */
+const credentialRecheck = new AsyncLocalStorage<() => Promise<boolean>>();
 const peerTokens: Record<string,string> = authMode === 'dev-static' ? JSON.parse(process.env.PANTER_PEER_TOKENS ?? '{}') : {};
 for(const [host,secret] of Object.entries(peerTokens)){if(!isHost(host)||typeof secret!=='string'||secret.length<24||secret===token)throw new Error('Invalid PANTER_PEER_TOKENS');}
 if(new Set(Object.values(peerTokens)).size!==Object.keys(peerTokens).length)throw new Error('Peer tokens must be unique');
@@ -356,7 +358,8 @@ const handler = createMcpHandler(reqCtx => {
     return (await memoryFor(project)).save(hostPrincipal(),save);
   }));
   // Native, actor-scoped MCP Events wire; requires a client supporting events.
-  registerWorkforceEventWire(server,workforceEvents,hostPrincipal,mesh);
+  registerWorkforceEventWire(server,workforceEvents,hostPrincipal,mesh,
+    ()=>(credentialRecheck.getStore()??(async()=>true))());
 
   // Worker learning/proposals stay in panter_mesh_message until GPT-A
   // independently verifies them and chooses to save them in Engram.
@@ -933,7 +936,15 @@ const http = createServer(async (req, res) => {
     res.end('Unauthorized'); return;
   }
   res.setHeader('Cache-Control', 'no-store');
-  try { await principalContext.run(actor,()=>nodeHandler(req, res)); }
+  const authorization=req.headers.authorization;
+  const recheck=async()=>{
+    try{
+      if(embedded)return (await embedded.authenticate(authorization))===actor;
+      if(oauth)return oauth.verifyBearer(authorization)===actor;
+      return true;
+    }catch{return false;}
+  };
+  try { await credentialRecheck.run(recheck,()=>principalContext.run(actor!,()=>nodeHandler(req, res))); }
   catch (error) {
     console.error('MCP request failed:', error instanceof Error ? error.message : 'error');
     if (!res.headersSent) res.writeHead(500);
