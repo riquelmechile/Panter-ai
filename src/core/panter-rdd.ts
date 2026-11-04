@@ -8,7 +8,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { NativeSubagentReview } from './native-review-workflow.js';
 import type { MeshEngine } from './mesh.js';
-import { assessMeshReview } from './native-review.js';
+import { assessMeshReview, lensEnvelope } from './native-review.js';
 import type { GitHubDeliveryGate, GitHubDecision } from './github-delivery.js';
 import type { LocalGitVerifier, LocalGitDecision } from './local-git-verifier.js';
 import { verifyRunnerSignature } from './review-attestation.js';
@@ -133,7 +133,8 @@ export class PanterRdd {
       receipts=r.work.map(w=>w.receiptDigest??'');
       // Multiple roles may run on one authenticated peer host if a trusted runner
       // attests genuinely distinct executions. Host names alone prove no independence.
-      const parsed=r.work.map(w=>{try{return JSON.parse(w.result??'') as Record<string,unknown>;}catch{return null;}});
+      // Same normalization as assessMeshReview: the lens envelope bound to this agent and SHA, or nothing.
+      const parsed=r.work.map(w=>{const e=lensEnvelope(w.result??'',w.agentId??'',current.candidateSha);return typeof e==='object'?e as Record<string,unknown>:null;});
       const ids=parsed.map(d=>d?.subagentRunId).filter((v):v is string=>typeof v==='string');
       independence=complete&&r.work.every(w=>w.host!==leaderHost())&&ids.length===r.work.length&&
         new Set(ids).size===ids.length&&ids.every(id=>id!==leaderHost()&&!authorRuns.has(id));

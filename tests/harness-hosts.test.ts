@@ -328,3 +328,29 @@ test('copied placeholders in any field are a template echo, not a result', async
   assert.equal(structuredResult('{"summary":"done","evidence":["e"],"runId":"<a unique id for this run of yours>"}'), null);
   assert.equal(structuredResult('{"summary":"<Button> fixed","evidence":["e"]}')?.summary, '<Button> fixed');
 });
+
+test('4R lens reports: wrapped or nested envelopes are normalized, but only when bound to the lens and SHA', async () => {
+  const { lensEnvelope } = await import('../src/core/native-review.js');
+  const env = { agentId: 'review-risk', candidateSha: sha, findings: [] };
+  assert.equal(typeof lensEnvelope(JSON.stringify(env), 'review-risk', sha), 'object');
+  assert.equal(typeof lensEnvelope('Review done:\n```json\n' + JSON.stringify(env) + '\n```\nexecution_meta: model=x', 'review-risk', sha), 'object');
+  const nested = { candidateSha: sha, review_result: { lens_results: [{ lens: 'review-reliability', findings: [{ id: 'R1', location: 'a.js:1', severity: 'WARNING', claim: 'c', proof_refs: ['changed-hunk:a.js:1'] }] }] } };
+  const n = lensEnvelope(JSON.stringify(nested), 'review-reliability', sha);
+  assert.ok(typeof n === 'object' && n.findings.length === 1 && Array.isArray((n.findings[0] as any).proofRefs));
+  assert.equal(lensEnvelope(JSON.stringify({ review_result: { lens_results: [{ lens: 'review-risk', findings: [] }] } }), 'review-risk', sha), 'UNBOUND');
+  assert.equal(lensEnvelope(JSON.stringify({ ...env, agentId: 'review-resilience' }), 'review-risk', sha), 'UNBOUND');
+  assert.equal(lensEnvelope(JSON.stringify({ ...env, candidateSha: 'b'.repeat(40) }), 'review-risk', sha), 'UNBOUND');
+  assert.equal(lensEnvelope('Looks good to me, approve.', 'review-risk', sha), 'UNSTRUCTURED');
+  const other = { ...env, findings: [{ location: 'x:1', severity: 'CRITICAL', proofRefs: ['y'] }] };
+  assert.equal(lensEnvelope(JSON.stringify(env) + '\n' + JSON.stringify(other), 'review-risk', sha), 'UNBOUND');
+});
+
+test('remote 4R lens packets carry the exact review envelope for their own lens and SHA', () => withHosts(async (h, m) => {
+  const id = await toReview(h, 'n5');
+  await h.tick(id, all);
+  const grok = JSON.stringify(await m.pickup('grok', 300));
+  assert.match(grok, /overrides any output format above \(including \\"rows\\" or \\"review_result\\" shapes\)/);
+  assert.match(grok, new RegExp(`\\\\"candidateSha\\\\": \\\\"${sha}\\\\"`));
+  assert.match(grok, /\\"agentId\\": \\"review-(risk|resilience)\\"/);
+  assert.match(grok, /subagentRunId/);
+}));

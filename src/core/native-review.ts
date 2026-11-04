@@ -3,6 +3,7 @@
  * Disabled by default, and limited to operator-configured local repository and binary.
  */
 import {childEnv} from './child-env.js';
+import { jsonCandidates } from './json-extract.js';
 import { execFile } from 'node:child_process';
 import { realpath } from 'node:fs/promises';
 import { promisify } from 'node:util';
@@ -44,6 +45,30 @@ export class NativeReviewBridge {
   status(){return this.readOnly('status',['status','--cwd',this.root,'--contract','gentle-ai.review-integration/v2','--next-transition','--json']);}
 }
 
+type LensFinding={location:string;severity:string;proofRefs:unknown[]};
+const SEVERITIES=['BLOCKER','CRITICAL','WARNING','SUGGESTION'];
+/** One lens report as the Panter envelope {agentId, candidateSha, findings[]}, bound to this exact lens and SHA.
+ * Hosts often wrap it in prose or fences, or nest it as review_result.lens_results[] (still with candidateSha), or
+ * write proof_refs: those forms are normalized. Without an explicit matching agentId and candidateSha the report
+ * stays unbound. A free-form approval is never accepted. */
+export function lensEnvelope(text:string,agentId:string,candidateSha:string):(Record<string,any>&{findings:LensFinding[]})|'UNSTRUCTURED'|'UNBOUND'{
+  if(text.length>100_000)return 'UNSTRUCTURED';
+  const objects:Record<string,any>[]=[];
+  for(const c of jsonCandidates(text)){try{const v=JSON.parse(c);if(v&&typeof v==='object'&&!Array.isArray(v))objects.push(v);}catch{/* not JSON */}}
+  if(!objects.length)return 'UNSTRUCTURED';
+  const valid=new Map<string,Record<string,any>&{findings:LensFinding[]}>();
+  for(const obj of objects){
+    const nested=Array.isArray(obj.review_result?.lens_results)?obj.review_result.lens_results.filter((x:any)=>x&&(x.agentId??x.lens)===agentId):[];
+    const forms=[obj,...nested.map((x:any)=>({...x,agentId:x.agentId??x.lens,candidateSha:x.candidateSha??obj.candidateSha??obj.review_result?.candidateSha}))];
+    for(const f of forms){
+      if(f.agentId!==agentId||f.candidateSha!==candidateSha||!Array.isArray(f.findings))continue;
+      const findings=f.findings.map((x:any)=>x&&typeof x==='object'?{...x,proofRefs:x.proofRefs??x.proof_refs}:x);
+      const ok=findings.every((x:any)=>!!x&&typeof x==='object'&&typeof x.location==='string'&&SEVERITIES.includes(x.severity)&&Array.isArray(x.proofRefs)&&x.proofRefs.length>0);
+      if(ok){const r={...f,findings};valid.set(JSON.stringify(r),r);}
+    }
+  }
+  return valid.size===1?[...valid.values()][0]!:'UNBOUND';
+}
 export function assessMeshReview(input:{candidateSha:string;kind:'4r'|'judgment-day';work:Array<{agentId?:string;state:string;receiptDigest:string|null;result:string|null;host:string}>}){
   const expected=input.kind==='4r'?['review-risk','review-readability','review-reliability','review-resilience']:['jd-judge-a','jd-judge-b'];
   const reasons:string[]=[];
@@ -53,15 +78,10 @@ export function assessMeshReview(input:{candidateSha:string;kind:'4r'|'judgment-
   const summaries=input.work.map(w=>{
     if(!expected.includes(w.agentId??''))reasons.push('Unexpected reviewer identity');
     if(w.state!=='COMPLETED'||!w.receiptDigest||!w.result){reasons.push(`Missing finished receipt: ${w.agentId}`);return {agentId:w.agentId,accepted:false,findings:null};}
-    let parsed:unknown;try{parsed=JSON.parse(w.result)}catch{reasons.push(`Unstructured report: ${w.agentId}`);return {agentId:w.agentId,accepted:false,findings:null};}
-    if(!parsed||typeof parsed!=='object'){reasons.push(`Invalid report: ${w.agentId}`);return {agentId:w.agentId,accepted:false,findings:null};}
-    const obj=parsed as Record<string,unknown>;
-    // Accept a Panter envelope, not a free-form model approval. Never call it native Go authority.
-    const validated=obj.candidateSha===input.candidateSha&&obj.agentId===w.agentId&&Array.isArray(obj.findings)&&
-      (obj.findings as unknown[]).every(f=>!!f&&typeof f==='object'&&typeof (f as any).location==='string'&&typeof (f as any).severity==='string'&&
-        ['BLOCKER','CRITICAL','WARNING','SUGGESTION'].includes((f as any).severity)&&Array.isArray((f as any).proofRefs)&& (f as any).proofRefs.length>0);
-    if(!validated)reasons.push(`Unbound or insufficient report: ${w.agentId}`);
-    return {agentId:w.agentId,accepted:validated,findings:validated?(obj.findings as unknown[]).length:null};
+    const envelope=lensEnvelope(w.result,w.agentId??'',input.candidateSha);
+    if(envelope==='UNSTRUCTURED'){reasons.push(`Unstructured report: ${w.agentId}`);return {agentId:w.agentId,accepted:false,findings:null};}
+    if(envelope==='UNBOUND'){reasons.push(`Unbound or insufficient report: ${w.agentId}`);return {agentId:w.agentId,accepted:false,findings:null};}
+    return {agentId:w.agentId,accepted:true,findings:envelope.findings.length};
   });
   return {candidateSha:input.candidateSha,kind:input.kind,reviewers:summaries,
     status:reasons.length?'EVIDENCE_INCOMPLETE':'EVIDENCE_COLLECTED_UNVERIFIED',reasons,
