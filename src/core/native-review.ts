@@ -50,26 +50,24 @@ const SEVERE_VALUE=/\b(critical|blocker)\b/i;
 /** A lens report is strict: the whole text is ONE JSON object, optionally inside a single code fence. Any prose
  * outside it makes the report unstructured, so nothing written elsewhere can contradict what is counted. */
 function strictJson(text:string):Record<string,any>|null{
-  let t=text.trim();
+  let t=text.replace(/\r\n/g,'\n').trim();
   const fence=/^```[a-zA-Z0-9_-]*[ \t]*\n([\s\S]*)\n```$/.exec(t);
   if(fence){t=fence[1]!.trim();if(t.includes('\n```'))return null;}
   if(!t.startsWith('{'))return null;
   try{const v=JSON.parse(t);return v&&typeof v==='object'&&!Array.isArray(v)?v:null;}catch{return null;}
 }
 /** Severe values anywhere in the parsed report under severity-like keys (severity, sev, level, priority and
- * variants such as severity_level), whatever the value's shape. Iterative and depth-bounded. */
+ * variants such as severity_level), whatever the value's shape: strings inside arrays or objects under such a key
+ * count too. Iterative; anything deeper than the bound counts as severe (fail closed). */
 function severeUnderSeverityKeys(root:unknown){
-  let n=0;const stack:Array<[unknown,number]>=[[root,0]];
+  let n=0;const stack:Array<[unknown,number,boolean]>=[[root,0,false]];
   while(stack.length){
-    const [v,depth]=stack.pop()!;
-    if(!v||typeof v!=='object'||depth>64)continue;
-    for(const [k,x] of Array.isArray(v)?v.map((x,i)=>[String(i),x] as const):Object.entries(v)){
-      if(/sev|level|priority/i.test(k)&&x!=null){
-        const shown=typeof x==='string'?x:(()=>{try{return JSON.stringify(x)??'';}catch{return '';}})();
-        if(SEVERE_VALUE.test(shown))n++;
-      }
-      if(x&&typeof x==='object')stack.push([x,depth+1]);
-    }
+    const [v,depth,underSeverity]=stack.pop()!;
+    if(typeof v==='string'){if(underSeverity&&SEVERE_VALUE.test(v))n++;continue;}
+    if(!v||typeof v!=='object')continue;
+    if(depth>64){n++;continue;}
+    const entries=Array.isArray(v)?v.map(x=>['',x] as const):Object.entries(v);
+    for(const [k,x] of entries)stack.push([x,depth+1,underSeverity||(k!==''&&/sev|level|priority/i.test(k))]);
   }
   return n;
 }

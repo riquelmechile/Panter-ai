@@ -378,6 +378,11 @@ test('a report accepted as clean carries no severe value anywhere, in any shape;
   const a = assessMeshReview({ candidateSha: sha, kind: '4r', work });
   assert.equal(a.status, 'EVIDENCE_INCOMPLETE');
   assert.ok(a.reasons.some((r: string) => /Severe finding\(s\) reported in an unaccepted report: review-risk \(1\)/.test(r)));
+  // Too deep to check counts as severe; a severe string deep inside a severity value counts.
+  const nest = (d: number, leaf: unknown): unknown => d === 0 ? leaf : { a: nest(d - 1, leaf) };
+  assert.equal(lensEnvelope(JSON.stringify({ ...clean, x: nest(70, { severity: 'CRITICAL' }) }), 'review-risk', sha), 'UNBOUND');
+  assert.equal(lensEnvelope(JSON.stringify({ ...clean, severity_x: [[[['CRITICAL']]]] }), 'review-risk', sha), 'UNBOUND');
+  assert.equal(typeof lensEnvelope(JSON.stringify({ ...clean, x: nest(20, { note: 'fine' }) }), 'review-risk', sha), 'object');
   // Deep nesting never crashes.
   const deep = '{"agentId":"review-risk","candidateSha":"' + sha + '","findings":[],"x":' + '['.repeat(5000) + ']'.repeat(5000) + '}';
   assert.doesNotThrow(() => lensEnvelope(deep, 'review-risk', sha));
