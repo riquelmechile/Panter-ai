@@ -105,3 +105,39 @@ test('withdrawing never touches a started writer; transport-held read-only work 
   assert.equal((await m.withdrawUnstarted('gpt-a', reader.id, 'mail unanswered')).withdrawn, true);
   await assert.rejects(m.withdrawUnstarted('grok' as any, reader.id, 'x'), /Only/);
 }));
+
+test('a withdrawal whose harness write was lost still falls back to native, never back to the same host', () => withHosts(async (h, m, { dispatched }) => {
+  const s = await h.start({ project: 'app', objective: 'Repair unknown issue', idempotencyKey: 'c1', writesAuthorized: true });
+  const first = await h.tick(s.id, all);
+  // The mesh withdrawal lands but the run is not updated (crash or concurrent tick).
+  await m.withdrawUnstarted('gpt-a', first.next[0]!.workId as string, 'timeout');
+  assert.equal((await h.tick(s.id, all)).status, 'REMOTE_NO_EFFECTS_RECONCILED');
+  const step = (await h.get(s.id))!.steps[0]!;
+  assert.equal(step.nativeOnly, true); assert.equal(step.fallbackFrom, 'gpt-b');
+  const next = await h.tick(s.id, all);
+  assert.notEqual(next.status, 'REMOTE_A2A_DISPATCHED');
+  assert.equal(dispatched.filter(d => d.phase === 'DISCOVER').length, 1);
+}));
+
+test('a lens withdrawn before the run recorded it restarts the review native, not remote', () => withHosts(async (h, m, { dispatched }) => {
+  const s = await h.start({ project: 'app', objective: 'Fix login security', idempotencyKey: 'c2', writesAuthorized: true, changeSurfaces: ['src/auth.ts'] });
+  let t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Plan', evidence: ['plan'] });
+  t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Done', evidence: ['tests'], candidateSha: sha, runId: 'i1' });
+  t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Verified', evidence: ['checks'], candidateSha: sha, runId: 'v1' });
+  await h.tick(s.id, all);
+  const lens = (await m.inbox('gpt-a')).works.find(w => w.role === 'reviewer' && w.target === 'gemini')!;
+  await m.withdrawUnstarted('gpt-a', lens.id, 'timeout');
+  await h.tick(s.id, all);
+  const run = (await h.get(s.id))!;
+  assert.equal(run.reviewNativeOnly, true);
+  assert.equal(run.reviewTransport, 'NATIVE');
+  assert.equal(dispatched.filter(d => d.phase === 'REVIEW').length, 4);
+}));
+
+test('retransmitting a dispatch whose leader material changed returns the same work', () => withHosts(async (_h, m) => {
+  const base = { missionId: 'mm', agentId: 'gentle-ai-explore', objective: 'look', idempotencyKey: 'k1' };
+  const a = await m.delegateBoundSpecialist('gpt-a', { ...base });
+  const b = await m.delegateBoundSpecialist('gpt-a', { ...base, material: 'diff' });
+  assert.equal(b.id, a.id);
+  await assert.rejects(m.delegateBoundSpecialist('gpt-a', { ...base, objective: 'something else', material: 'diff' }), /Idempotency conflict/);
+}));

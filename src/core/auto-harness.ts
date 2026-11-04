@@ -381,9 +381,11 @@ export class AutomaticHarness {
       if(work?.state==='ABORTED_NO_EFFECTS'){
         await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;
           const st=r.steps.find(x=>x.id===phase.id)!;
-          ensure(st.execution==='REMOTE_A2A'&&st.remoteWorkId===work.id&&st.status==='ISSUED',
-            'Cannot reset a different or completed writer');
+          // A concurrent tick may already have reset this step after withdrawing it.
+          if(!(st.execution==='REMOTE_A2A'&&st.remoteWorkId===work.id&&st.status==='ISSUED'))return;
           st.execution=undefined;st.remoteWorkId=undefined;st.status='PENDING';
+          // Withdrawn for a missed pickup: never re-send to that host, run it native.
+          if(work.withdrawn){st.nativeOnly=true;st.fallbackFrom=work.target;}
           st.redispatchGeneration=(st.redispatchGeneration??0)+1;r.revision++;
         });
         return {...common,status:'REMOTE_NO_EFFECTS_RECONCILED',phaseId:phase.id,workId:work.id,
@@ -545,7 +547,10 @@ export class AutomaticHarness {
         // Interrupted by a leader switch: close its queued lenses, drop the session and start a fresh
         // attempt (native until rebound).
         await this.mesh.abortInterruptedReview(leaderHost(),now.reviewId);
-        await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(r.reviewId===now.reviewId){r.reviewId=null;r.reviewTransport=null;r.reviewAttempt=(r.reviewAttempt??0)+1;r.revision++;}});
+        // A lens withdrawn for a missed pickup means its host did not show up: the retry runs native.
+        const pickupMissed=review.work.some(w=>w.withdrawn);
+        await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(r.reviewId===now.reviewId){r.reviewId=null;r.reviewTransport=null;r.reviewAttempt=(r.reviewAttempt??0)+1;
+          if(pickupMissed)r.reviewNativeOnly=true;r.revision++;}});
         return this.tick(runId,runtime);
       }
       if(review.stage==='AWAITING_REPORTS'&&this.hooks.pickupTimeoutMs){

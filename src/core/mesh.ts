@@ -6,7 +6,7 @@ import { summarizeWorkforce, validateRouteReport, type WorkerHost, type WorkerOb
 import { createHash, randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import { agentDefinition, checkSkills, specialistPacket, REVIEW_4R, JUDGMENT_DAY, type GentleSkillId } from './gentle-catalog.js';
+import { agentDefinition, checkSkills, specialistPacket, packetWithoutMaterial, REVIEW_4R, JUDGMENT_DAY, type GentleSkillId } from './gentle-catalog.js';
 
 export const HOSTS = ['gpt-a', 'gpt-b', 'grok', 'gemini', 'claude'] as const;
 export type Host = typeof HOSTS[number];
@@ -21,7 +21,7 @@ export const EFFORT_REQUEST_PATTERN = /^[A-Za-z0-9._-]{1,32}$/;
 export type WorkerExecutionRequest = { serviceTier?: string; stream?: boolean; parallelToolCalls?: boolean; maxNativeSubagents?: number };
 export type WorkExecutionRequest = WorkerExecutionRequest & { status: 'REQUESTED_UNVERIFIED'; model: string; reasoningEffort: string };
 export type MeshMessage = { id: string; missionId: string; from: Host; to: Host; workId: string | null; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' | 'RESULT'; text: string; createdAt: string; inboxRevision: number };
-export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; transportClaim?: boolean };
+export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; transportClaim?: boolean; withdrawn?: boolean };
 export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
 export type WorkforceTaskBridge = {taskId:string;host:WorkerHost;protocolEra:'2025-11-25'|'2026-07-28';status:'ARMED'|'DELIVERED'|'CANCELLED'|'EXPIRED';createdAt:string;expiresAt:string;workId:string|null};
@@ -460,7 +460,12 @@ export class MeshEngine {
     check(caller===leaderHost(),`Only ${leaderLabel()} can delegate`);
     const binding=await this.read(d=>activeBindings(d).find(b=>b.agentId===input.agentId)??null);
     check(binding,'Specialist must be configured in Agent Studio');
+    // Leader material (e.g. a diff fetched from GitHub) may differ between retries of the same dispatch;
+    // a retransmission returns the already-delegated work instead of conflicting on the packet text.
     const packet=await specialistPacket({agentId:binding.agentId,skillIds:binding.skillIds,objective:input.objective,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,candidateSha:input.candidateSha,allowedEditSurfaces:input.allowedEditSurfaces,material:input.material});
+    const dup=await this.read(d=>d.works.find(w=>w.missionId===input.missionId&&w.idempotencyKey===input.idempotencyKey)??null);
+    if(dup&&dup.target===binding.host&&dup.specialist?.agentId===binding.agentId&&dup.specialist.bindingRevision===binding.revision&&
+      dup.specialist.candidateSha===input.candidateSha&&packetWithoutMaterial(dup.instruction)===packetWithoutMaterial(packet.instruction))return dup;
     return this.delegate(caller,{missionId:input.missionId,target:binding.host,role:packet.role,instruction:packet.instruction,idempotencyKey:input.idempotencyKey,
       specialist:{agentId:packet.agentId,skillIds:packet.skillIds,packetDigest:packet.digest,assetDigests:packet.assetDigests,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,bindingRevision:binding.revision,candidateSha:input.candidateSha,allowedEditSurfaces:packet.allowedEditSurfaces}});
   }
@@ -782,7 +787,7 @@ export class MeshEngine {
       const interrupted=reviewInterrupted(work as MeshWork[]);
       return {review,stage:interrupted?'INTERRUPTED' as const:terminal?'READY_FOR_CONTROLLER' as const:'AWAITING_REPORTS' as const,
         nativeReviewAuthority:false,
-        work:work.map(w=>({workId:w!.id,agentId:w!.specialist?.agentId,packetDigest:w!.specialist?.packetDigest,host:w!.target,state:w!.state,receiptDigest:w!.receiptDigest,result:w!.result}))};
+        work:work.map(w=>({workId:w!.id,agentId:w!.specialist?.agentId,packetDigest:w!.specialist?.packetDigest,host:w!.target,state:w!.state,receiptDigest:w!.receiptDigest,result:w!.result,withdrawn:w!.withdrawn===true}))};
     });
   }
 
@@ -936,7 +941,7 @@ export class MeshEngine {
       check(w.role !== 'implementer' || w.state === 'QUEUED', 'A started writer is never withdrawn automatically');
       check(w.state === 'QUEUED' || (w.state === 'RUNNING' && w.transportClaim === true), 'Work already started by its worker');
       w.state = 'ABORTED_NO_EFFECTS'; w.attemptId = null; w.leaseUntil = null; w.completedAt = iso();
-      w.result = `Withdrawn by ${leaderLabel()} before any worker started it: ${reason.slice(0, 300)}`; delete w.transportClaim;
+      w.result = `Withdrawn by ${leaderLabel()} before any worker started it: ${reason.slice(0, 300)}`; delete w.transportClaim; w.withdrawn = true;
       this.notify(d, w.target); this.notify(d, leaderHost());
       return { workId: w.id, state: w.state, withdrawn: true };
     });
@@ -1042,7 +1047,7 @@ export class MeshEngine {
     return this.read(d => ({
       revision: d.inboxRevision[caller],
       messages: d.messages.filter(m => m.to === caller && m.inboxRevision > sinceRevision),
-      works: d.works.filter(w => w.target === caller || caller === leaderHost()).map(w => ({ id: w.id, missionId: w.missionId, target: w.target, role: w.role, state: w.state, receiptDigest: w.receiptDigest, completedAt: w.completedAt })),
+      works: d.works.filter(w => w.target === caller || caller === leaderHost()).map(w => ({ id: w.id, missionId: w.missionId, target: w.target, role: w.role, state: w.state, receiptDigest: w.receiptDigest, completedAt: w.completedAt, withdrawn: w.withdrawn === true })),
     }));
   }
   /** Safe to publish across the host mesh: never include actor-specific counts or secrets. */

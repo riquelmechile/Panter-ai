@@ -111,6 +111,14 @@ export interface SpecialistPacket {
  * Host-native clients enforce their own permissions and tools.
  */
 /** Read-only material the leader attaches for hosts that cannot reach the repository themselves (e.g. Gemini by e-mail). */
+export const MATERIAL_BEGIN='## Material provided by the leader (read-only, fetched by Panter; you may not have repository access)';
+export const MATERIAL_END='## End of leader material';
+/** Comparison form of a packet: leader material section (first begin to last end marker) removed, blank runs collapsed. */
+export function packetWithoutMaterial(instruction:string){
+  const start=instruction.indexOf(MATERIAL_BEGIN),end=instruction.lastIndexOf(MATERIAL_END);
+  const rest=start<0||end<start?instruction:instruction.slice(0,start)+instruction.slice(end+MATERIAL_END.length);
+  return rest.replace(/\n{3,}/g,'\n\n');
+}
 export const MAX_PACKET_MATERIAL=28_000;
 export async function specialistPacket(input:{agentId:string; skillIds:readonly string[]; objective:string; modelRequest:string; effortRequest:string; candidateSha?:string; allowedEditSurfaces?:string[]; material?:string}):Promise<SpecialistPacket> {
   const definition=agentDefinition(input.agentId);
@@ -134,7 +142,7 @@ export async function specialistPacket(input:{agentId:string; skillIds:readonly 
     `Objective: ${input.objective}`,
     definition.role==='implementer' ? `Allowed edit surfaces (planning scope, never actual tool permission): ${surfaces.join(', ')}` : 'Read-only specialist; do not alter files or system state.',
     input.candidateSha?`Frozen candidate SHA: ${input.candidateSha}. Verify this exact revision; do not replace it.`:'',
-    input.material?`## Material provided by the leader (read-only, fetched by Panter; you may not have repository access)\n${input.material}`:'',
+    input.material?`${MATERIAL_BEGIN}\n${input.material}\n${MATERIAL_END}`:'',
     `## Specialist definition (${definition.id})\n${agent.text}`,
   ];
   const assetDigests:Record<string,string>={[definition.id]:agent.digest};
