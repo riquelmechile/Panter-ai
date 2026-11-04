@@ -447,12 +447,14 @@ export class AutomaticHarness {
           // A concurrent tick may already have reset this step after withdrawing it.
           if(!(st.execution==='REMOTE_A2A'&&st.remoteWorkId===work.id&&st.status==='ISSUED'))return;
           st.execution=undefined;st.remoteWorkId=undefined;st.status='PENDING';
-          // Withdrawn for a missed pickup: never re-send to that host, run it native.
+          // Withdrawn by the leader (missed pickup, or a lost lease): never re-send to that host, run it native.
           if(work.withdrawn){st.nativeOnly=true;st.fallbackFrom=work.target;}
           st.redispatchGeneration=(st.redispatchGeneration??0)+1;r.revision++;
         });
+        if(work.withdrawn)try{await this.hooks.abandoned?.({workId:work.id,host:work.target});}catch{/* best effort */}
         return {...common,status:'REMOTE_NO_EFFECTS_RECONCILED',phaseId:phase.id,workId:work.id,
-          next:[],instruction:'The trusted operator confirmed no effects. A NEW fenced attempt may be dispatched on the next tick if authorization is still valid.'};
+          next:[],instruction:work.withdrawn?'The leader withdrew this work without effects; the phase runs native on the next tick.':
+            'The trusted operator confirmed no effects. A NEW fenced attempt may be dispatched on the next tick if authorization is still valid.'};
       }
       const readOnly=phase.phase==='DISCOVER'||phase.phase==='VERIFY';
       const expired=readOnly&&work?.state==='RUNNING'?await this.leaseLostTooLong(work.id):null;

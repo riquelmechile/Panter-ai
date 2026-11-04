@@ -531,3 +531,21 @@ test('a read-only host that reclaims its expired work within the grace keeps the
     assert.equal(t.fallback, undefined);
   } finally { Date.now = original; }
 }));
+
+test('a crash between ending the orphan and resetting the step still runs the phase native, never back on that host', () => withHosts(async (h, m, { timeout, abandoned }) => {
+  const s = await h.start({ project: 'app', objective: 'Repair unknown issue', idempotencyKey: 'ro-crash', writesAuthorized: true });
+  const first = await h.tick(s.id, all);
+  const workId = first.next[0]!.workId as string;
+  await m.claim('gpt-b', workId, 30);
+  timeout.ms = 60_000;
+  const original = Date.now;
+  try {
+    Date.now = () => original() + 31_000 + 61_000;
+    // Only the mesh write happened (as if the process stopped right after it).
+    assert.equal((await m.abandonExpiredReadOnly('gpt-a', workId, 60_000, 'test')).abandoned, true);
+    const t: any = await h.tick(s.id, all);
+    assert.equal(t.status, 'REMOTE_NO_EFFECTS_RECONCILED');
+    assert.ok(abandoned.some(a => a.workId === workId), 'its grant is still released');
+    assert.equal((await h.tick(s.id, all)).status, 'GPT_A_NATIVE', 'native, not re-sent to gpt-b');
+  } finally { Date.now = original; }
+}));

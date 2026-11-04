@@ -969,6 +969,9 @@ export class MeshEngine {
         !(Date.now() - Date.parse(w.leaseUntil ?? '') > graceMs)) return { workId: w.id, state: w.state, abandoned: false };
       w.state = 'ABORTED_NO_EFFECTS'; w.attemptId = null; w.leaseUntil = null; w.completedAt = iso();
       w.result = `Abandoned by ${leaderLabel()} after its lease expired unrenewed: ${reason.slice(0, 300)}`;
+      // Withdrawn by the leader: the harness never sends this phase back to that host, even after a crash between
+      // this write and its own.
+      w.withdrawn = true;
       this.notify(d, w.target); this.notify(d, leaderHost());
       return { workId: w.id, state: w.state, abandoned: true };
     });
