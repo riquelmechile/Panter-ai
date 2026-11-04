@@ -37,7 +37,7 @@ test('every server tool has a domain, routers cover every domain, and the role l
     for (const t of workflowTools(role)) assert.ok(tools.includes(t), `${role} lists unknown tool ${t}`);
   for (const t of tools) assert.ok(!DOMAINS.map(routerName).includes(t), `${t} collides with a router name`);
   const leader = tools.filter(t => listedFor(t, 'leader')).length, worker = tools.filter(t => listedFor(t, 'worker')).length;
-  assert.ok(leader + DOMAINS.length <= 45 && worker + DOMAINS.length <= 35, `leader ${leader}, worker ${worker}`);
+  assert.ok(leader + DOMAINS.length <= 50 && worker + DOMAINS.length <= 32, `leader ${leader}, worker ${worker}`);
   assert.equal(tools.filter(t => listedFor(t, 'operator')).length, tools.length, 'the operator sees everything');
   // Operation names are unique inside each router.
   for (const d of DOMAINS) { const ops = tools.filter(t => toolDomain(t) === d).map(operationName); assert.equal(new Set(ops).size, ops.length, d); }
@@ -50,6 +50,10 @@ test('the hosts\' own worker paths stay listed for workers; leader paths for the
   for (const t of ['panter_harness_start', 'panter_harness_tick', 'panter_harness_report', 'panter_harness_correction_report',
     'panter_native_review_submit', 'panter_native_review_submit_solo', 'panter_github_grant'])
     assert.ok(listedFor(t, 'leader'), t);
+  // Agent Studio's UI calls these by exact name; leader-only memory is not offered to workers.
+  for (const t of ['panter_agent_studio', 'panter_gentle_catalog', 'panter_mesh_profile_set', 'panter_specialist_bind', 'panter_mesh_delegate'])
+    assert.ok(listedFor(t, 'leader'), t);
+  assert.equal(listedFor('panter_memory_search', 'worker'), false);
   assert.equal(listedFor('panter_harness_tick', 'worker'), false);
   assert.equal(listedFor('panter_mission_create', 'leader'), false);
 });
@@ -92,4 +96,23 @@ test('the operator, and PANTER_TOOL_SURFACE=all, list every tool', async () => {
     const names = (await client.listTools()).tools.map(t => t.name);
     assert.ok(['panter_harness_tick', 'panter_harness_delivery_strategy_set', 'panter_workforce_pickup', 'panter_mission_create', 'panter_admin'].every(n => names.includes(n)), names.join());
   }
+});
+
+test('routed calls match the SDK for tools without an input schema and refuse tools with an output schema', async () => {
+  const server = new McpServer({ name: 't', version: '1' });
+  const surface = createToolSurface(server, { role: () => 'leader' });
+  let seen: unknown;
+  server.registerTool('panter_memory_status', { description: 'No input.' }, async (ctx: unknown) => { seen = ctx; return { content: [{ type: 'text' as const, text: 'ok' }] }; });
+  server.registerTool('panter_memory_context', { description: 'Typed output.', inputSchema: z.object({}), outputSchema: z.object({ n: z.number() }) },
+    async () => ({ content: [{ type: 'text' as const, text: '{}' }], structuredContent: { n: 1 } }));
+  surface.finalize();
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'c', version: '1' });
+  await Promise.all([server.connect(b), client.connect(a)]);
+  const routers = (await client.listTools()).tools.find(t => t.name === 'panter_memory');
+  assert.equal(routers?.annotations?.readOnlyHint, false);
+  await client.callTool({ name: 'panter_memory', arguments: { operation: 'status' } });
+  assert.ok(seen && typeof seen === 'object' && 'mcpReq' in (seen as object), 'the callback received the request context, as when called by name');
+  const typed: any = await client.callTool({ name: 'panter_memory', arguments: { operation: 'context' } });
+  assert.equal(typed.isError, true);
 });

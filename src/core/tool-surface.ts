@@ -42,11 +42,14 @@ const LEADER = new Set([
   'harness_start', 'harness_tick', 'harness_report', 'harness_status', 'harness_correction_report', 'harness_github_bind',
   'harness_github_check', 'harness_unit_report', 'harness_units_set', 'harness_write_grant',
   'review_status', 'rdd_status', 'native_review_submit', 'native_review_submit_solo', 'native_review_progress',
-  'specialist_delegate', 'specialist_assignments', 'mesh_inbox', 'mesh_profiles', 'mesh_message',
-  'workforce_status', 'workforce_result_get', 'workforce_receipts', 'workforce_grok_wake_status',
+  'specialist_delegate', 'specialist_assignments', 'specialist_bind', 'mesh_delegate', 'mesh_delegate_auto',
+  'mesh_inbox', 'mesh_profiles', 'mesh_profile_set', 'mesh_message',
+  'workforce_status', 'workforce_result_get', 'workforce_receipts', 'workforce_grok_wake_status', 'workforce_claude_wake_status',
+  'workforce_event_status',
   'github_grant', 'github_revoke', 'github_audit',
-  'memory_context', 'memory_search', 'memory_save',
-  'agent_studio',
+  'memory_status', 'memory_context', 'memory_search', 'memory_save',
+  // Agent Studio's UI calls these by their exact names (it cannot fall back to a router).
+  'agent_studio', 'gentle_catalog',
 ].map(x => `panter_${x}`));
 
 /** Tools a worker host uses in its normal workflow (listed flat for workers). Kept wide on purpose: a host such as
@@ -56,7 +59,6 @@ const WORKER = new Set([
   'workforce_task_bridge', 'workforce_schedule_pickup', 'workforce_rearm_status', 'workforce_app_turn', 'workforce_receipts',
   'mesh_claim', 'mesh_heartbeat', 'mesh_complete', 'mesh_pending', 'mesh_inbox', 'mesh_message',
   'github_read', 'github_commit', 'github_open_pr', 'github_comment', 'github_create_issue',
-  'memory_context', 'memory_search', 'memory_save',
 ].map(x => `panter_${x}`));
 
 /** The workflow tools listed flat for a role (besides the routers). */
@@ -76,7 +78,7 @@ export function operationName(name: string): string {
   return n.startsWith(`${d}_`) ? n.slice(d.length + 1) : n;
 }
 
-type Entry = { config: { description?: string; inputSchema?: z.ZodType; annotations?: { readOnlyHint?: boolean } }; cb: (args: unknown, ctx: unknown) => unknown };
+type Entry = { config: { description?: string; inputSchema?: z.ZodType; outputSchema?: unknown; annotations?: { readOnlyHint?: boolean } }; cb: (...args: unknown[]) => unknown };
 const text = (value: unknown, isError = false) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }], ...(isError ? { isError: true } : {}) });
 
 /**
@@ -107,6 +109,8 @@ export function createToolSurface(server: any, opts: { role: () => SurfaceRole; 
         register(routerName(d), {
           description: `Domain router for ${DOMAIN_TEXT[d]}. Call with operation "index" to list its operations (add arguments {"operation":"<name>"} for one operation's full description and input schema), then with operation "<name>" and that operation's arguments. Same tools, same authorization as calling them by name.`,
           inputSchema: z.object({ operation: z.string().trim().min(1).max(80), arguments: z.record(z.string(), z.unknown()).optional() }).strict(),
+          // A router reaches writes too: hosts must not treat it as read-only.
+          annotations: { readOnlyHint: false },
         }, async (input: { operation: string; arguments?: Record<string, unknown> }, ctx: unknown) => {
           const ops = domainOps(d);
           const find = (op: string) => ops.find(([n]) => n === op || operationName(n) === op);
@@ -118,7 +122,11 @@ export function createToolSurface(server: any, opts: { role: () => SurfaceRole; 
           const hit = find(input.operation);
           if (!hit) return text({ error: `Unknown ${d} operation "${input.operation}"; call operation "index"`, operations: ops.map(([n]) => operationName(n)) }, true);
           const [name, entry] = hit;
-          const parsed = entry.config.inputSchema ? await entry.config.inputSchema.safeParseAsync(input.arguments ?? {}) : { success: true as const, data: input.arguments ?? {} };
+          // The router cannot apply the SDK's output validation, so a tool that declares one is only called by name.
+          if (entry.config.outputSchema) return text({ error: `${name} declares an output schema: call it by its own name` }, true);
+          // Like the SDK, a tool without an input schema receives only the request context.
+          if (!entry.config.inputSchema) return entry.cb(ctx);
+          const parsed = await entry.config.inputSchema.safeParseAsync(input.arguments ?? {});
           if (!parsed.success) return text({ error: `Invalid arguments for ${name}`, issues: parsed.error.issues.slice(0, 20) }, true);
           return entry.cb(parsed.data, ctx);
         });

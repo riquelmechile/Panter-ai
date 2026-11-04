@@ -221,6 +221,6 @@ La interfaz read-only no ejecuta código, no hace cambios en producción y no re
 
 ## v0.16 superficie de herramientas por rol y routers por dominio
 
-- [x] `tools/list` por rol: líder (~39) y worker (~32) ven los 8 routers por dominio más las herramientas de su flujo; el operador ve todo. Ninguna herramienta se bloquea: siguen invocables por nombre y por su router, con su misma autorización. `PANTER_TOOL_SURFACE=all` vuelve a la lista completa. Ver [TOOL_SURFACE.md](TOOL_SURFACE.md).
+- [x] `tools/list` por rol: líder (~47) y worker (~29) ven los 8 routers por dominio más las herramientas de su flujo; el operador ve todo. Ninguna herramienta se bloquea: siguen invocables por nombre y por su router, con su misma autorización. `PANTER_TOOL_SURFACE=all` vuelve a la lista completa. Ver [TOOL_SURFACE.md](TOOL_SURFACE.md).
 - [x] Routers `panter_<dominio>` con `operation=index` (y esquema de entrada por operación), validación con el esquema de la herramienta y el mismo handler.
 - [ ] Montar los MCP downstream (commerce-control primero) como routers propios, con clasificación lectura/escritura y permisos de Panter.

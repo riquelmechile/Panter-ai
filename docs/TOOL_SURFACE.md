@@ -6,8 +6,8 @@ Panter registra más de 100 herramientas. Entregárselas todas a cada host hace 
 
 - **Nada se bloquea.** Todas las herramientas siguen registradas y se pueden llamar por su nombre, igual que antes, con su misma autorización (`requireLeader`, `requireAdmin`, permisos de GitHub, etc.).
 - **Solo cambia `tools/list`.** Cada host ve los 8 routers por dominio más las herramientas de su flujo normal:
-  - **Líder:** harness, revisión, delegación, estado del workforce, permisos de GitHub y memoria (unas 39).
-  - **Worker** (GPT-A, GPT-B, Grok, Gemini cuando no son líder): pickup, claim, heartbeat, complete, wait/listen, GitHub del trabajo y memoria (unas 32). Se deja amplio a propósito: un host como ChatGPT solo puede llamar herramientas que ve listadas, así que todas las rutas que usan las rutinas de los hosts siguen listadas.
+  - **Líder:** harness, revisión, delegación y perfiles, estado del workforce, permisos de GitHub, memoria y Agent Studio (con las herramientas que su UI llama por nombre), unas 47 en total.
+  - **Worker** (GPT-A, GPT-B, Grok, Gemini cuando no son líder): pickup, claim, heartbeat, complete, wait/listen y GitHub del trabajo, unas 29. La memoria de Engram es solo del líder. Se deja amplio a propósito: un host como ChatGPT solo puede llamar herramientas que ve listadas, así que todas las rutas que usan las rutinas de los hosts siguen listadas.
   - **Operador** (token de operador, socket Unix): todo.
 - **Todo es alcanzable desde los routers.** Un host que necesita una herramienta que no ve la usa a través del router de su dominio.
 - El rol se calcula en cada conexión desde la identidad autenticada; si cambia el líder (`PANTER_LEAD_HOST`), cambia la lista.
@@ -27,6 +27,7 @@ Hay dos niveles: dominio → operación. A propósito no es un árbol más profu
 - `index` lista las operaciones del dominio: nombre corto, herramienta, si es de solo lectura y si está listada para tu rol.
 - Con `arguments.operation`, `index` devuelve la descripción completa y el esquema de entrada.
 - La operación acepta el nombre corto (`tick`) o el completo (`panter_harness_tick`).
+- Los routers no se marcan como de solo lectura, porque también llegan a escrituras. Una herramienta que declare un esquema de salida solo se llama por su nombre, para no saltarse la validación del SDK.
 - Los argumentos se validan con el mismo esquema de la herramienta y se llama al mismo handler.
 - Un router solo enruta su propio dominio.
 
