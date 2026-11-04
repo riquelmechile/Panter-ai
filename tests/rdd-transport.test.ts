@@ -24,7 +24,7 @@ type Report = (agentId: string, packetDigest: string) => Record<string, unknown>
 const clean: Report = (agentId, packetDigest) => ({ agentId, candidateSha: sha, packetDigest, subagentRunId: `run-${agentId}`,
   findings: [], evidence: ['read the diff'] });
 
-async function remoteReview(transport: boolean, report: Report = clean) {
+async function remoteReview(transport: boolean, report: Report = clean, opts: { author?: 'grok' | 'gpt-b'; kind?: '4r' | 'judgment-day' } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'panter-rdd-transport-'));
   try {
     const native = await NativeSubagentReview.open(dir), mesh = await MeshEngine.open(dir);
@@ -33,14 +33,25 @@ async function remoteReview(transport: boolean, report: Report = clean) {
       await mesh.setProfile('gpt-a', { host, actorId: `actor-${host}`, modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer'] }, 0);
     for (const [agentId, host] of [['review-risk', 'grok'], ['review-readability', 'gemini'], ['review-reliability', 'gpt-b'], ['review-resilience', 'grok']] as const)
       await mesh.bindSpecialist('gpt-a', { agentId, host, modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] } as any, 0);
-    const review = await mesh.startReview('gpt-a', { missionId: 'm1', kind: '4r', objective: 'Review x', candidateSha: sha, idempotencyKey: 'r1' });
-    for (const host of ['grok', 'grok', 'gemini', 'gpt-b'] as const) {
+    if (opts.author) {
+      // That host wrote code in this mission.
+      await mesh.setProfile('gpt-a', { host: opts.author, actorId: `actor-${opts.author}`, modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer', 'implementer'] }, 1);
+      await mesh.delegate('gpt-a', { missionId: 'm1', target: opts.author, role: 'implementer', instruction: 'Implement x', idempotencyKey: 'impl' });
+      const w: any = await mesh.pickup(opts.author, 300);
+      await mesh.complete(opts.author, w.work.id, w.work.attemptId, w.work.leaseGeneration, 'done');
+    }
+    const kind = opts.kind ?? '4r';
+    if (kind === 'judgment-day')
+      for (const [agentId, host] of [['jd-judge-a', 'grok'], ['jd-judge-b', 'grok']] as const)
+        await mesh.bindSpecialist('gpt-a', { agentId, host, modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] } as any, 0);
+    const review = await mesh.startReview('gpt-a', { missionId: 'm1', kind, objective: 'Review x', candidateSha: sha, idempotencyKey: 'r1' });
+    for (const host of (kind === '4r' ? ['grok', 'grok', 'gemini', 'gpt-b'] : ['grok', 'grok']) as Array<'grok' | 'gemini' | 'gpt-b'>) {
       const p: any = await mesh.pickup(host, 300);
       assert.equal(p.status, 'CLAIMED');
       await mesh.complete(host, p.work.id, p.work.attemptId, p.work.leaseGeneration,
         JSON.stringify(report(p.work.specialist.agentId, p.work.specialist.packetDigest)));
     }
-    const tx = await rdd.begin({ missionId: 'm1', reviewId: review.id, source: 'REMOTE', candidateSha: sha, kind: '4r', repository: repo, prNumber: 12, implementerRunId: 'builder-1' });
+    const tx = await rdd.begin({ missionId: 'm1', reviewId: review.id, source: 'REMOTE', candidateSha: sha, kind, repository: repo, prNumber: 12, implementerRunId: 'builder-1' });
     return await rdd.assess(tx.id);
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
@@ -72,4 +83,19 @@ test('transport attestation never outranks a severe finding or missing independe
   assert.equal(severe.record.state, 'NEEDS_CORRECTION');
   const same = await remoteReview(true, (a, d) => ({ ...clean(a, d), subagentRunId: 'one-run' }));
   assert.equal(same.record.state, 'NEEDS_REVIEW_EVIDENCE');
+});
+
+test('a host that wrote code in the mission never attests its review, whatever run IDs it reports', async () => {
+  const v = await remoteReview(true, clean, { author: 'grok' });
+  assert.equal(v.reviewComplete, true);
+  assert.equal(v.record.state, 'NEEDS_RUNNER_ATTESTATION');
+  assert.equal(v.transportAttested, false);
+});
+
+test('Judgment Day judges on one host are never transport attested', async () => {
+  const v = await remoteReview(true, clean, { kind: 'judgment-day' });
+  assert.equal(v.reviewComplete, true);
+  assert.equal(v.distinctReviewerRuns, true);
+  assert.equal(v.transportAttested, false);
+  assert.notEqual(v.record.state, 'APPROVED_PENDING_ACK');
 });

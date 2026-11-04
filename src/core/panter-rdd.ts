@@ -160,9 +160,14 @@ export class PanterRdd {
       // Panter is the trusted transport: each report is the terminal receipt of its own frozen lens work, completed
       // by that work's bound worker host. A report naming another packet is not this lens's report; a report that
       // does not know its packet digest (e-mail transport) is bound by the work itself.
-      transportAttested=this.transportAttestation&&!runnerAttested&&complete&&independence&&r.work.every((w,index)=>{
+      // A host that wrote code in this mission never attests a review of it, and Judgment Day's blind judges must
+      // be distinct hosts: one host cannot be both judges. Lenses of a 4R are different checks, so one host may
+      // carry two of them; their mutual independence then rests on that host, as the operator accepted.
+      const authors=this.transportAttestation&&!runnerAttested&&complete&&independence?new Set(await this.mesh.authorHosts(current.missionId)):null;
+      const distinctJudges=current.kind!=='judgment-day'||new Set(r.work.map(w=>w.host)).size===r.work.length;
+      transportAttested=!!authors&&distinctJudges&&r.work.every((w,index)=>{
         const data=parsed[index];
-        return !!data&&w.state==='COMPLETED'&&/^[0-9a-f]{64}$/.test(w.receiptDigest??'')&&w.host!==leaderHost()&&
+        return !!data&&w.state==='COMPLETED'&&/^[0-9a-f]{64}$/.test(w.receiptDigest??'')&&w.host!==leaderHost()&&!authors.has(w.host)&&
           data.agentId===w.agentId&&data.candidateSha===current.candidateSha&&typeof data.subagentRunId==='string'&&
           Array.isArray(data.evidence)&&data.evidence.length>0&&Array.isArray(data.findings)&&
           /^[0-9a-f]{64}$/.test(w.packetDigest??'')&&

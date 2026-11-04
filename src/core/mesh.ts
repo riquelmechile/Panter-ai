@@ -985,6 +985,12 @@ export class MeshEngine {
         resultAvailable:true,rearmPending:(d.rearmIntents??[]).some(i=>i.workId===id&&i.status==='PENDING')};
     });
   }
+  /** Hosts that took writer work in a mission (any attempt that may have produced code): they authored its
+   * candidates, so their review receipts never count as independent of the author. */
+  authorHosts(missionId:string){
+    return this.read(d=>[...new Set(d.works.filter(w=>w.missionId===missionId&&w.role==='implementer'&&
+      w.state!=='QUEUED'&&w.state!=='ABORTED_NO_EFFECTS').map(w=>w.target))]);
+  }
   /** Operator-only ledger view; does not expose credentials and cannot stop a worker. */
   uncertainWriters(){
     return this.read(d=>d.works.filter(w=>w.role==='implementer'&&
