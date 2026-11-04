@@ -3,7 +3,8 @@
 //   confirms (POST /a2a/gemini/email-validate), to the single Gmail inbox that Gemini monitors.
 // email(): Gemini's reply to RELAY_ADDRESS is forwarded raw to Panter (/a2a/gemini/email-result), which
 //   completes the work only with the one-time token of the current lease.
-// Bindings: PANTER_BASE_URL, RECIPIENT, RELAY_ADDRESS (text) and EMAIL (send_email to RECIPIENT).
+// Bindings: PANTER_BASE_URL, RECIPIENT, RELAY_ADDRESS (text), EMAIL (send_email to RECIPIENT) and optional
+//   RELAY_SECRET: shared with Panter (PANTER_GEMINI_MAIL_RELAY_SECRET); /wake requires it and both calls send it.
 const MAX_WAKE_BYTES = 160_000;
 const MAX_EMAIL_BYTES = 512 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -12,6 +13,17 @@ function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
   });
+}
+function sameKey(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+function panterHeaders(env) {
+  const h = { "content-type": "application/json", accept: "application/json", "user-agent": "Panter-Gemini-Mail-Relay/1" };
+  if (env.RELAY_SECRET) h["x-panter-relay-key"] = env.RELAY_SECRET;
+  return h;
 }
 function toBase64(bytes) {
   let s = "";
@@ -51,6 +63,8 @@ export default {
     if (request.method === "GET" && url.pathname === "/health")
       return json({ ok: true, service: "panter-gemini-mail-relay" });
     if (request.method !== "POST" || url.pathname !== "/wake") return json({ ok: false, error: "not_found" }, 404);
+    if (env.RELAY_SECRET && !sameKey(request.headers.get("x-panter-relay-key") || "", env.RELAY_SECRET))
+      return json({ ok: false, error: "unauthorized" }, 401);
     const text = await request.text();
     if (new TextEncoder().encode(text).byteLength > MAX_WAKE_BYTES) return json({ ok: false, error: "body_too_large" }, 413);
     let payload;
@@ -62,7 +76,7 @@ export default {
     // Only Panter decides what may be mailed: it must recognise this exact envelope.
     const check = await fetch(`${env.PANTER_BASE_URL}/a2a/gemini/email-validate`, {
       method: "POST", redirect: "manual",
-      headers: { "content-type": "application/json", accept: "application/json", "user-agent": "Panter-Gemini-Mail-Relay/1" },
+      headers: panterHeaders(env),
       body: JSON.stringify({ envelope: e }),
     });
     let verdict = null;
@@ -88,7 +102,7 @@ export default {
     if (raw.byteLength > MAX_EMAIL_BYTES) { message.setReject("result e-mail too large"); return; }
     const response = await fetch(`${env.PANTER_BASE_URL}/a2a/gemini/email-result`, {
       method: "POST", redirect: "manual",
-      headers: { "content-type": "application/json", accept: "application/json", "user-agent": "Panter-Gemini-Mail-Relay/1" },
+      headers: panterHeaders(env),
       body: JSON.stringify({ envelope_from: from, envelope_to: to, raw_mime_base64: toBase64(raw) }),
     });
     if (!response.ok) message.setReject(`Panter rejected the result: HTTP ${response.status}`);

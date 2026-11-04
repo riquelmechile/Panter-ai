@@ -8,7 +8,7 @@ import { connect as connectUnix } from 'node:net';
 import { createHash } from 'node:crypto';
 import type { EngramMemory } from './core/engram-memory.js';
 import { resolve, dirname, join } from 'node:path';
-import { ClientAddressPolicy } from './core/trusted-proxy.js';
+import { ClientAddressPolicy, rateLimitIdentity } from './core/trusted-proxy.js';
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { MeshEngine, HOSTS, isHost } from './core/mesh.js';
@@ -936,7 +936,13 @@ const http = createServer(async (req, res) => {
     const reply = (status: number, body: unknown) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
     if (!host || !(allowedHosts.length ? allowedHosts.includes(host) : ['localhost','127.0.0.1','::1'].includes(host))) { reply(403, { ok: false }); return; }
     if (!geminiMailWake.configured) { reply(404, { ok: false, error: 'disabled' }); return; }
-    if (!mailRelayRate(clientAddresses.identify(req))) { reply(429, { ok: false, error: 'rate_limited' }); return; }
+    // The relay holding the shared key skips the anonymous budget, so junk traffic can never starve it.
+    if (!geminiMailWake.relayAuthorized(req.headers['x-panter-relay-key'])) {
+      let client: string;
+      try { client = rateLimitIdentity(clientAddresses.identify(req)); } catch { reply(400, { ok: false, error: 'invalid_client' }); return; }
+      if (!mailRelayRate(client)) { reply(429, { ok: false, error: 'rate_limited' }); return; }
+      if (geminiMailWake.requiresRelayKey) { reply(401, { ok: false, error: 'relay_key_required' }); return; }
+    }
     const chunks: Buffer[] = []; let size = 0;
     for await (const chunk of req) { size += (chunk as Buffer).length; if (size > 450_000) { reply(413, { ok: false }); return; } chunks.push(chunk as Buffer); }
     let payload: unknown;

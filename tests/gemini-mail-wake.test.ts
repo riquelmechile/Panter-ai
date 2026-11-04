@@ -164,3 +164,47 @@ test('marker scanning is bounded, hard-wrapped JSON and numeric HTML entities ar
   const html = ['Content-Type: text/html; charset=UTF-8', '', `<div>${GEMINI_MAIL_RESULT_MARKER}<br>{&#34;a&#34;:&#x31;}</div>`].join('\r\n');
   assert.deepEqual(markedJson(mimeTexts(html)[0]!), [{ a: 1 }]);
 });
+
+test('HTML tag stripping stays linear for a flood of unclosed tags', () => {
+  for (const body of ['<'.repeat(315_000), '<a'.repeat(157_500)]) {
+    const t0 = Date.now();
+    mimeTexts(['Content-Type: text/html; charset=UTF-8', '', body].join('\r\n'));
+    assert.ok(Date.now() - t0 < 1000, 'linear, not quadratic');
+  }
+});
+
+test('a shared relay key is sent to the relay and is the only way past the anonymous gate', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-gmail-key-'));
+  try {
+    const mesh = await MeshEngine.open(dir);
+    await mesh.setProfile('claude', { host: 'gemini', actorId: 'actor-gemini', modelRequest: 'gemini-4-argon', effortRequest: 'high', roles: ['explorer'] }, 0);
+    const key = 'k'.repeat(40);
+    const headers: Record<string, string>[] = [];
+    const wake = new GeminiMailWake(dir, mesh, () => false, { ...env, PANTER_GEMINI_MAIL_RELAY_SECRET: key },
+      async (_u, _b, h) => { headers.push(h); return 202; }, 0);
+    assert.equal(wake.requiresRelayKey, true);
+    assert.equal(wake.relayAuthorized(key), true);
+    assert.equal(wake.relayAuthorized('k'.repeat(39) + 'x'), false);
+    assert.equal(wake.relayAuthorized(undefined), false);
+    assert.equal(wake.relayAuthorized([key]), false);
+    await delegate(mesh, 'key1');
+    await wake.dispatchDue();
+    assert.equal(headers[0]?.['x-panter-relay-key'], key);
+    assert.throws(() => new GeminiMailWake(dir, mesh, () => false, { ...env, PANTER_GEMINI_MAIL_RELAY_SECRET: 'short' }), /32-256/);
+    const open = new GeminiMailWake(dir, mesh, () => false, env);
+    assert.equal(open.requiresRelayKey, false);
+    assert.equal(open.relayAuthorized(key), false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('a ticket stranded mid-send by a restart is retried once its lease expires', () => fixture(async ({ dir, mesh, sent, wake }) => {
+  const work = await delegate(mesh, 'k9');
+  await wake.dispatchDue();
+  expire(dir, work.id);
+  const db = SqliteLedger.open(dir);
+  db.mutate('gemini_mail', {} as any, (d: any) => { for (const t of d.tickets) if (t.workId === work.id) t.sentAt = null; });
+  db.close();
+  assert.deepEqual((await wake.dispatchDue()).sent, [work.id]);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].payload.envelope.attempt, 2);
+}));

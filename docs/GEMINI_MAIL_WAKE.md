@@ -13,19 +13,23 @@ Reglas:
 - Si un chat de Gemini está esperando con `panter_workforce_wait`, toma la tarea él y no se manda correo.
 - Si el relay rechaza el envío (4xx), la tarea vuelve a la cola con espera exponencial (hasta 30 min). Si la respuesta es ambigua (timeout, 5xx), el correo pudo haber salido: Panter conserva el lease y espera a que venza antes de reintentar, para que Gemini nunca tenga dos copias vivas de la misma tarea.
 - Cada sobre se valida una sola vez y por su contenido completo, así que nadie puede reenviarlo por el relay ni cambiarle campos.
-- Las dos rutas públicas tienen límite de tamaño (~300 KB de correo) y de frecuencia por cliente, y la lectura del correo es lineal.
+- Las dos rutas públicas tienen límite de tamaño (~300 KB de correo) y la lectura del correo es lineal (también el HTML).
+- Con `PANTER_GEMINI_MAIL_RELAY_SECRET` (recomendado), Panter y el Worker comparten una clave en la cabecera `x-panter-relay-key`: el Worker exige la clave a quien le pide enviar y la manda a Panter; Panter rechaza (401) a quien no la tenga. Las peticiones sin clave pasan antes por un límite anónimo de 30/min por cliente (IPv6 agrupado por /64), así que tráfico basura no puede agotar el cupo del relay real.
+- Detrás de un proxy o túnel, sin `PANTER_TRUSTED_PROXY_CIDRS` todos los clientes comparten la IP del proxy; por eso la clave compartida es la protección real. Si usas `docs/nginx-panter.conf.example`, `/a2a/gemini/` sale por `location /`.
+- Si el proceso se cae a mitad de un envío, el ticket queda sin marcar como enviado; al vencer su lease se trata igual que un intento sin respuesta y se reintenta.
 - Si un chat de Gemini está escuchando y una tarea enviada por correo venció, vuelve a la cola para que la tome ese chat.
 - Si Gemini no responde antes de que venza el lease, Panter reenvía con un lease y token nuevos (máximo 3 intentos) y después cierra la tarea como fallida.
-- El Worker no guarda secretos: no puede enviar nada que Panter no reconozca.
+- Aunque alguien obtuviera la clave del Worker, no puede enviar nada que Panter no reconozca ni completar trabajo sin el token del lease vigente.
 
 Configuración en `panter.env`:
 
 ```
 PANTER_GEMINI_MAIL_RELAY_URL=https://panter-gemini-mail-relay.<cuenta>.workers.dev/wake
 PANTER_GEMINI_MAIL_RECIPIENT=<gmail que monitorea Gemini>
+PANTER_GEMINI_MAIL_RELAY_SECRET=<32+ caracteres URL-safe, el mismo que el binding RELAY_SECRET del Worker>
 # PANTER_GEMINI_MAIL_MIN_AGE_SECONDS=20
 ```
 
-El código del Worker está en `deploy/cloudflare/panter-gemini-mail-relay.js` (bindings `PANTER_BASE_URL`, `RECIPIENT`, `RELAY_ADDRESS` y `EMAIL`). La dirección de relay necesita una regla de Email Routing hacia ese Worker.
+El código del Worker está en `deploy/cloudflare/panter-gemini-mail-relay.js` (bindings `PANTER_BASE_URL`, `RECIPIENT`, `RELAY_ADDRESS`, `EMAIL` y, si se usa clave, `RELAY_SECRET`). La dirección de relay necesita una regla de Email Routing hacia ese Worker.
 
 En Gemini se crea una vez una tarea con monitor de Gmail: correos de la dirección de relay con asunto `[PANTER_GEMINI]`.

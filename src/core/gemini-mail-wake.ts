@@ -5,9 +5,11 @@
  * Gemini watches, and later accepts Gemini's e-mailed reply (forwarded by the same relay) only with a
  * one-time, lease-bound result token. Implementer work never travels by mail.
  *
- * Trust: the relay holds no secret. Before sending, it asks Panter to validate the exact envelope
- * (token + instruction digest of an outstanding ticket), so nobody can make it mail arbitrary tasks to
- * Gemini. A reply completes work only with the unused token of the current lease.
+ * Trust: before sending, the relay asks Panter to validate the exact envelope (token + instruction
+ * digest of an outstanding ticket), so nobody can make it mail arbitrary tasks to Gemini. A reply
+ * completes work only with the unused token of the current lease. With PANTER_GEMINI_MAIL_RELAY_SECRET
+ * set, Panter and the relay also share a key: relay calls carrying it skip the anonymous rate limit,
+ * so unauthenticated traffic can neither use Panter's endpoints nor starve the real relay.
  */
 import {createHash,randomBytes,timingSafeEqual} from 'node:crypto';
 import {isIP} from 'node:net';
@@ -61,6 +63,8 @@ export class GeminiMailWake{
   private readonly db:SqliteLedger|null;
   private readonly relayUrl:string;
   private readonly recipient:string;
+  private readonly relayKeyHash:string|null;
+  private readonly relayKey:string;
   private running=false;
   constructor(dir:string,private readonly mesh:MailMesh,
     private readonly isListening:()=>boolean,
@@ -74,9 +78,22 @@ export class GeminiMailWake{
     if(this.configured&&!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(this.recipient))
       throw Error('PANTER_GEMINI_MAIL_RECIPIENT must be the Gmail address Gemini monitors');
     if(!Number.isFinite(this.minAgeMs)||this.minAgeMs<0)throw Error('Invalid PANTER_GEMINI_MAIL_MIN_AGE_SECONDS');
+    const key=(env.PANTER_GEMINI_MAIL_RELAY_SECRET??'').trim();
+    if(key&&!/^[A-Za-z0-9_-]{32,256}$/.test(key))
+      throw Error('PANTER_GEMINI_MAIL_RELAY_SECRET must be 32-256 URL-safe characters');
+    this.relayKey=key;
+    this.relayKeyHash=key?sha(key):null;
     this.db=this.configured?SqliteLedger.open(dir):null;
   }
-  describe(){return {configured:this.configured,adapter:this.configured?'GEMINI_GMAIL_RELAY':'NONE',recipient:this.recipient||null};}
+  describe(){return {configured:this.configured,adapter:this.configured?'GEMINI_GMAIL_RELAY':'NONE',recipient:this.recipient||null,
+    relayKey:Boolean(this.relayKeyHash)};}
+  /** True when a shared relay key is configured: callers without it are refused. */
+  get requiresRelayKey(){return Boolean(this.relayKeyHash);}
+  /** Constant-time check of the relay's x-panter-relay-key header. */
+  relayAuthorized(header:string|string[]|undefined):boolean{
+    if(!this.relayKeyHash||typeof header!=='string'||header.length>256)return false;
+    return sameHash(sha(header.trim()),this.relayKeyHash);
+  }
 
   /** Mail every due Gemini work once (or retry an expired, unanswered one). Never runs concurrently. */
   async dispatchDue(now=Date.now()):Promise<{sent:string[];failed:string[]}>{
@@ -88,7 +105,7 @@ export class GeminiMailWake{
       // An open Gemini chat that is already waiting takes the work directly; mail only wakes an idle Gemini.
       // Mailed work whose lease expired goes back to the queue so that chat can pick it up.
       if(this.isListening()){
-        for(const t of data.tickets.filter(t=>!t.usedAt&&t.sentAt&&Date.parse(t.expiresAt)<=now))
+        for(const t of data.tickets.filter(t=>!t.usedAt&&Date.parse(t.expiresAt)<=now))
           await this.requeueExpired(t.workId).catch(()=>{});
         return out;
       }
@@ -96,8 +113,9 @@ export class GeminiMailWake{
       const queued=(await this.mesh.pending('gemini'))
         .filter(w=>w.role!=='implementer'&&now-Date.parse(w.createdAt)>=this.minAgeMs&&!blocked(w.workId))
         .map(w=>w.workId);
-      // Unanswered tickets whose lease expired: re-mail with a fresh lease, up to MAX_ATTEMPTS.
-      const retry=data.tickets.filter(t=>!t.usedAt&&t.sentAt&&Date.parse(t.expiresAt)<=now&&!blocked(t.workId)&&
+      // Unanswered tickets whose lease expired: re-mail with a fresh lease, up to MAX_ATTEMPTS. This includes a
+      // ticket whose send never finished (process stopped mid-send: sentAt null) so its work is never stranded.
+      const retry=data.tickets.filter(t=>!t.usedAt&&Date.parse(t.expiresAt)<=now&&!blocked(t.workId)&&
         !data.tickets.some(n=>n.workId===t.workId&&n.attempt>t.attempt)).map(t=>t.workId);
       for(const workId of [...new Set([...queued,...retry])].slice(0,5)){
         const sent=await this.mailOne(workId,now).catch(()=>false);
@@ -144,7 +162,8 @@ export class GeminiMailWake{
     let status=0;
     try{
       status=await this.sender(this.relayUrl,JSON.stringify({version:GEMINI_MAIL_ENVELOPE_VERSION,
-        recipient:this.recipient,envelope}),{'content-type':'application/json','user-agent':'Panter-Gemini-Mail/1'});
+        recipient:this.recipient,envelope}),{'content-type':'application/json','user-agent':'Panter-Gemini-Mail/1',
+        ...(this.relayKey?{'x-panter-relay-key':this.relayKey}:{})});
     }catch{status=0;}
     // Timeout, network error or 5xx: the e-mail may already have left. Keep the ticket and lease as an
     // unknown outcome; lease expiry drives any retry, so Gemini never gets two live copies of one task.
@@ -252,7 +271,7 @@ export function mimeTexts(raw:string):string[]{
     else bytes=Buffer.from(body,'latin1');
     const text=bytes.toString('utf8');
     if(type.startsWith('text/html'))html.push(text.replace(/<br\s*\/?>/gi,'\n').replace(/<\/(p|div)>/gi,'\n')
-      .replace(/<[^>]+>/g,'').replace(/&quot;/g,'"').replace(/&#39;|&#x27;/g,"'").replace(/&lt;/g,'<')
+      .replace(/<[^<>]*>/g,'').replace(/&quot;/g,'"').replace(/&#39;|&#x27;/g,"'").replace(/&lt;/g,'<')
       .replace(/&gt;/g,'>').replace(/&nbsp;/g,' ')
       .replace(/&#(\d{1,7});/g,(_,n)=>String.fromCodePoint(Math.min(Number(n),0x10ffff)))
       .replace(/&#x([0-9a-f]{1,6});/gi,(_,h)=>String.fromCodePoint(Math.min(parseInt(h,16),0x10ffff))).replace(/&amp;/g,'&'));
