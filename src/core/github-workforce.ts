@@ -36,6 +36,7 @@ const REPO=/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 const SEGMENT=/^[A-Za-z0-9._~@:+=,-]{1,200}$/;
 const REF_SEGMENT=/^[A-Za-z0-9._@+=,-]{1,200}$/; // git forbids ~ ^ : ? * [ and backslash in refs
 const GLOBAL_CALLS_PER_HOUR=3000;
+const PER_WORK_CALLS_PER_HOUR=500;
 const PROTECTED=/^(main|master|develop|dev|trunk|production|prod|staging|gh-pages|release(\/.*)?|hotfix(\/.*)?)$/i;
 const MAX_WRITES_PER_WORK=200;
 const MAX_READS_PER_WORK=1500;
@@ -67,13 +68,16 @@ export function safeRepoPath(path:string){
   const parts=path.split('/');
   if(parts.some(p=>!p||p==='.'||p==='..'))return false;
   const lower=parts.map(p=>p.toLowerCase());
-  if(['.github','.circleci','.buildkite','.gitlab','.woodpecker','.husky','.devcontainer'].includes(lower[0]!)||lower.includes('.git'))return false;
+  // CI/deploy configs and anything an operator's or leader's tools execute or obey when the branch is checked out.
+  if(['.github','.circleci','.buildkite','.gitlab','.woodpecker','.husky','.devcontainer','.claude','.vscode','.gemini',
+    '.cursor','.codex','.idea','.yarn'].includes(lower[0]!)||lower.includes('.git'))return false;
   const name=lower.at(-1)!;
   const denied=new Set(['codeowners','.gitmodules','.gitattributes','.lfsconfig','.gitlab-ci.yml','.travis.yml','jenkinsfile',
     'azure-pipelines.yml','bitbucket-pipelines.yml','.drone.yml','appveyor.yml','cloudbuild.yaml','cloudbuild.yml',
     '.mergify.yml','netlify.toml','vercel.json','railway.json','railway.toml','.pre-commit-config.yaml','buildspec.yml',
     '.woodpecker.yml','.cirrus.yml','.readthedocs.yaml','.readthedocs.yml','action.yml','action.yaml','codemagic.yaml',
-    'render.yaml','fly.toml','app.yaml','.gitpod.yml','wrangler.toml','wrangler.json','wrangler.jsonc']);
+    'render.yaml','fly.toml','app.yaml','.gitpod.yml','wrangler.toml','wrangler.json','wrangler.jsonc',
+    '.mcp.json','.envrc','.yarnrc','.yarnrc.yml','.pnpmfile.cjs','.npmrc','claude.md','agents.md','gemini.md']);
   return !denied.has(name);
 }
 /** Repository resources workers may GET (path below repos/{owner}/{repo}/), checked segment by segment. */
@@ -107,8 +111,14 @@ function sanitize(value:unknown):unknown{
 /** Text posted under the owner's identity must not drive bots or AI agents installed in the repository:
  * no @mentions at all and no slash/bors commands, judged after removing invisible characters and HTML comments. */
 export function botCommand(text:string){
-  const t=text.normalize('NFKC').replace(/\p{Cf}/gu,'').replace(/<!--[\s\S]*?(-->|$)/g,' ');
-  return /(^|[^A-Za-z0-9_.+-])@[A-Za-z0-9][A-Za-z0-9-]*/.test(t)||/^\s*(\/[A-Za-z]|bors\b)/im.test(t)||/<!--/.test(text);
+  // Invisible characters become spaces (never glue text together); check both the raw and the NFKC form.
+  const raw=text.replace(/\p{Cf}/gu,' ');
+  for(const t of [raw,raw.normalize('NFKC')]){
+    if(/<!--|<!\s*-\s*-/.test(t))return true;                        // hidden HTML, even split by invisibles
+    if(/(^|[^A-Za-z0-9_])@[A-Za-z0-9][A-Za-z0-9_-]*(?![A-Za-z0-9_/-])/.test(t))return true; // @mention (not @scope/pkg)
+    if(/^\s*\/[A-Za-z][\w-]*(\s|$)/m.test(t)||/^\s*bors\b/im.test(t))return true;
+  }
+  return false;
 }
 
 export class GitHubWorkforce{
@@ -118,6 +128,7 @@ export class GitHubWorkforce{
   private readonly db:SqliteLedger|null;
   private readonly chains=new Map<string,Promise<unknown>>();
   private calls:number[]=[];
+  private perWork=new Map<string,number[]>();
   constructor(dir:string,private readonly mesh:WorkforceMesh,private readonly leader:()=>string,
     env:Record<string,string|undefined>=process.env,private readonly fetcher:typeof fetch=fetch){
     this.token=(env.PANTER_GITHUB_WORKFORCE_TOKEN??'').trim();
@@ -259,6 +270,15 @@ export class GitHubWorkforce{
     let data:any=null;try{data=raw?JSON.parse(raw):null;}catch{data=raw;}
     return {status:r.status,data};
   }
+  /** Every GitHub call made for a work: at most PER_WORK_CALLS_PER_HOUR, so one worker cannot starve the others. */
+  private call(g:GitHubGrant,method:string,path:string,body?:unknown){
+    const now=Date.now();
+    const recent=(this.perWork.get(g.workId)??[]).filter(t=>now-t<3600_000);
+    check(recent.length<PER_WORK_CALLS_PER_HOUR,'GitHub call budget for this work is used up for this hour');
+    recent.push(now);this.perWork.set(g.workId,recent);
+    if(this.perWork.size>2000)for(const k of this.perWork.keys()){this.perWork.delete(k);if(this.perWork.size<=1000)break;}
+    return this.api(method,g.repository,path,body);
+  }
   private ok(r:{status:number;data:any},what:string){
     if(r.status>=200&&r.status<300)return r.data;
     const msg=typeof r.data?.message==='string'?r.data.message.slice(0,200):'';
@@ -271,7 +291,7 @@ export class GitHubWorkforce{
       writesUsed:g.writes,writesMax:MAX_WRITES_PER_WORK}};
     check(safeReadPath(path),'This GitHub path is not readable by workers');
     this.reserve(g,'reads');
-    const data=sanitize(this.ok(await this.api('GET',g.repository,path),'read')) as any;
+    const data=sanitize(this.ok(await this.call(g,'GET',path),'read')) as any;
     let text=JSON.stringify(data);
     // File contents: hand back decoded text so workers do not need to decode base64.
     if(data&&typeof data==='object'&&!Array.isArray(data)&&data.encoding==='base64'&&typeof data.content==='string')
@@ -283,6 +303,7 @@ export class GitHubWorkforce{
   async commit(caller:string,claim:Claim,message:string,files:FileChange[]){
     const g0=await this.authorize(caller,claim,'commit');
     check(typeof message==='string'&&message.trim().length>0&&message.length<=5000,'Invalid commit message');
+    check(!botCommand(message),'Commit messages cannot contain @mentions, HTML comments or bot/slash commands');
     check(Array.isArray(files)&&files.length>0&&files.length<=MAX_FILES,`Commit 1-${MAX_FILES} files`);
     for(const f of files){
       check(safeRepoPath(f.path),`Path not allowed: ${String(f.path).slice(0,100)}`);
@@ -296,16 +317,16 @@ export class GitHubWorkforce{
       check(g.branch===branch&&validRefName(branch)&&branch.startsWith('panter/'),'Grant branch changed');
       this.reserve(g,'writes');
       try{
-        const repo=this.ok(await this.api('GET',g.repository,''),'repository lookup');
+        const repo=this.ok(await this.call(g,'GET',''),'repository lookup');
         check(branch!==repo.default_branch,'Refusing to write the default branch');
-        const ref=await this.api('GET',g.repository,`git/ref/heads/${refPath(branch)}`);
+        const ref=await this.call(g,'GET',`git/ref/heads/${refPath(branch)}`);
         let head:string;
         if(ref.status===404){
           const base=g.base??repo.default_branch;
           check(validRefName(base),'Invalid base branch');
-          head=this.ok(await this.api('GET',g.repository,`git/ref/heads/${refPath(base)}`),'base branch lookup').object.sha;
+          head=this.ok(await this.call(g,'GET',`git/ref/heads/${refPath(base)}`),'base branch lookup').object.sha;
           await this.authorize(caller,claim,'commit');
-          this.ok(await this.api('POST',g.repository,'git/refs',{ref:`refs/heads/${branch}`,sha:head}),'branch creation');
+          this.ok(await this.call(g,'POST','git/refs',{ref:`refs/heads/${branch}`,sha:head}),'branch creation');
           this.record(g,'branch',branch,`created from ${base}@${head}`,x=>{x.branchCreated=true;x.createdBranch={repository:g.repository,branch};});
         }else{
           const found=this.ok(ref,'branch lookup');
@@ -313,16 +334,16 @@ export class GitHubWorkforce{
           check(this.ownsBranch(g)&&found.ref===`refs/heads/${branch}`,'That branch already exists and was not created for this work');
           head=found.object.sha;
         }
-        const info=this.ok(await this.api('GET',g.repository,`branches/${refPath(branch)}`),'branch check');
+        const info=this.ok(await this.call(g,'GET',`branches/${refPath(branch)}`),'branch check');
         check(info.protected!==true,'Refusing to write a protected branch');
-        const parent=this.ok(await this.api('GET',g.repository,`git/commits/${head}`),'head commit lookup');
-        const tree=this.ok(await this.api('POST',g.repository,'git/trees',{base_tree:parent.tree.sha,
+        const parent=this.ok(await this.call(g,'GET',`git/commits/${head}`),'head commit lookup');
+        const tree=this.ok(await this.call(g,'POST','git/trees',{base_tree:parent.tree.sha,
           tree:files.map(f=>f.delete?{path:f.path,mode:'100644',type:'blob',sha:null}:{path:f.path,mode:'100644',type:'blob',content:f.content})}),'tree creation');
         const full=`${message.trim()}\n\nPanter-Work: ${g.workId}\nPanter-Host: ${g.host}`;
-        const commit=this.ok(await this.api('POST',g.repository,'git/commits',{message:full,tree:tree.sha,parents:[head]}),'commit creation');
+        const commit=this.ok(await this.call(g,'POST','git/commits',{message:full,tree:tree.sha,parents:[head]}),'commit creation');
         await this.authorize(caller,claim,'commit'); // lease and grant still live right before moving the branch
         // force:false: a concurrent push to the branch makes this fail instead of being overwritten.
-        this.ok(await this.api('PATCH',g.repository,`git/refs/heads/${refPath(branch)}`,{sha:commit.sha,force:false}),'branch update');
+        this.ok(await this.call(g,'PATCH',`git/refs/heads/${refPath(branch)}`,{sha:commit.sha,force:false}),'branch update');
         this.record(g,'commit',`${branch}@${commit.sha}`,`${files.length} file(s)`);
         return {repository:g.repository,branch,commit:commit.sha,parent:head,files:files.length};
       }catch(e){this.record(g,'commit',branch,'error: '+(e instanceof Error?e.message:'error'));throw e;}
@@ -337,18 +358,19 @@ export class GitHubWorkforce{
     return this.serial(`${g0.repository}#${g0.branch}`,async()=>{
       const g=await this.authorize(caller,claim,'pr');
       check(this.ownsBranch(g),'Commit to the work branch before opening a PR');
-      const repo=this.ok(await this.api('GET',g.repository,''),'repository lookup');
+      const repo=this.ok(await this.call(g,'GET',''),'repository lookup');
       const base=g.base??repo.default_branch;
       const owner=g.repository.split('/')[0];
-      const existing=this.ok(await this.api('GET',g.repository,`pulls?state=open&head=${encodeURIComponent(`${owner}:${g.branch}`)}`),'PR lookup');
+      const existing=this.ok(await this.call(g,'GET',`pulls?state=open&head=${encodeURIComponent(`${owner}:${g.branch}`)}`),'PR lookup');
       if(Array.isArray(existing)&&existing[0]){
+        this.reserve(g,'reads');
         this.record(g,'pr',`#${existing[0].number}`,'already open',x=>{x.own??=[];if(!x.own.includes(existing[0].number))x.own.push(existing[0].number);});
         return {repository:g.repository,number:existing[0].number,url:existing[0].html_url,created:false};
       }
       this.reserve(g,'writes');
       await this.authorize(caller,claim,'pr');
-      const pr=this.ok(await this.api('POST',g.repository,'pulls',{title:title.trim(),head:g.branch,base,draft:Boolean(draft),
-        body:`${body}\n\n---\nOpened by Panter worker \`${g.host}\` for work \`${g.workId}\`. Merge and review stay with the leader and the reviewer account.`}),'PR creation');
+      const pr=this.ok(await this.call(g,'POST','pulls',{title:title.trim(),head:g.branch,base,draft:Boolean(draft),
+        body:`_Opened by Panter worker \`${g.host}\` for work \`${g.workId}\`. Merge and review stay with the leader and the reviewer account._\n\n${body}`}),'PR creation');
       this.record(g,'pr',`#${pr.number}`,'opened',x=>{(x.own??=[]).push(pr.number);});
       return {repository:g.repository,number:pr.number,url:pr.html_url,created:true};
     });
@@ -362,7 +384,7 @@ export class GitHubWorkforce{
     check(!botCommand(body),'Comments cannot contain @mentions, HTML comments or bot/slash commands');
     this.reserve(g,'writes');
     await this.authorize(caller,claim,'comment');
-    const c=this.ok(await this.api('POST',g.repository,`issues/${number}/comments`,{body:`${body}\n\n_(Panter worker ${g.host}, work ${g.workId.slice(0,8)})_`}),'comment');
+    const c=this.ok(await this.call(g,'POST',`issues/${number}/comments`,{body:`_(Panter worker ${g.host}, work ${g.workId.slice(0,8)})_\n\n${body}`}),'comment');
     this.record(g,'comment',`#${number}`,String(c.id));
     return {repository:g.repository,number,url:c.html_url};
   }
@@ -374,7 +396,7 @@ export class GitHubWorkforce{
     check(!botCommand(body)&&!botCommand(title),'Issues cannot contain @mentions, HTML comments or bot/slash commands');
     this.reserve(g,'writes');
     await this.authorize(caller,claim,'issue');
-    const i=this.ok(await this.api('POST',g.repository,'issues',{title:title.trim(),body:`${body}\n\n_(Panter worker ${g.host}, work ${g.workId.slice(0,8)})_`}),'issue creation');
+    const i=this.ok(await this.call(g,'POST','issues',{title:title.trim(),body:`_(Panter worker ${g.host}, work ${g.workId.slice(0,8)})_\n\n${body}`}),'issue creation');
     this.record(g,'issue',`#${i.number}`,'opened',x=>{(x.own??=[]).push(i.number);});
     return {repository:g.repository,number:i.number,url:i.html_url};
   }

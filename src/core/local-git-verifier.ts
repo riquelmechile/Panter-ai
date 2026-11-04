@@ -57,7 +57,12 @@ export class LocalGitVerifier {
       if(await git('rev-parse','--verify','HEAD')!==candidateSha||await git('status','--porcelain','--untracked-files=normal'))
         throw new Error('Local checkout changed during validation');
       decision.state='REVIEWABLE';
-    }catch(error){decision.blockers.push(error instanceof Error?error.message:'Local Git proof failed');}
+    }catch(error){
+      // Never echo a child's raw output (it may run untrusted code); keep only our own messages or the exit code.
+      const e=error as {code?:unknown;message?:unknown};
+      const own=error instanceof Error&&!('stderr' in error)&&!('stdout' in error);
+      decision.blockers.push(own?String(e.message).slice(0,300):`Local check failed${e.code!==undefined?` (exit ${String(e.code)})`:''}`);
+    }
     return decision;
   }
 }

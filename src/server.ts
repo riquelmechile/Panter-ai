@@ -115,6 +115,10 @@ const githubGate = new GitHubDeliveryGate({
 const nativeReview = await NativeReviewBridge.open({enabled:process.env.PANTER_NATIVE_REVIEW_ENABLED==='1',binary:process.env.PANTER_GENTLE_AI_BIN??'gentle-ai',repositoryRoot:process.env.PANTER_NATIVE_REVIEW_WORKTREE??''});
 const rddKeysFile=process.env.PANTER_RDD_RUNNER_KEYS_FILE;
 const rddRunnerKeys:Record<string,string>=rddKeysFile?JSON.parse(await readFile(rddKeysFile,'utf8')):{};
+// Local checks run code (possibly worker-written) under Panter's own UID: such a child could read the parent's
+// environment or env file, so they never share a process with the workforce GitHub token.
+if(process.env.PANTER_RDD_LOCAL_WORKTREES_FILE&&process.env.PANTER_GITHUB_WORKFORCE_TOKEN)
+  throw new Error('PANTER_RDD_LOCAL_WORKTREES_FILE cannot be combined with PANTER_GITHUB_WORKFORCE_TOKEN in the same process: run local checks in an isolated runner');
 const localGit=process.env.PANTER_RDD_LOCAL_WORKTREES_FILE?await LocalGitVerifier.open(process.env.PANTER_RDD_LOCAL_WORKTREES_FILE):null;
 const panterRdd = await PanterRdd.open(dataDir,nativeSubagentReview,mesh,githubGate,rddRunnerKeys,localGit);
 const harness = await AutomaticHarness.open(dataDir,mesh,nativeSubagentReview,githubGate,nativeReview,panterRdd,true);
