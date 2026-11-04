@@ -340,7 +340,26 @@ test('a reply wrapped at spaces keeps its spaces; a word broken at full width is
   assert.equal(parsed.candidateSha, sha);
   assert.match(parsed.evidence[0], /^Read leader-supplied diff main\.\.\./);
   assert.match(parsed.evidence[1], /remains unchanged and export function/);
-  // A fixed-width cut (every line but the last equally long) is rejoined without spaces; word-wrapped lines with one.
+  // Full-width lines join with nothing, shorter ones with a space; widths count the part of the first line before the block.
   assert.equal(unwrap('abcd\nefgh\nij'), 'abcdefghij');
-  assert.equal(unwrap('ab cd\nefghij\nkl'), 'ab cd efghij kl');
+  assert.equal(unwrap('ab cd\nefghij\nkl\nmn op'), 'ab cd efghijkl mn op');
+  assert.equal(unwrap('ab cdef\ngh\nij'), 'ab cdef gh ij', 'the widest line of a word-wrapped reply is not a cut word');
+  assert.equal(unwrap('{"t\nok"}', 4), '{"tok"}', 'a block starting mid-line still sees its first line as full');
+});
+
+test('mail cuts inside tokens never break a reply the old reading accepted', () => {
+  const token = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_abcde';
+  const reply = { work_id: '7e31e313-7f6e-4fce-8cb7-9397bbbd9393', token, success: true, result: 'Read the diff and found nothing to change in the work.' };
+  // (a) a fixed-width cutter with the marker on the same line as the JSON.
+  const fixed = `${GEMINI_MAIL_RESULT_MARKER} ${JSON.stringify(reply)}`.match(/.{1,76}/g)!.join('\r\n');
+  assert.ok((markedJson(fixed) as any[]).some(r => r.token === token));
+  // (b) a word-wrapper that hard-cuts words longer than the width (compact JSON is one long word).
+  const wrap = (s: string) => { const out: string[] = []; let line = '';
+    for (const w of s.split(' ')) { let word = w;
+      while (word.length > 76) { if (line) { out.push(line); line = ''; } out.push(word.slice(0, 76)); word = word.slice(76); }
+      if (line && (line + ' ' + word).length > 76) { out.push(line); line = word; } else line = line ? line + ' ' + word : word; }
+    out.push(line); return out.join('\r\n'); };
+  const parsed = markedJson(`${GEMINI_MAIL_RESULT_MARKER}\r\n${wrap(JSON.stringify(reply))}`) as any[];
+  assert.ok(parsed.some(r => r.token === token), 'the token survives');
+  assert.ok(parsed.some(r => r.token === token && r.result === reply.result), 'and the prose keeps its spaces');
 });

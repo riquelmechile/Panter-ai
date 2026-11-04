@@ -893,3 +893,44 @@ test('a phase sent native by one host goes remote again once it is bound to anot
   assert.equal(again.status, 'REMOTE_A2A_DISPATCHED');
   assert.equal(again.next[0].host, 'grok');
 }));
+
+test('a tick racing a close never leaves granted remote work behind', () => withHosts(async (h, m, { dispatched, abandoned }) => {
+  for (let i = 0; i < 6; i++) {
+    const s = await h.start({ project: 'app', objective: `Repair unknown issue ${i}`, idempotencyKey: `race-close-${i}`, writesAuthorized: true });
+    const rev = (await h.get(s.id))!.revision;
+    await Promise.all([h.tick(s.id, all).catch(() => null), h.close(s.id, 'race', rev)]);
+    await h.close(s.id, 'race again', rev); // a second close repeats the cleanup
+    const works = (await m.inbox('gpt-a')).works.filter(w => w.missionId === s.id);
+    assert.ok(works.every(w => w.state === 'ABORTED_NO_EFFECTS'), `run ${i}: ${works.map(w => w.state)}`);
+    for (const w of works) if (dispatched.some(d => d.workId === w.id)) assert.ok(abandoned.some(a => a.workId === w.id), `run ${i}: granted work ${w.id} was revoked`);
+    assert.equal((await h.tick(s.id, all)).status, 'HARNESS_CLOSED');
+  }
+}));
+
+test('a closed run no longer authorizes writers, units or delivery strategy', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-close-guard-'));
+  try {
+    const m = await MeshEngine.open(dir), n = await NativeSubagentReview.open(dir);
+    const h = await AutomaticHarness.open(dir, m, n, undefined, undefined, undefined, true);
+    const objective = 'Add a helper';
+    const g = await h.grantWrite({ project: 'app', objective, allowedPaths: ['src/util.ts'], ttlSeconds: 600 });
+    const s = await h.start({ project: 'app', objective, idempotencyKey: 'guard1', writesAuthorized: true, changeSurfaces: ['src/util.ts'], writeGrantId: g.grantId });
+    await h.authorizeDelegatedWrite(s.id, ['src/util.ts']);
+    await h.close(s.id, 'stop', (await h.get(s.id))!.revision);
+    await assert.rejects(h.authorizeDelegatedWrite(s.id, ['src/util.ts']), /closed/);
+    await assert.rejects(h.setDeliveryStrategy(s.id, 'single-pr', (await h.get(s.id))!.revision), /closed/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('a correction stops a remote verification still checking the old candidate', () => withHosts(async (h, m, { abandoned }) => {
+  await m.bindSpecialist('gpt-a', { agentId: 'gentle-ai-verify', host: 'gpt-b', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] } as any, 0);
+  const s = await h.start({ project: 'app', objective: 'Fix login security', idempotencyKey: 'corr-verify', writesAuthorized: true, changeSurfaces: ['src/auth.ts'] });
+  let t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Plan', evidence: ['plan'] });
+  t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Done', evidence: ['tests'], candidateSha: sha, runId: 'impl-run-1' });
+  t = await h.tick(s.id, all);
+  assert.equal(t.status, 'REMOTE_A2A_DISPATCHED');
+  const workId = t.next[0]!.workId as string;
+  await h.recordCorrection(s.id, { candidateSha: 'f'.repeat(40), runId: 'fix-run-corr-verify', evidence: ['fixed'] }, (await h.get(s.id))!.revision);
+  assert.equal((await m.inbox('gpt-a')).works.find(w => w.id === workId)?.state, 'ABORTED_NO_EFFECTS');
+  assert.ok(abandoned.some(a => a.workId === workId));
+}));

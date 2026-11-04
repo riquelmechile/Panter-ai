@@ -231,7 +231,7 @@ export class AutomaticHarness {
     // Recorded only for the candidate it reviews: a correction may have landed since this tick read the run.
     const current=await this.write(s=>{const r=s.runs.find(x=>x.id===record.id)!;
       // Same candidate and same attempt: a session started before a drop must not come back as the current one.
-      if(r.candidateSha!==record.candidateSha||(r[slot.attempt]??0)!==(record[slot.attempt]??0))return false;
+      if(r.closedAt||r.candidateSha!==record.candidateSha||(r[slot.attempt]??0)!==(record[slot.attempt]??0))return false;
       if(!r[slot.id]){r[slot.id]=remote.id;r[slot.transport]='REMOTE';r.revision++;}return r[slot.id]===remote.id;});
     // A session nobody will read is stopped instead of dispatched (and granted).
     if(!current)return this.retireRemoteReview(remote.id);
@@ -306,7 +306,7 @@ export class AutomaticHarness {
       if(['APPROVED_PENDING_ACK','ACKNOWLEDGED'].includes(verdict.record.state)){
         // Only the session still current for the run completes its phase (a correction may have dropped it meanwhile).
         await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const item=r.steps.find(x=>x.id===phase.id)!;
-          if(r[slot.id]===reviewId&&item.status!=='COMPLETE'){item.status='COMPLETE';r.revision++;}});
+          if(!r.closedAt&&r[slot.id]===reviewId&&item.status!=='COMPLETE'){item.status='COMPLETE';r.revision++;}});
         return this.tick(runId,runtime);
       }
       // Panter-RDD will not attest this remote Judgment Day (e.g. a judge host became a writer after dispatch): judge
@@ -384,6 +384,7 @@ export class AutomaticHarness {
   async authorizeDelegatedWrite(id:string,paths:string[]){
     const run=await this.get(id);
     ensure(run?.permission==='WRITE_APPROVED'&&run.writeGrantId&&paths.length>0,'Authorized run required');
+    ensure(!run.closedAt,'Harness run is closed');
     const grant=await this.read(s=>s.grants?.find(g=>g.id===run.writeGrantId));
     ensure(grant&&grant.boundRunId===id&&grant.expiresAt>Date.now(),'Active operator grant required');
     for(const p of paths)ensure(run.paths.some(q=>p===q||p.startsWith(q+'/'))&&grant.allowedPaths.some(q=>p===q||p.startsWith(q+'/')),'Out-of-scope writer');
@@ -424,20 +425,23 @@ export class AutomaticHarness {
    * again; its queued remote work is withdrawn and the grants of all its remote work are revoked. Idempotent. */
   async close(runId:string,reason:string,expectedRevision:number){
     ensure(reason.trim().length>0&&reason.length<=500,'Close reason required');
-    let works:Array<{workId:string;host?:Host}>=[],sessions:string[]=[];
+    let works:string[]=[],sessions:string[]=[];
     const closed=await this.write(s=>{const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');
-      if(r.closedAt)return r;
-      ensure(r.revision===expectedRevision,'Stale harness revision');
-      works=r.steps.filter(st=>st.execution==='REMOTE_A2A'&&st.remoteWorkId&&st.status!=='COMPLETE').map(st=>({workId:st.remoteWorkId!}));
+      // Closing again keeps the first close but repeats the cleanup below (it heals a crash after the write).
+      if(!r.closedAt){ensure(r.revision===expectedRevision,'Stale harness revision');
+        r.closedAt=new Date().toISOString();r.closedReason=reason.trim();r.revision++;}
+      works=r.steps.filter(st=>st.execution==='REMOTE_A2A'&&st.remoteWorkId&&st.status!=='COMPLETE').map(st=>st.remoteWorkId!);
       sessions=[r.reviewTransport==='REMOTE'?r.reviewId:null,r.judgmentTransport==='REMOTE'?r.judgmentId:null].filter((x):x is string=>!!x);
-      r.closedAt=new Date().toISOString();r.closedReason=reason.trim();r.revision++;return r;});
-    for(const w of works){
-      const t=await this.mesh.workTarget(leaderHost(),w.workId).catch(()=>null);if(!t)continue;
-      if(t.state==='QUEUED'||t.state==='RUNNING')await this.mesh.withdrawUnstarted(leaderHost(),w.workId,`harness run closed: ${reason.trim().slice(0,200)}`).catch(()=>null);
-      try{await this.hooks.abandoned?.({workId:w.workId,host:t.target});}catch{/* best effort */}
-    }
+      return r;});
+    for(const id of works)await this.retireWork(id,`harness run closed: ${(closed.closedReason??reason).slice(0,200)}`);
     for(const id of sessions)await this.retireRemoteReview(id);
     return closed;
+  }
+  /** Stop one remote work whose result will never be read: withdraw it if it has not really started, revoke its grants. */
+  private async retireWork(workId:string,reason:string){
+    const t=await this.mesh.workTarget(leaderHost(),workId).catch(()=>null);if(!t)return;
+    if(t.state==='QUEUED'||t.state==='RUNNING')await this.mesh.withdrawUnstarted(leaderHost(),workId,reason).catch(()=>null);
+    if(t.state==='QUEUED'||t.state==='RUNNING')try{await this.hooks.abandoned?.({workId,host:t.target});}catch{/* best effort */}
   }
 
   /** Only the authenticated operator can persist a delivery strategy; it is not a model choice. */
@@ -452,7 +456,7 @@ export class AutomaticHarness {
       payload.evidence.every(x=>typeof x==='string'&&x.trim()&&x.length<=1000),'Correction evidence required');
     if(!(await this.activeWriteGrant(runId,(await this.get(runId))?.paths??[])))throw new Error('Active operator grant required for correction');
     // Remote review sessions this correction drops: their lenses are stopped once the write succeeded.
-    let retired:string[]=[];
+    let retired:string[]=[],retiredWorks:string[]=[];
     const corrected=await this.write(s=>{const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');ensure(!r.closedAt,'Harness run is closed');
       ensure(r.revision===expectedRevision,'Stale correction revision');
       ensure(r.permission==='WRITE_APPROVED'&&r.paths.length>0,'Correction is not authorized within a scoped writable run');
@@ -467,9 +471,12 @@ export class AutomaticHarness {
       r.correctionAttempts=(r.correctionAttempts??0)+1;r.correctionRunId=payload.runId;r.reviewEvidenceRetries=0;r.judgmentEvidenceRetries=0;
       r.correctionRunIds=[...new Set([...(r.correctionRunIds??[]),payload.runId])];
       for(const step of r.steps)if(['VERIFY','REVIEW','JUDGMENT'].includes(step.phase)){
+        // A remote verification still in flight checks the old candidate: it is stopped below, never read.
+        if(step.execution==='REMOTE_A2A'&&step.remoteWorkId&&step.status==='ISSUED')retiredWorks.push(step.remoteWorkId);
         step.status='PENDING';step.execution=undefined;step.remoteWorkId=undefined;step.result=undefined;
       }
       r.revision++;return r;});
+    for(const id of retiredWorks)await this.retireWork(id,'candidate corrected; this phase runs again on the new candidate');
     for(const id of retired)await this.retireRemoteReview(id);
     return corrected;
   }
@@ -485,7 +492,7 @@ export class AutomaticHarness {
       return {id:randomUUID(),objective:u.objective,paths,state:'PENDING' as const};});
     for(let i=0;i<derived.length;i++)for(let j=i+1;j<derived.length;j++)for(const a of derived[i]!.paths)for(const b of derived[j]!.paths)
       ensure(a!==b&&!a.startsWith(b+'/')&&!b.startsWith(a+'/'),'Parallel writer scopes overlap');
-    return this.write(s=>{const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');
+    return this.write(s=>{const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');ensure(!r.closedAt,'Harness run is closed');
       ensure(r.revision===expectedRevision,'Stale harness revision');
       ensure(r.permission==='WRITE_APPROVED','Read-only mission cannot request writers');
       const implement=r.steps.find(x=>x.phase==='IMPLEMENT');ensure(implement?.status==='PENDING','Cannot redefine issued implementation');
@@ -499,7 +506,7 @@ export class AutomaticHarness {
     ensure(/^[A-Za-z0-9._:-]{8,160}$/.test(result.runId)&&result.runId!==leaderHost(),'Native child run identity required');
     ensure(result.summary.trim().length>0&&result.summary.length<=3000,'Invalid unit summary');
     ensure(Array.isArray(result.evidence)&&result.evidence.length>0&&result.evidence.length<=30&&result.evidence.every(x=>typeof x==='string'&&x.trim()&&x.length<=1000),'Unit evidence required');
-    return this.write(s=>{const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');
+    return this.write(s=>{const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');ensure(!r.closedAt,'Harness run is closed');
       const step=r.steps.find(x=>x.phase==='IMPLEMENT');ensure(step?.status==='ISSUED','Parallel implementation was not issued');
       const unit=r.units?.find(x=>x.id===unitId);ensure(unit,'Unknown implementation unit');
       if(unit.state==='REPORTED'){
@@ -511,7 +518,7 @@ export class AutomaticHarness {
   }
 
   async setDeliveryStrategy(runId:string,strategy:'single-pr'|'feature-branch-chain'|'stacked-to-main',expectedRevision:number){
-    return this.write(s=>{const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');
+    return this.write(s=>{const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');ensure(!r.closedAt,'Harness run is closed');
       ensure(r.revision===expectedRevision,'Stale harness revision');
       ensure(!r.deliveryStrategy||r.deliveryStrategy===strategy,'Delivery strategy already frozen');
       r.deliveryStrategy=strategy;r.revision++;return r;});
@@ -724,7 +731,7 @@ export class AutomaticHarness {
           const jd=await this.native.create({missionId:record.id,kind:'judgment-day',objective:record.objective,
             candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:judgment-day:${record.candidateSha}`});
           await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;
-            if(!r.judgmentId&&r.candidateSha===record.candidateSha){r.judgmentId=jd.reviewId;r.judgmentTransport='NATIVE';r.revision++;}});
+            if(!r.closedAt&&!r.judgmentId&&r.candidateSha===record.candidateSha){r.judgmentId=jd.reviewId;r.judgmentTransport='NATIVE';r.revision++;}});
         }
       }
       const latest=await this.get(runId);
@@ -754,7 +761,7 @@ export class AutomaticHarness {
         return {...common,status:verdict.record.state,phaseId:phase.id,reviewId:latest.judgmentId,panterRdd:verdict,next:[]};
       // Only the session still current for the run completes it (a correction may have dropped it meanwhile).
       await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;
-        if(r.judgmentId===latest.judgmentId&&st.status!=='COMPLETE'){st.status='COMPLETE';r.revision++;}});
+        if(!r.closedAt&&r.judgmentId===latest.judgmentId&&st.status!=='COMPLETE'){st.status='COMPLETE';r.revision++;}});
       return this.tick(runId,runtime);
     }
     if(phase.phase==='REVIEW'){
@@ -765,7 +772,7 @@ export class AutomaticHarness {
         if(await this.remoteReviewReady(record,'REVIEW',kind,effectiveMode,runtime))await this.startRemoteReview(record,'REVIEW',kind);
         else{
           const native=await this.native.create({missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:review:${record.candidateSha}:${record.reviewAttempt??0}`});
-          await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(!r.reviewId&&r.candidateSha===record.candidateSha){r.reviewId=native.reviewId;r.reviewTransport='NATIVE';r.revision++;}});
+          await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(!r.closedAt&&!r.reviewId&&r.candidateSha===record.candidateSha){r.reviewId=native.reviewId;r.reviewTransport='NATIVE';r.revision++;}});
         }
       }
       const now=await this.get(runId);
@@ -778,7 +785,7 @@ export class AutomaticHarness {
             phaseId:phase.id,reviewId:now.reviewId,review,next:[],approved:false};
           await this.write(state=>{const run=state.runs.find(r=>r.id===runId)!;
             const item=run.steps.find(step=>step.id===phase.id)!;
-            if(run.reviewId===now.reviewId&&item.status!=='COMPLETE'){item.status='COMPLETE';run.revision++;}
+            if(!run.closedAt&&run.reviewId===now.reviewId&&item.status!=='COMPLETE'){item.status='COMPLETE';run.revision++;}
           });
           return this.tick(runId,runtime);
         }
@@ -803,7 +810,7 @@ export class AutomaticHarness {
           if(verdict.record.state==='APPROVED_PENDING_ACK')await this.rdd.acknowledge(tx.id,verdict.record.revision);
           if(['APPROVED_PENDING_ACK','ACKNOWLEDGED'].includes(verdict.record.state)){
             await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const item=r.steps.find(x=>x.id===phase.id)!;
-              if(r.reviewId===now.reviewId&&item.status!=='COMPLETE'){item.status='COMPLETE';r.revision++;}});
+              if(!r.closedAt&&r.reviewId===now.reviewId&&item.status!=='COMPLETE'){item.status='COMPLETE';r.revision++;}});
             return this.tick(runId,runtime);
           }
           return {...common,status:verdict.record.state,phaseId:phase.id,reviewId:now.reviewId,
@@ -873,8 +880,11 @@ export class AutomaticHarness {
         idempotencyKey:`harness:${record.id}:${phase.id}:${record.candidateSha??'none'}:${record.correctionAttempts??0}:${phase.redispatchGeneration??0}`,
         material:this.hooks.materialFor?await this.hooks.materialFor(record,binding.host):undefined,
         leaderNotes:phaseNotes(phase.phase,this.hooks.accessFor?.(record,binding.host,phase.phase))});
-      await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;
-        if(st.status==='PENDING'){st.status='ISSUED';st.execution='REMOTE_A2A';st.remoteWorkId=work.id;r.revision++;}});
+      const closedMeanwhile=await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;
+        if(r.closedAt)return true;
+        if(st.status==='PENDING'){st.status='ISSUED';st.execution='REMOTE_A2A';st.remoteWorkId=work.id;r.revision++;}return false;});
+      // Closed while this tick dispatched: the work it created is stopped and never granted.
+      if(closedMeanwhile){await this.retireWork(work.id,'harness run closed');return this.tick(runId,runtime);}
       await this.dispatched(record,work.id,phase.phase,binding.host);
       return {...common,status:'REMOTE_A2A_DISPATCHED',phaseId:phase.id,next:[{agentId:phase.agentId,workId:work.id,
         execution:'REMOTE_A2A',host:binding.host,automatic:true}]};
