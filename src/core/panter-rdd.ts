@@ -36,14 +36,14 @@ export class PanterRdd {
     private readonly mesh:MeshEngine,private readonly github:GitHubDeliveryGate|null,
     private readonly runnerKeys:Readonly<Record<string,string>>,private readonly localGit:LocalGitVerifier|null,
     private readonly transportAttestation:boolean,
-    private readonly writerHosts:(repository:string)=>string[]){}
+    private readonly writerHosts:()=>string[]|null){}
   /** transportAttestation (operator opt-in): a remote lens report counts as attested when Panter itself received it
    * as the terminal receipt of that exact frozen lens work from the bound worker host over its authenticated
    * channel. That proves which host delivered which report for which packet and SHA — not which model ran or how
    * well; the lens contents are still judged as usual. */
   static async open(dir:string,native:NativeSubagentReview,mesh:MeshEngine,github:GitHubDeliveryGate|null=null,runnerKeys:Readonly<Record<string,string>>={},localGit:LocalGitVerifier|null=null,transportAttestation=false,
-    /** Hosts ever granted GitHub write paths in a repository (see GitHubWorkforce.writerHosts). */
-    writerHosts:(repository:string)=>string[]=()=>[]){
+    /** Hosts ever granted GitHub write paths (see GitHubWorkforce.writerHosts); null = history unreadable. */
+    writerHosts:()=>string[]|null=()=>[]){
     await mkdir(resolve(dir),{recursive:true,mode:0o700});
     const a=new PanterRdd(join(resolve(dir),'panter-rdd.json'),native,mesh,github,runnerKeys,localGit,transportAttestation,writerHosts);
     try{
@@ -163,12 +163,13 @@ export class PanterRdd {
       // Panter is the trusted transport: each report is the terminal receipt of its own frozen lens work, completed
       // by that work's bound worker host. A report naming another packet is not this lens's report; a report that
       // does not know its packet digest (e-mail transport) is bound by the work itself.
-      // A host that may have written code (writer work in any mission, GitHub write access to this repository, or a
+      // A host that may have written code (writer work in any mission, GitHub write access to any repository, or a
       // former leader) never attests a review, and Judgment Day's blind judges must be distinct hosts: one host cannot
       // be both judges. Lenses of a 4R are different checks, so one host may carry two of them; their mutual
       // independence then rests on that host, as the operator accepted.
-      const authors=this.transportAttestation&&!runnerAttested&&complete&&independence?
-        new Set([...await this.mesh.authorHosts(),...(current.repository?this.writerHosts(current.repository):[])]):null;
+      // An unreadable writer history attests nothing (fail closed).
+      const writers=this.transportAttestation&&!runnerAttested&&complete&&independence?this.writerHosts():null;
+      const authors=writers?new Set([...await this.mesh.authorHosts(),...writers]):null;
       const distinctJudges=current.kind!=='judgment-day'||new Set(r.work.map(w=>w.host)).size===r.work.length;
       transportAttested=!!authors&&distinctJudges&&r.work.every((w,index)=>{
         const data=parsed[index];
@@ -176,7 +177,7 @@ export class PanterRdd {
           data.agentId===w.agentId&&data.candidateSha===current.candidateSha&&typeof data.subagentRunId==='string'&&
           Array.isArray(data.evidence)&&data.evidence.length>0&&Array.isArray(data.findings)&&
           /^[0-9a-f]{64}$/.test(w.packetDigest??'')&&
-          (!/^[0-9a-f]{64}$/.test(String(data.packetDigest??''))||data.packetDigest===w.packetDigest);
+          (!/^[0-9a-f]{64}$/i.test(String(data.packetDigest??''))||String(data.packetDigest).toLowerCase()===w.packetDigest);
       });
     }
     const attested=runnerAttested||transportAttested;

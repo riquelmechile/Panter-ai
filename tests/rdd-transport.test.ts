@@ -24,11 +24,11 @@ type Report = (agentId: string, packetDigest: string) => Record<string, unknown>
 const clean: Report = (agentId, packetDigest) => ({ agentId, candidateSha: sha, packetDigest, subagentRunId: `run-${agentId}`,
   findings: [], evidence: ['read the diff'] });
 
-async function remoteReview(transport: boolean, report: Report = clean, opts: { author?: 'grok' | 'gpt-b'; authorMission?: string; repoWriters?: string[]; kind?: '4r' | 'judgment-day' } = {}) {
+async function remoteReview(transport: boolean, report: Report = clean, opts: { author?: 'grok' | 'gpt-b'; authorMission?: string; repoWriters?: string[] | null; kind?: '4r' | 'judgment-day' } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'panter-rdd-transport-'));
   try {
     const native = await NativeSubagentReview.open(dir), mesh = await MeshEngine.open(dir);
-    const rdd = await PanterRdd.open(dir, native, mesh, gate(), {}, null, transport, r => r === repo ? opts.repoWriters ?? [] : []);
+    const rdd = await PanterRdd.open(dir, native, mesh, gate(), {}, null, transport, () => opts.repoWriters === undefined ? [] : opts.repoWriters);
     for (const host of ['gpt-b', 'grok', 'gemini'] as const)
       await mesh.setProfile('gpt-a', { host, actorId: `actor-${host}`, modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer'] }, 0);
     for (const [agentId, host] of [['review-risk', 'grok'], ['review-readability', 'gemini'], ['review-reliability', 'gpt-b'], ['review-resilience', 'grok']] as const)
@@ -126,4 +126,15 @@ test('a former leader is remembered as a possible author', async () => {
     if (before === undefined) delete process.env.PANTER_LEAD_HOST; else process.env.PANTER_LEAD_HOST = before;
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('an unreadable GitHub writer history attests nothing', async () => {
+  const v = await remoteReview(true, clean, { repoWriters: null });
+  assert.equal(v.reviewComplete, true);
+  assert.equal(v.transportAttested, false);
+});
+
+test('a foreign packet digest in upper case is still foreign', async () => {
+  const v = await remoteReview(true, (a, d) => clean(a, a === 'review-risk' ? 'F'.repeat(64) : d));
+  assert.equal(v.transportAttested, false);
 });

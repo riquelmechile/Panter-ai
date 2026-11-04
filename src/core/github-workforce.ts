@@ -19,7 +19,8 @@ export type GitHubWriteOp=typeof GITHUB_WRITE_OPS[number];
 export type GitHubGrant={workId:string;host:string;repository:string;ops:GitHubWriteOp[];branch:string|null;
   base:string|null;numbers:number[];paths?:string[];auto?:boolean;own?:number[];branchCreated:boolean;createdBranch?:{repository:string;branch:string;lastSha?:string};createdAt:string;revokedAt:string|null;writes:number;reads:number};
 type Audit={at:string;workId:string;host:string;repository:string;op:string;ref:string;outcome:string};
-type Data={version:1;grants:GitHubGrant[];audit:Audit[]};
+/** writers: every host ever granted commit or pr, in any repository; never pruned (grant eviction cannot forget a writer). */
+type Data={version:1;grants:GitHubGrant[];audit:Audit[];writers?:string[]};
 const seed:Data={version:1,grants:[],audit:[]};
 type Claim={workId:string;attemptId:string;leaseGeneration:number};
 
@@ -143,7 +144,10 @@ export class GitHubWorkforce{
       `Invalid PANTER_GITHUB_WORKFORCE_REPOS entry: ${a}`);
     this.configured=Boolean(this.token)&&this.allow.length>0;
     this.db=this.configured?SqliteLedger.open(dir):null;
+    this.dir=dir;
   }
+  private readonly dir:string;
+  private history:SqliteLedger|null=null;
   describe(){return {configured:this.configured,repositories:this.allow,
     operations:{read:'repository resources of a granted work',write:[...GITHUB_WRITE_OPS]},
     never:['merge','approve','delete','force-push','existing/protected/default branches','CI/CODEOWNERS/git config files','secrets','settings']};}
@@ -212,6 +216,7 @@ export class GitHubWorkforce{
         createdAt:iso(),revokedAt:null,writes:existing?.writes??0,reads:existing?.reads??0};
       const i=d.grants.findIndex(x=>x.workId===out.workId);
       if(i>=0)d.grants[i]=out;else d.grants.push(out);
+      if(ops.some(op=>op==='commit'||op==='pr'))d.writers=[...new Set([...(d.writers??[]),out.host])];
       // Revoked grants are never evicted: "revoked stays revoked".
       const live=d.grants.filter(g=>!g.revokedAt);
       if(live.length>5000){const drop=new Set(live.slice(0,live.length-5000).map(g=>g.workId));d.grants=d.grants.filter(g=>g.revokedAt||!drop.has(g.workId));}
@@ -256,13 +261,15 @@ export class GitHubWorkforce{
     if(omitted)out.push(`\n[${omitted} file(s) omitted to fit the size limit; judge only what is shown and say so.]`);
     return out.join('\n');
   }
-  /** Hosts ever granted a write path (commit or pr) in a repository, revoked grants included: anything they
-   * pushed there may be part of a candidate, so their reviews never count as independent of its authors. */
-  writerHosts(repository:string):string[]{
-    if(!this.db)return [];
-    const repo=repository.toLowerCase();
-    return [...new Set(this.db.read('github_workforce',seed).grants.filter(g=>g.repository.toLowerCase()===repo&&
-      g.ops.some(op=>op==='commit'||op==='pr')).map(g=>g.host).filter(Boolean))];
+  /** Hosts ever granted a write path (commit or pr) in ANY repository (a candidate can come from a fork or another
+   * repository), revoked or evicted grants included: their reviews never count as independent of its authors.
+   * Read from the ledger even when the workforce is switched off; null when the history cannot be read. */
+  writerHosts():string[]|null{
+    try{
+      const db=this.db??(this.history??=SqliteLedger.open(this.dir));
+      const d=db.read('github_workforce',seed);
+      return [...new Set([...(d.writers??[]),...d.grants.filter(g=>g.ops.some(op=>op==='commit'||op==='pr')).map(g=>g.host)].filter(Boolean))];
+    }catch{return null;}
   }
   audit(caller:string,workId?:string){
     this.ensure();

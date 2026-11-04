@@ -379,10 +379,13 @@ test('narrowing accepts the same folder with or without a trailing slash', () =>
   await assert.rejects(gh.grant('claude', { workId, repository: 'acme/site', ops: ['commit'], paths: ['docs-evil'] }), /can only narrow/);
 }));
 
-test('writer hosts: any grant with commit or pr in the repository, revoked or not, whatever the work role', () => fixture({}, async ({ gh, workId }) => {
-  assert.deepEqual(gh.writerHosts('acme/site'), []);
+test('writer hosts: any grant with commit or pr, revoked or not, whatever the work role; kept with the workforce off', () => fixture({}, async ({ gh, workId, mesh }) => {
+  assert.deepEqual(gh.writerHosts(), []);
   await gh.grant('claude', { workId, repository: 'acme/site', ops: ['commit', 'pr'] });
   await gh.revoke('claude', workId);
-  assert.deepEqual(gh.writerHosts('ACME/site'), ['gpt-a']);
-  assert.deepEqual(gh.writerHosts('acme/other'), []);
+  assert.deepEqual(gh.writerHosts(), ['gpt-a']);
+  // The same ledger read by a process whose workforce token was removed.
+  const off = new GitHubWorkforce((gh as any).dir, mesh, leaderHost, {});
+  assert.equal(off.configured, false);
+  assert.deepEqual(off.writerHosts(), ['gpt-a']);
 }));
