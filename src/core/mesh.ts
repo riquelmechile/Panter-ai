@@ -6,7 +6,7 @@ import { summarizeWorkforce, validateRouteReport, type WorkerHost, type WorkerOb
 import { createHash, randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import { agentDefinition, checkSkills, specialistPacket, REVIEW_4R, JUDGMENT_DAY, type GentleSkillId } from './gentle-catalog.js';
+import { agentDefinition, checkSkills, specialistPacket, packetWithoutMaterial, REVIEW_4R, JUDGMENT_DAY, type GentleSkillId } from './gentle-catalog.js';
 
 export const HOSTS = ['gpt-a', 'gpt-b', 'grok', 'gemini', 'claude'] as const;
 export type Host = typeof HOSTS[number];
@@ -21,7 +21,7 @@ export const EFFORT_REQUEST_PATTERN = /^[A-Za-z0-9._-]{1,32}$/;
 export type WorkerExecutionRequest = { serviceTier?: string; stream?: boolean; parallelToolCalls?: boolean; maxNativeSubagents?: number };
 export type WorkExecutionRequest = WorkerExecutionRequest & { status: 'REQUESTED_UNVERIFIED'; model: string; reasoningEffort: string };
 export type MeshMessage = { id: string; missionId: string; from: Host; to: Host; workId: string | null; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' | 'RESULT'; text: string; createdAt: string; inboxRevision: number };
-export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; transportClaim?: boolean };
+export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; transportClaim?: boolean; withdrawn?: boolean };
 export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
 export type WorkforceTaskBridge = {taskId:string;host:WorkerHost;protocolEra:'2025-11-25'|'2026-07-28';status:'ARMED'|'DELIVERED'|'CANCELLED'|'EXPIRED';createdAt:string;expiresAt:string;workId:string|null};
@@ -454,11 +454,18 @@ export class MeshEngine {
   /** Assemble immutable role+skill packet from MCP-hosted catalog. The ledger
    * retains the exact packet; later skill updates cannot change in-flight work.
    */
-  async delegateBoundSpecialist(caller:Host,input:{missionId:string;agentId:string;objective:string;idempotencyKey:string;candidateSha?:string;allowedEditSurfaces?:string[]}) {
+  /** Host a specialist is bound to (leader view), to decide transport-specific packet material before dispatch. */
+  async specialistHost(agentId:string){return this.read(d=>activeBindings(d).find(b=>b.agentId===agentId)?.host??null);}
+  async delegateBoundSpecialist(caller:Host,input:{missionId:string;agentId:string;objective:string;idempotencyKey:string;candidateSha?:string;allowedEditSurfaces?:string[];material?:string}) {
     check(caller===leaderHost(),`Only ${leaderLabel()} can delegate`);
     const binding=await this.read(d=>activeBindings(d).find(b=>b.agentId===input.agentId)??null);
     check(binding,'Specialist must be configured in Agent Studio');
-    const packet=await specialistPacket({agentId:binding.agentId,skillIds:binding.skillIds,objective:input.objective,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,candidateSha:input.candidateSha,allowedEditSurfaces:input.allowedEditSurfaces});
+    // Leader material (e.g. a diff fetched from GitHub) may differ between retries of the same dispatch;
+    // a retransmission returns the already-delegated work instead of conflicting on the packet text.
+    const packet=await specialistPacket({agentId:binding.agentId,skillIds:binding.skillIds,objective:input.objective,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,candidateSha:input.candidateSha,allowedEditSurfaces:input.allowedEditSurfaces,material:input.material});
+    const dup=await this.read(d=>d.works.find(w=>w.missionId===input.missionId&&w.idempotencyKey===input.idempotencyKey)??null);
+    if(dup&&dup.target===binding.host&&dup.specialist?.agentId===binding.agentId&&dup.specialist.bindingRevision===binding.revision&&
+      dup.specialist.candidateSha===input.candidateSha&&packetWithoutMaterial(dup.instruction)===packetWithoutMaterial(packet.instruction))return dup;
     return this.delegate(caller,{missionId:input.missionId,target:binding.host,role:packet.role,instruction:packet.instruction,idempotencyKey:input.idempotencyKey,
       specialist:{agentId:packet.agentId,skillIds:packet.skillIds,packetDigest:packet.digest,assetDigests:packet.assetDigests,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,bindingRevision:binding.revision,candidateSha:input.candidateSha,allowedEditSurfaces:packet.allowedEditSurfaces}});
   }
@@ -726,7 +733,7 @@ export class MeshEngine {
    * one durable ledger commit for all review delegations. Native Pi's provider
    * judgment authority is NOT emulated; a controller must evaluate results.
    */
-  async startReview(caller:Host,input:{missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string}) {
+  async startReview(caller:Host,input:{missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;materialFor?:(host:Host)=>Promise<string|undefined>}) {
     check(caller===leaderHost(),`Only ${leaderLabel()} can initiate reviews`);
     check(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(input.candidateSha),'Invalid frozen candidate SHA');
     check(input.missionId.trim().length>0 && input.missionId.length<=120,'Invalid mission');
@@ -740,7 +747,8 @@ export class MeshEngine {
     // Panter-RDD verifies runner evidence; the host label never proves independence.
     const packets=await Promise.all(ids.map((id,i)=>{
       const binding=configured[i]!;
-      return specialistPacket({agentId:id,skillIds:binding.skillIds,objective:input.objective,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,candidateSha:input.candidateSha});
+      return (async()=>specialistPacket({agentId:id,skillIds:binding.skillIds,objective:input.objective,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,candidateSha:input.candidateSha,
+        material:input.materialFor?await input.materialFor(binding.host):undefined}))();
     }));
     return this.write(d=>{
       check(!d.profiles.some(p=>p.host===leaderHost()&&p.coordinationMode==='GPT_A_ONLY'),
@@ -779,7 +787,7 @@ export class MeshEngine {
       const interrupted=reviewInterrupted(work as MeshWork[]);
       return {review,stage:interrupted?'INTERRUPTED' as const:terminal?'READY_FOR_CONTROLLER' as const:'AWAITING_REPORTS' as const,
         nativeReviewAuthority:false,
-        work:work.map(w=>({workId:w!.id,agentId:w!.specialist?.agentId,packetDigest:w!.specialist?.packetDigest,host:w!.target,state:w!.state,receiptDigest:w!.receiptDigest,result:w!.result}))};
+        work:work.map(w=>({workId:w!.id,agentId:w!.specialist?.agentId,packetDigest:w!.specialist?.packetDigest,host:w!.target,state:w!.state,receiptDigest:w!.receiptDigest,result:w!.result,withdrawn:w!.withdrawn===true}))};
     });
   }
 
@@ -919,7 +927,23 @@ export class MeshEngine {
     return this.read(d => {
       const w = d.works.find(w => w.id === id);
       check(w, 'Work not found');
-      return { id: w.id, target: w.target, role: w.role, state: w.state };
+      return { id: w.id, target: w.target, role: w.role, state: w.state, createdAt: w.createdAt, transportHeld: Boolean(w.transportClaim && w.state === 'RUNNING') };
+    });
+  }
+  /** Leader withdraws remote read-only work nobody really started: still QUEUED, or only held by a transport
+   * (e.g. e-mailed but unanswered). It ends ABORTED_NO_EFFECTS; a late answer is refused by the fenced attempt. */
+  async withdrawUnstarted(caller: Host, id: string, reason: string) {
+    check(caller === leaderHost(), `Only ${leaderLabel()} may withdraw work`);
+    return this.write(d => {
+      const w = d.works.find(w => w.id === id);
+      check(w, 'Work not found');
+      if (w.state === 'ABORTED_NO_EFFECTS') return { workId: w.id, state: w.state, withdrawn: false };
+      check(w.role !== 'implementer' || w.state === 'QUEUED', 'A started writer is never withdrawn automatically');
+      check(w.state === 'QUEUED' || (w.state === 'RUNNING' && w.transportClaim === true), 'Work already started by its worker');
+      w.state = 'ABORTED_NO_EFFECTS'; w.attemptId = null; w.leaseUntil = null; w.completedAt = iso();
+      w.result = `Withdrawn by ${leaderLabel()} before any worker started it: ${reason.slice(0, 300)}`; delete w.transportClaim; w.withdrawn = true;
+      this.notify(d, w.target); this.notify(d, leaderHost());
+      return { workId: w.id, state: w.state, withdrawn: true };
     });
   }
   async complete(caller: Host, id: string, attemptId: string, generation: number, result: string, success = true, transport = false) {
@@ -1023,7 +1047,7 @@ export class MeshEngine {
     return this.read(d => ({
       revision: d.inboxRevision[caller],
       messages: d.messages.filter(m => m.to === caller && m.inboxRevision > sinceRevision),
-      works: d.works.filter(w => w.target === caller || caller === leaderHost()).map(w => ({ id: w.id, missionId: w.missionId, target: w.target, role: w.role, state: w.state, receiptDigest: w.receiptDigest, completedAt: w.completedAt })),
+      works: d.works.filter(w => w.target === caller || caller === leaderHost()).map(w => ({ id: w.id, missionId: w.missionId, target: w.target, role: w.role, state: w.state, receiptDigest: w.receiptDigest, completedAt: w.completedAt, withdrawn: w.withdrawn === true })),
     }));
   }
   /** Safe to publish across the host mesh: never include actor-specific counts or secrets. */

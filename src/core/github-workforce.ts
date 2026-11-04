@@ -17,7 +17,7 @@ import {SqliteLedger} from './sqlite-ledger.js';
 export const GITHUB_WRITE_OPS=['commit','pr','comment','issue'] as const;
 export type GitHubWriteOp=typeof GITHUB_WRITE_OPS[number];
 export type GitHubGrant={workId:string;host:string;repository:string;ops:GitHubWriteOp[];branch:string|null;
-  base:string|null;numbers:number[];own?:number[];branchCreated:boolean;createdBranch?:{repository:string;branch:string;lastSha?:string};createdAt:string;revokedAt:string|null;writes:number;reads:number};
+  base:string|null;numbers:number[];paths?:string[];auto?:boolean;own?:number[];branchCreated:boolean;createdBranch?:{repository:string;branch:string;lastSha?:string};createdAt:string;revokedAt:string|null;writes:number;reads:number};
 type Audit={at:string;workId:string;host:string;repository:string;op:string;ref:string;outcome:string};
 type Data={version:1;grants:GitHubGrant[];audit:Audit[]};
 const seed:Data={version:1,grants:[],audit:[]};
@@ -28,7 +28,9 @@ export type WorkforceMesh={
   workTarget(caller:string,id:string):Promise<{id:string;target:string;role:string;state:string}>;
 };
 export type FileChange={path:string;content?:string;delete?:boolean};
-export type GrantInput={repository:string;ops:GitHubWriteOp[];branch?:string;base?:string;numbers?:number[]};
+export type GrantInput={repository:string;ops:GitHubWriteOp[];branch?:string;base?:string;numbers?:number[];
+  /** When set, commits may only touch these files or folders (the run's approved edit surfaces). */paths?:string[];
+  /** Issued by the harness on its own; never overrides a grant the leader set by hand. */auto?:boolean};
 export class GitHubWorkforceError extends Error{}
 
 const API='https://api.github.com';
@@ -169,12 +171,15 @@ export class GitHubWorkforce{
     if(input.base!==undefined)check(validRefName(input.base),'Invalid base branch');
     const numbers=[...new Set(input.numbers??[])];
     check(numbers.length<=20&&numbers.every(n=>Number.isInteger(n)&&n>0),'Invalid issue/PR numbers');
-    return {ops,numbers};
+    const paths=input.paths===undefined?undefined:[...new Set(input.paths)].sort();
+    if(paths)check(paths.length>0&&paths.length<=100&&paths.every(p=>typeof p==='string'&&p.length>0&&p.length<=400&&!p.startsWith('/')&&
+      !p.includes('\0')&&!p.split('/').some(x=>x==='..')),'Invalid allowed paths');
+    return {ops,numbers,paths};
   }
   async grant(caller:string,input:{workId:string}&GrantInput){
     this.ensure();
     check(caller===this.leader(),'Only the leader grants GitHub access');
-    const {ops,numbers}=this.validateGrant(input);
+    const {ops,numbers,paths}=this.validateGrant(input);
     const work=await this.mesh.workTarget(caller,input.workId);
     check(work.target!==this.leader(),'Leader work cannot hold a GitHub grant');
     const needsBranch=ops.includes('commit')||ops.includes('pr');
@@ -185,16 +190,22 @@ export class GitHubWorkforce{
     this.db!.mutate('github_workforce',seed,d=>{
       const existing=d.grants.find(x=>x.workId===work.id);
       check(!existing?.revokedAt,'This work\'s GitHub grant was revoked; delegate a new work');
+      // A grant the leader set by hand is never widened back by the harness's automatic re-issue.
+      if(existing&&input.auto===true&&!existing.auto){out=existing;return;}
+      // A path limit only narrows: a later grant without paths keeps it, and new paths must fit inside it.
+      if(existing?.paths&&paths)check(paths.every(p=>existing.paths!.some(q=>p===q||p.startsWith(q+'/'))),'Allowed paths can only narrow');
+      const effPaths=paths??existing?.paths;
       // An identical replay (e.g. an idempotent delegate retry) returns the grant untouched, even after completion.
       if(existing&&existing.repository===input.repository&&JSON.stringify(existing.ops)===JSON.stringify(ops)&&
-        existing.branch===branch&&existing.base===base&&JSON.stringify(existing.numbers)===JSON.stringify(numbers)){out=existing;return;}
+        existing.branch===branch&&existing.base===base&&JSON.stringify(existing.numbers)===JSON.stringify(numbers)&&
+        JSON.stringify(existing.paths??null)===JSON.stringify(effPaths??null)&&Boolean(existing.auto)===(input.auto===true)){out=existing;return;}
       check(!TERMINAL.has(work.state),'Work is finished');
       check(!existing||existing.repository===input.repository,'A grant cannot move to another repository; delegate a new work');
       check(!existing?.createdBranch||existing.branch===branch,'The working branch cannot change after it was created');
       // One work per branch name in a repository (case-insensitive): two grants never share a working branch.
       if(branch)check(!d.grants.some(x=>x.workId!==work.id&&x.repository.toLowerCase()===input.repository.toLowerCase()&&
         (x.branch??'').toLowerCase()===branch.toLowerCase()),'Another work already uses that branch in this repository');
-      out={workId:work.id,host:work.target,repository:input.repository,ops,branch,base,numbers,own:existing?.own??[],
+      out={workId:work.id,host:work.target,repository:input.repository,ops,branch,base,numbers,...(effPaths?{paths:effPaths}:{}),...(input.auto===true?{auto:true}:{}),own:existing?.own??[],
         branchCreated:existing?.branchCreated??false,...(existing?.createdBranch?{createdBranch:existing.createdBranch}:{}),
         createdAt:iso(),revokedAt:null,writes:existing?.writes??0,reads:existing?.reads??0};
       const i=d.grants.findIndex(x=>x.workId===out.workId);
@@ -217,6 +228,31 @@ export class GitHubWorkforce{
         createdAt:iso(),revokedAt:iso(),writes:0,reads:0});found=true;
     });
     return {workId,revoked:found};
+  }
+  /** Leader-side, read-only: the diff of a frozen candidate against its base, as text material for hosts that
+   * cannot reach the repository (e.g. Gemini by e-mail). Pinned to an allowed repository like every call. */
+  async candidateMaterial(repository:string,base:string|null,head:string,max=26_000){
+    this.ensure();
+    check(repoAllowed(this.allow,repository),'Repository is not in PANTER_GITHUB_WORKFORCE_REPOS');
+    check(/^[a-f0-9]{40}$/.test(head),'Invalid candidate SHA');
+    const repo=base?null:this.ok(await this.api('GET',repository,''),'repository lookup');
+    const from=base??repo.default_branch;
+    check(validRefName(from)||/^[a-f0-9]{40}$/.test(from),'Invalid base');
+    const cmp=this.ok(await this.api('GET',repository,`compare/${refPath(from)}...${head}`),'compare');
+    const files:any[]=Array.isArray(cmp?.files)?cmp.files:[];
+    const out=[`Repository: ${repository}`,`Diff ${from}...${head} (${files.length} file(s), ${cmp?.ahead_by??'?'} commit(s) ahead)`];
+    let used=out.join('\n').length,omitted=0;
+    const oneLine=(v:unknown)=>String(v).replace(/[\r\n\u2028\u2029]+/g,' ').slice(0,400);
+    for(const f of files){
+      const patch=typeof f.patch==='string'?f.patch:'(no textual patch: binary or too large)';
+      // A fence longer than any backtick run in the patch, so diff text can never close it.
+      const fence='`'.repeat(Math.max(3,...[...patch.matchAll(/`+/g)].map(m=>m[0].length+1)));
+      const block=`\n### ${oneLine(f.filename)} (${oneLine(f.status)}, +${Number(f.additions)||0} -${Number(f.deletions)||0})\n${fence}diff\n${patch}\n${fence}`;
+      if(used+block.length>max){omitted++;continue;}
+      out.push(block);used+=block.length;
+    }
+    if(omitted)out.push(`\n[${omitted} file(s) omitted to fit the size limit; judge only what is shown and say so.]`);
+    return out.join('\n');
   }
   audit(caller:string,workId?:string){
     this.ensure();
@@ -322,6 +358,7 @@ export class GitHubWorkforce{
     check(Array.isArray(files)&&files.length>0&&files.length<=MAX_FILES,`Commit 1-${MAX_FILES} files`);
     for(const f of files){
       check(safeRepoPath(f.path),`Path not allowed: ${String(f.path).slice(0,100)}`);
+      check(!g0.paths||g0.paths.some(q=>f.path===q||f.path.startsWith(q.replace(/\/+$/,'')+'/')),`Outside the approved edit surfaces: ${String(f.path).slice(0,100)}`);
       check(f.delete===true?f.content===undefined:typeof f.content==='string'&&Buffer.byteLength(f.content)<=MAX_FILE_BYTES,
         `Give either text content (≤1 MB) or delete:true for ${f.path}`);
     }
@@ -330,6 +367,7 @@ export class GitHubWorkforce{
     return this.serial(`${g0.repository}#${branch}`,async()=>{
       const g=await this.authorize(caller,claim,'commit');
       check(g.branch===branch&&validRefName(branch)&&branch.startsWith('panter/'),'Grant branch changed');
+      for(const f of files)check(!g.paths||g.paths.some(q=>f.path===q||f.path.startsWith(q.replace(/\/+$/,'')+'/')),`Outside the approved edit surfaces: ${String(f.path).slice(0,100)}`);
       this.reserve(g,'writes');
       try{
         const repo=this.ok(await this.call(g,'GET',''),'repository lookup');

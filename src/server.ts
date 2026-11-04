@@ -126,6 +126,36 @@ if(process.env.PANTER_RDD_LOCAL_WORKTREES_FILE&&process.env.PANTER_GITHUB_WORKFO
 const localGit=process.env.PANTER_RDD_LOCAL_WORKTREES_FILE?await LocalGitVerifier.open(process.env.PANTER_RDD_LOCAL_WORKTREES_FILE):null;
 const panterRdd = await PanterRdd.open(dataDir,nativeSubagentReview,mesh,githubGate,rddRunnerKeys,localGit);
 const harness = await AutomaticHarness.open(dataDir,mesh,nativeSubagentReview,githubGate,nativeReview,panterRdd,true);
+// Bound hosts run the harness phases. Hosts reached only by e-mail (no repository access) get the candidate diff
+// as packet material; every other host gets a work-scoped GitHub grant for its phase; a host that does not start
+// a dispatched phase in time loses it to native execution.
+// Work-scoped GitHub grants are issued automatically only when the operator opted in (a standing, separate
+// authorization for GitHub writes); otherwise hosts keep the manual, leader-issued grant flow.
+const autoGithubGrants = process.env.PANTER_HARNESS_AUTO_GITHUB_GRANTS === '1';
+const materialHosts = new Set((process.env.PANTER_MATERIAL_HOSTS ?? 'gemini').split(',').map(x => x.trim()).filter(Boolean));
+const pickupSeconds = Number(process.env.PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS ?? '180');
+const pickupMailSeconds = Number(process.env.PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS_MAIL ?? '1200');
+if (![pickupSeconds, pickupMailSeconds].every(n => Number.isInteger(n) && n >= 30 && n <= 86_400)) throw new Error('Invalid remote pickup timeout (30-86400 seconds)');
+harness.setHostHooks({
+  materialFor: async (run, host) => {
+    if (!materialHosts.has(host) || !githubWorkforce.configured || !run.githubRepository || !/^[a-f0-9]{40}$/.test(run.candidateSha ?? '')) return undefined;
+    try { return await githubWorkforce.candidateMaterial(run.githubRepository, run.githubExpectedBase ?? null, run.candidateSha!); } catch { return undefined; }
+  },
+  afterDispatch: async ({ run, workId, phase, host }) => {
+    if (!autoGithubGrants || !githubWorkforce.configured || !run.githubRepository || materialHosts.has(host)) return;
+    // Commits/PRs also need the run's own operator write approval (IMPLEMENT is never dispatched without it).
+    if (phase === 'IMPLEMENT' && run.permission !== 'WRITE_APPROVED') return;
+    const comment = (phase === 'VERIFY' || phase === 'REVIEW' || phase === 'JUDGMENT') && run.githubPrNumber ? ['comment' as const] : [];
+    await githubWorkforce.grant(leaderHost(), { workId, repository: run.githubRepository, auto: true,
+      ops: phase === 'IMPLEMENT' ? ['commit', 'pr'] : comment, numbers: comment.length ? [run.githubPrNumber!] : [],
+      // The implementer commits only inside the run's approved edit surfaces.
+      ...(phase === 'IMPLEMENT' ? { paths: run.paths } : {}),
+      // The worker branches from, and opens its PR against, the run's target base.
+      ...(phase === 'IMPLEMENT' && run.githubExpectedBase ? { base: run.githubExpectedBase } : {}) });
+  },
+  pickupTimeoutMs: host => (materialHosts.has(host) ? pickupMailSeconds : pickupSeconds) * 1000,
+  abandoned: async ({ workId }) => { if (githubWorkforce.configured) await githubWorkforce.revoke(leaderHost(), workId); },
+});
 // Legacy/direct A2A writers cannot bypass the operator-issued harness grant.
 mesh.setWriteGuard((missionId,paths)=>harness.authorizeDelegatedWrite(missionId,paths));
 const engramEnabled = process.env.PANTER_ENGRAM_ENABLED === '1';
@@ -381,7 +411,7 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_mesh_profiles',{description:'List configured host profiles.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.profiles()));
   const githubOps = z.array(z.enum(GITHUB_WRITE_OPS)).max(4);
   const githubGrantInput = z.object({repository:bounded(201),ops:githubOps.default([]),branch:bounded(200).optional(),base:bounded(200).optional(),
-    numbers:z.array(z.number().int().positive()).max(20).optional()}).strict();
+    numbers:z.array(z.number().int().positive()).max(20).optional(),paths:z.array(bounded(400)).min(1).max(100).optional()}).strict();
   server.registerTool('panter_mesh_delegate',{description:`${leaderLabel()} creates actor-bound A2A work for one configured host. Optional github attaches a work-scoped GitHub grant (see panter_github_grant).`,inputSchema:z.object({missionId:bounded(120),target:hostEnum,role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160),github:githubGrantInput.optional()})},async x=>execute(async()=>{
     const {github,...input}=x;
     if(github)githubWorkforce.validateGrant(github); // fail before creating the work
