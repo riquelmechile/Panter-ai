@@ -218,3 +218,9 @@ La interfaz read-only no ejecuta código, no hace cambios en producción y no re
 - [ ] **Gate producción:** cutover del `RunnerAuditJournal` legado a segmentos y recuperación segura de truncamiento del último segmento, sin eliminar la evidencia histórica.
 - [ ] **Gate producción:** fencing de único escritor, conciliación de efectos `OUTCOME_UNKNOWN`, grants en transporte AF_UNIX, worktrees y sandbox reales con UID distintos.
 - [ ] Revisar con Claude el SHA exacto y CI antes de merge, sin desplegar.
+
+## v0.16 superficie de herramientas por rol y routers por dominio
+
+- [x] `tools/list` por rol: líder (~39) y worker (~32) ven los 8 routers por dominio más las herramientas de su flujo; el operador ve todo. Ninguna herramienta se bloquea: siguen invocables por nombre y por su router, con su misma autorización. `PANTER_TOOL_SURFACE=all` vuelve a la lista completa. Ver [TOOL_SURFACE.md](TOOL_SURFACE.md).
+- [x] Routers `panter_<dominio>` con `operation=index` (y esquema de entrada por operación), validación con el esquema de la herramienta y el mismo handler.
+- [ ] Montar los MCP downstream (commerce-control primero) como routers propios, con clasificación lectura/escritura y permisos de Panter.

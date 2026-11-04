@@ -1,6 +1,7 @@
 import { leaderHost, leaderLabel, appEventHosts, freezeLeaderHost, leaderPolicyProfile, adoptPendingLeaderPhases } from './core/leadership.js';
 import { ExternalOAuthVerifier, staticBearerMatch } from './core/oauth.js';
 import { isAdminPrincipal, parseOwnerTrustedHosts } from './core/owner-trust.js';
+import { createToolSurface, type SurfaceRole } from './core/tool-surface.js';
 import { EmbeddedOAuth } from './core/embedded-oauth.js';
 import { openEngramBridge } from './core/engram-runtime.js';
 import { readFile, chmod, mkdir, lstat, unlink } from 'node:fs/promises';
@@ -233,13 +234,18 @@ function connectionContract(actor:string):string{
   const leader=actor===leaderHost();
   return buildConnectionContract(actor,leader,mesh.profileSnapshot(actor),leader?hostRequest(leaderPolicyProfile()):undefined);
 }
+// Per-role tools/list (routers plus each role's workflow tools); PANTER_TOOL_SURFACE=all lists every tool again.
+const toolSurfaceAll = process.env.PANTER_TOOL_SURFACE === 'all';
+if (!['all', 'role', undefined, ''].includes(process.env.PANTER_TOOL_SURFACE)) throw new Error('Invalid PANTER_TOOL_SURFACE (role or all)');
+function surfaceRole(): SurfaceRole { const p = principal(); return !isHost(p) ? 'operator' : p === leaderHost() ? 'leader' : 'worker'; }
 const handler = createMcpHandler(reqCtx => {
   const server = new McpServer({ name: 'panter-ai', version: '0.15.0' }, {
     capabilities: { resources: { subscribe: true }, events: {} } as any,
-    instructions: `Panter-ai is a host-operated development harness with NO provider inference. ${leaderLabel()} is the coordinator. For a new user development request start with panter_harness_start (goal + permitted work and observed facts, NEVER ask the user to pick agents, roles, skills or review lenses). Then call panter_harness_tick and execute the returned phase automatically with host tools or native subagents; call panter_harness_report after observing actual results, and repeat until blocked by actual authorization/evidence or completed. The server automatically selects ODD discovery, planning, scoped implementation, independent verification and 4R by risk; Judgment Day only when explicitly requested. An initial Agent Studio preference may bind model/host but never requires per-task specialist selection. GPT_A_ONLY forbids remote delegation while preserving maximum requested model/effort, fast native worker processing, and maximum safe host-observed parallelism. If no remote peer is connected continue with ${leaderLabel()} native/inline. The host owns model selection and subagent execution; claims of model, effort, speed or children are REQUESTED, not verified. Do not misstate packet preparation as subagent execution. Panter-RDD is an independently implemented SHA-bound review gate, not the official Gentle AI Go controller; human delivery authorization remains separate. Do not merge or deploy without separately authorized tools and exact-candidate proof.`
+    instructions: `Panter-ai is a host-operated development harness with NO provider inference. ${leaderLabel()} is the coordinator. For a new user development request start with panter_harness_start (goal + permitted work and observed facts, NEVER ask the user to pick agents, roles, skills or review lenses). Then call panter_harness_tick and execute the returned phase automatically with host tools or native subagents; call panter_harness_report after observing actual results, and repeat until blocked by actual authorization/evidence or completed. The server automatically selects ODD discovery, planning, scoped implementation, independent verification and 4R by risk; Judgment Day only when explicitly requested. An initial Agent Studio preference may bind model/host but never requires per-task specialist selection. GPT_A_ONLY forbids remote delegation while preserving maximum requested model/effort, fast native worker processing, and maximum safe host-observed parallelism. If no remote peer is connected continue with ${leaderLabel()} native/inline. The host owns model selection and subagent execution; claims of model, effort, speed or children are REQUESTED, not verified. Do not misstate packet preparation as subagent execution. Panter-RDD is an independently implemented SHA-bound review gate, not the official Gentle AI Go controller; human delivery authorization remains separate. Do not merge or deploy without separately authorized tools and exact-candidate proof. Every Panter tool is also reachable through its domain router (panter_harness, panter_review, panter_mesh, panter_workforce, panter_github, panter_memory, panter_catalog, panter_admin): call it with operation "index" to see its operations. Tools not listed for your role are still callable, by name or through their router, with their usual authorization.`
       + connectionContract(principal()),
 
   });
+  const surface = createToolSurface(server, { role: surfaceRole, listAll: toolSurfaceAll });
 
   // Preserve Zod schema inference for legacy admin tools while enforcing
   // actor authorization at the callback boundary.
@@ -974,6 +980,7 @@ const handler = createMcpHandler(reqCtx => {
       return {contents:[{uri:uri.toString(),mimeType:'application/json',text:JSON.stringify(summary)}]};
     });
   }
+  surface.finalize();
   return server;
 });
 
