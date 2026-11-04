@@ -256,6 +256,14 @@ export class GitHubWorkforce{
     if(omitted)out.push(`\n[${omitted} file(s) omitted to fit the size limit; judge only what is shown and say so.]`);
     return out.join('\n');
   }
+  /** Hosts ever granted a write path (commit or pr) in a repository, revoked grants included: anything they
+   * pushed there may be part of a candidate, so their reviews never count as independent of its authors. */
+  writerHosts(repository:string):string[]{
+    if(!this.db)return [];
+    const repo=repository.toLowerCase();
+    return [...new Set(this.db.read('github_workforce',seed).grants.filter(g=>g.repository.toLowerCase()===repo&&
+      g.ops.some(op=>op==='commit'||op==='pr')).map(g=>g.host).filter(Boolean))];
+  }
   audit(caller:string,workId?:string){
     this.ensure();
     check(caller===this.leader(),'Only the leader reads the GitHub audit');

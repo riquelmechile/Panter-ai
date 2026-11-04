@@ -378,3 +378,11 @@ test('narrowing accepts the same folder with or without a trailing slash', () =>
   assert.deepEqual(g.paths, ['docs', 'docs/sub']);
   await assert.rejects(gh.grant('claude', { workId, repository: 'acme/site', ops: ['commit'], paths: ['docs-evil'] }), /can only narrow/);
 }));
+
+test('writer hosts: any grant with commit or pr in the repository, revoked or not, whatever the work role', () => fixture({}, async ({ gh, workId }) => {
+  assert.deepEqual(gh.writerHosts('acme/site'), []);
+  await gh.grant('claude', { workId, repository: 'acme/site', ops: ['commit', 'pr'] });
+  await gh.revoke('claude', workId);
+  assert.deepEqual(gh.writerHosts('ACME/site'), ['gpt-a']);
+  assert.deepEqual(gh.writerHosts('acme/other'), []);
+}));

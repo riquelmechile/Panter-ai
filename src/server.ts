@@ -128,7 +128,8 @@ const localGit=process.env.PANTER_RDD_LOCAL_WORKTREES_FILE?await LocalGitVerifie
 // Operator opt-in: remote 4R / Judgment Day lens receipts delivered to Panter over each host's authenticated channel
 // count as attested (which host delivered which report), in place of runner signatures the hosts cannot produce.
 const rddTransportAttestation = process.env.PANTER_RDD_TRANSPORT_ATTESTATION === '1';
-const panterRdd = await PanterRdd.open(dataDir,nativeSubagentReview,mesh,githubGate,rddRunnerKeys,localGit,rddTransportAttestation);
+const panterRdd = await PanterRdd.open(dataDir,nativeSubagentReview,mesh,githubGate,rddRunnerKeys,localGit,rddTransportAttestation,
+  repository=>githubWorkforce.writerHosts(repository));
 const harness = await AutomaticHarness.open(dataDir,mesh,nativeSubagentReview,githubGate,nativeReview,panterRdd,true);
 // Bound hosts run the harness phases. Hosts reached only by e-mail (no repository access) get the candidate diff
 // as packet material; every other host gets a work-scoped GitHub grant for its phase; a host that does not start

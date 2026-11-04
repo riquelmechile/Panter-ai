@@ -35,14 +35,17 @@ export class PanterRdd {
   private constructor(private readonly file:string,private readonly native:NativeSubagentReview,
     private readonly mesh:MeshEngine,private readonly github:GitHubDeliveryGate|null,
     private readonly runnerKeys:Readonly<Record<string,string>>,private readonly localGit:LocalGitVerifier|null,
-    private readonly transportAttestation:boolean){}
+    private readonly transportAttestation:boolean,
+    private readonly writerHosts:(repository:string)=>string[]){}
   /** transportAttestation (operator opt-in): a remote lens report counts as attested when Panter itself received it
    * as the terminal receipt of that exact frozen lens work from the bound worker host over its authenticated
    * channel. That proves which host delivered which report for which packet and SHA — not which model ran or how
    * well; the lens contents are still judged as usual. */
-  static async open(dir:string,native:NativeSubagentReview,mesh:MeshEngine,github:GitHubDeliveryGate|null=null,runnerKeys:Readonly<Record<string,string>>={},localGit:LocalGitVerifier|null=null,transportAttestation=false){
+  static async open(dir:string,native:NativeSubagentReview,mesh:MeshEngine,github:GitHubDeliveryGate|null=null,runnerKeys:Readonly<Record<string,string>>={},localGit:LocalGitVerifier|null=null,transportAttestation=false,
+    /** Hosts ever granted GitHub write paths in a repository (see GitHubWorkforce.writerHosts). */
+    writerHosts:(repository:string)=>string[]=()=>[]){
     await mkdir(resolve(dir),{recursive:true,mode:0o700});
-    const a=new PanterRdd(join(resolve(dir),'panter-rdd.json'),native,mesh,github,runnerKeys,localGit,transportAttestation);
+    const a=new PanterRdd(join(resolve(dir),'panter-rdd.json'),native,mesh,github,runnerKeys,localGit,transportAttestation,writerHosts);
     try{
       const d:unknown=JSON.parse(await readFile(a.file,'utf8'));
       demand(d&&typeof d==='object'&&'version' in d&&d.version===1&&'reviews' in d&&Array.isArray(d.reviews),'Invalid Panter-RDD ledger');
@@ -160,10 +163,12 @@ export class PanterRdd {
       // Panter is the trusted transport: each report is the terminal receipt of its own frozen lens work, completed
       // by that work's bound worker host. A report naming another packet is not this lens's report; a report that
       // does not know its packet digest (e-mail transport) is bound by the work itself.
-      // A host that wrote code in this mission never attests a review of it, and Judgment Day's blind judges must
-      // be distinct hosts: one host cannot be both judges. Lenses of a 4R are different checks, so one host may
-      // carry two of them; their mutual independence then rests on that host, as the operator accepted.
-      const authors=this.transportAttestation&&!runnerAttested&&complete&&independence?new Set(await this.mesh.authorHosts(current.missionId)):null;
+      // A host that may have written code (writer work in any mission, GitHub write access to this repository, or a
+      // former leader) never attests a review, and Judgment Day's blind judges must be distinct hosts: one host cannot
+      // be both judges. Lenses of a 4R are different checks, so one host may carry two of them; their mutual
+      // independence then rests on that host, as the operator accepted.
+      const authors=this.transportAttestation&&!runnerAttested&&complete&&independence?
+        new Set([...await this.mesh.authorHosts(),...(current.repository?this.writerHosts(current.repository):[])]):null;
       const distinctJudges=current.kind!=='judgment-day'||new Set(r.work.map(w=>w.host)).size===r.work.length;
       transportAttested=!!authors&&distinctJudges&&r.work.every((w,index)=>{
         const data=parsed[index];

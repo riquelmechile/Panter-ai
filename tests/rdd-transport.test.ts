@@ -24,11 +24,11 @@ type Report = (agentId: string, packetDigest: string) => Record<string, unknown>
 const clean: Report = (agentId, packetDigest) => ({ agentId, candidateSha: sha, packetDigest, subagentRunId: `run-${agentId}`,
   findings: [], evidence: ['read the diff'] });
 
-async function remoteReview(transport: boolean, report: Report = clean, opts: { author?: 'grok' | 'gpt-b'; kind?: '4r' | 'judgment-day' } = {}) {
+async function remoteReview(transport: boolean, report: Report = clean, opts: { author?: 'grok' | 'gpt-b'; authorMission?: string; repoWriters?: string[]; kind?: '4r' | 'judgment-day' } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'panter-rdd-transport-'));
   try {
     const native = await NativeSubagentReview.open(dir), mesh = await MeshEngine.open(dir);
-    const rdd = await PanterRdd.open(dir, native, mesh, gate(), {}, null, transport);
+    const rdd = await PanterRdd.open(dir, native, mesh, gate(), {}, null, transport, r => r === repo ? opts.repoWriters ?? [] : []);
     for (const host of ['gpt-b', 'grok', 'gemini'] as const)
       await mesh.setProfile('gpt-a', { host, actorId: `actor-${host}`, modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer'] }, 0);
     for (const [agentId, host] of [['review-risk', 'grok'], ['review-readability', 'gemini'], ['review-reliability', 'gpt-b'], ['review-resilience', 'grok']] as const)
@@ -36,7 +36,7 @@ async function remoteReview(transport: boolean, report: Report = clean, opts: { 
     if (opts.author) {
       // That host wrote code in this mission.
       await mesh.setProfile('gpt-a', { host: opts.author, actorId: `actor-${opts.author}`, modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer', 'implementer'] }, 1);
-      await mesh.delegate('gpt-a', { missionId: 'm1', target: opts.author, role: 'implementer', instruction: 'Implement x', idempotencyKey: 'impl' });
+      await mesh.delegate('gpt-a', { missionId: opts.authorMission ?? 'm1', target: opts.author, role: 'implementer', instruction: 'Implement x', idempotencyKey: 'impl' });
       const w: any = await mesh.pickup(opts.author, 300);
       await mesh.complete(opts.author, w.work.id, w.work.attemptId, w.work.leaseGeneration, 'done');
     }
@@ -98,4 +98,32 @@ test('Judgment Day judges on one host are never transport attested', async () =>
   assert.equal(v.distinctReviewerRuns, true);
   assert.equal(v.transportAttested, false);
   assert.notEqual(v.record.state, 'APPROVED_PENDING_ACK');
+});
+
+test('writer work in another mission still makes that host an author', async () => {
+  const v = await remoteReview(true, clean, { author: 'grok', authorMission: 'm0' });
+  assert.equal(v.reviewComplete, true);
+  assert.equal(v.transportAttested, false);
+});
+
+test('a host granted GitHub write paths in the repository is an author, whatever role its work had', async () => {
+  const v = await remoteReview(true, clean, { repoWriters: ['gpt-b'] });
+  assert.equal(v.reviewComplete, true);
+  assert.equal(v.transportAttested, false);
+  assert.equal(v.record.state, 'NEEDS_RUNNER_ATTESTATION');
+});
+
+test('a former leader is remembered as a possible author', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-former-leader-'));
+  const before = process.env.PANTER_LEAD_HOST;
+  try {
+    process.env.PANTER_LEAD_HOST = 'gpt-a';
+    await MeshEngine.open(dir);
+    process.env.PANTER_LEAD_HOST = 'claude';
+    const mesh = await MeshEngine.open(dir);
+    assert.ok((await mesh.authorHosts()).includes('gpt-a'));
+  } finally {
+    if (before === undefined) delete process.env.PANTER_LEAD_HOST; else process.env.PANTER_LEAD_HOST = before;
+    await rm(dir, { recursive: true, force: true });
+  }
 });
