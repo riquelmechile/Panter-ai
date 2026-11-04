@@ -32,6 +32,8 @@ async function withHosts<T>(fn: (h: AutomaticHarness, m: MeshEngine, ctx: { disp
       afterDispatch: async (x) => { dispatched.push({ phase: x.phase, host: x.host, workId: x.workId }); },
       pickupTimeoutMs: () => timeout.ms,
       abandoned: async (x) => { abandoned.push(x); },
+      writerHosts: () => [],
+      remoteAttestation: () => true,
     };
     h.setHostHooks(hooks);
     return await fn(h, m, { dispatched, timeout, abandoned });
@@ -670,7 +672,7 @@ test('Judgment Day runs native when a judge host wrote code: Panter-RDD would ne
 
 test('Judgment Day runs native when a judge host was ever granted GitHub writes, or that history is unreadable', () => withHosts(async (h, m) => {
   const writers: { list: string[] | null } = { list: ['gemini'] };
-  h.setHostHooks({ writerHosts: () => writers.list });
+  h.setHostHooks({ writerHosts: () => writers.list, remoteAttestation: () => true });
   const id = await toJudgment(h, m, 'jd10');
   assert.equal((await h.tick(id, all)).status, 'READY_FOR_HOST_NATIVE_DISPATCH');
   assert.equal((await h.get(id))!.judgmentTransport, 'NATIVE');
@@ -710,19 +712,21 @@ function prGate() {
     return { ok: map[k] !== undefined, status: map[k] !== undefined ? 200 : 404, text: async () => JSON.stringify(map[k]) } as Response; }) as typeof fetch;
   return new GitHubDeliveryGate({ allowedRepositories: [repo], requiredChecks: ['test'] }, fetcher);
 }
-/** Hosts plus Panter-RDD with transport attestation, so remote reviews can approve. */
-async function withRdd<T>(fn: (h: AutomaticHarness, m: MeshEngine) => Promise<T>) {
+/** Hosts plus Panter-RDD (transport attestation on unless told otherwise), so remote reviews can approve. */
+async function withRdd<T>(fn: (h: AutomaticHarness, m: MeshEngine, ctx: { writers: string[]; abandoned: any[] }) => Promise<T>, attestation = true) {
   const dir = await mkdtemp(join(tmpdir(), 'panter-hosts-rdd-'));
   try {
     const m = await MeshEngine.open(dir), n = await NativeSubagentReview.open(dir), g = prGate();
-    const rdd = await PanterRdd.open(dir, n, m, g, {}, null, true, () => []);
+    const writers: string[] = [], abandoned: any[] = [];
+    const rdd = await PanterRdd.open(dir, n, m, g, {}, null, attestation, () => writers);
     const h = await AutomaticHarness.open(dir, m, n, g, undefined, rdd);
+    h.setHostHooks({ writerHosts: () => writers, remoteAttestation: () => attestation, abandoned: async (x) => { abandoned.push(x); } });
     for (const host of ['gpt-b', 'grok', 'gemini'] as const)
       await m.setProfile('gpt-a', { host, actorId: `actor-${host}`, modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer'] }, 0);
     for (const [agentId, host] of [['review-risk', 'grok'], ['review-readability', 'gemini'], ['review-reliability', 'gpt-b'], ['review-resilience', 'grok'],
       ['jd-judge-a', 'grok'], ['jd-judge-b', 'gemini']] as const)
       await m.bindSpecialist('gpt-a', { agentId, host, modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] } as any, 0);
-    return await fn(h, m);
+    return await fn(h, m, { writers, abandoned });
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
 async function answerAll(m: MeshEngine, report: (agentId: string, digest: string) => unknown) {
@@ -769,4 +773,74 @@ test('a severe finding from a remote judge asks for a correction', () => withRdd
   assert.equal(verdict.status, 'NEEDS_CORRECTION');
   const fix = await h.tick(s.id, all);
   assert.equal(fix.status, 'CORRECTION_PACKET_READY');
+}));
+
+async function lowRiskJudgment(h: AutomaticHarness, key: string) {
+  const s = await h.start({ project: repo, githubRepository: repo, githubPrNumber: 12, githubExpectedBase: 'main', objective: 'Add a helper',
+    idempotencyKey: key, writesAuthorized: true, changeSurfaces: ['src/util.ts'], judgmentDayRequested: true });
+  const t = await h.tick(s.id, all);
+  await h.report(s.id, t.phaseId!, { summary: 'Done', evidence: ['tests'], candidateSha: sha, runId: `impl-${key}` });
+  return s.id;
+}
+
+test('without transport attestation Judgment Day runs native: remote judges could never be attested', () => withRdd(async (h) => {
+  const id = await lowRiskJudgment(h, 'na1');
+  assert.equal((await h.tick(id, all)).status, 'READY_FOR_HOST_NATIVE_DISPATCH');
+  assert.equal((await h.get(id))!.judgmentTransport, 'NATIVE');
+}, false));
+
+test('a remote Judgment Day Panter-RDD will not attest (a judge became a writer meanwhile) is judged native', () => withRdd(async (h, m, { writers }) => {
+  const id = await lowRiskJudgment(h, 'na2');
+  assert.equal((await h.tick(id, all)).status, 'WAITING_REMOTE_REVIEW');
+  const remote = (await h.get(id))!.judgmentId;
+  writers.push('gemini');
+  await answerAll(m, signed());
+  const fb: any = await h.tick(id, all);
+  assert.equal(fb.fallback?.reason, 'REMOTE_JUDGMENT_NOT_ATTESTABLE');
+  assert.equal(fb.status, 'READY_FOR_HOST_NATIVE_DISPATCH');
+  const run = (await h.get(id))!;
+  assert.equal(run.judgmentTransport, 'NATIVE'); assert.equal(run.judgmentNativeOnly, true);
+  assert.notEqual(run.judgmentId, remote);
+}));
+
+test('a 4R lens host without the reviewer role sends the 4R native instead of failing every tick', () => withHosts(async (h, m) => {
+  await m.setProfile('gpt-a', { host: 'gemini', actorId: 'actor-gemini', modelRequest: 'host-default', effortRequest: 'max', roles: ['explorer'] }, 1);
+  const id = await toReview(h, 'rr1');
+  assert.equal((await h.tick(id, all)).status, 'READY_FOR_HOST_NATIVE_DISPATCH');
+  assert.equal((await h.get(id))!.reviewTransport, 'NATIVE');
+}));
+
+test('a correction retires the remote 4R session: unstarted lenses withdrawn, a started lens loses its grants', () => withHosts(async (h, m, { abandoned }) => {
+  const id = await toReview(h, 'rr2');
+  await h.tick(id, all);
+  const before = (await h.get(id))!;
+  const started: any = await m.pickup('gpt-b', 300);
+  assert.equal(started.status, 'CLAIMED');
+  await h.recordCorrection(id, { candidateSha: 'c'.repeat(40), runId: 'fix-run-rr2', evidence: ['fixed'] }, before.revision);
+  const old = (await m.reviewStatus('gpt-a', before.reviewId!)).work;
+  assert.equal(old.find(w => w.workId === started.work.id)?.state, 'RUNNING', 'a started lens is never withdrawn');
+  assert.ok(old.filter(w => w.workId !== started.work.id).every(w => w.state === 'ABORTED_NO_EFFECTS'));
+  assert.deepEqual(abandoned.map(a => a.workId).sort(), old.map(w => w.workId).sort());
+}));
+
+test('a review started for a candidate that a correction replaced meanwhile is retired, not recorded', () => withHosts(async (h, m, { abandoned }) => {
+  const id = await toJudgment(h, m, 'race1');
+  // The correction lands after this tick read the run but before it records the session it started.
+  const original = (h as any).startRemoteReview.bind(h);
+  (h as any).startRemoteReview = async (...args: any[]) => {
+    (h as any).startRemoteReview = original;
+    await h.recordCorrection(id, { candidateSha: 'd'.repeat(40), runId: 'fix-run-race1', evidence: ['fixed'] }, (await h.get(id))!.revision);
+    return original(...args);
+  };
+  const t = await h.tick(id, all);
+  (h as any).startRemoteReview = original;
+  const run = (await h.get(id))!;
+  assert.equal(t.status, 'WAITING_REMOTE_REVIEW');
+  assert.equal(run.candidateSha, 'd'.repeat(40));
+  const current = await m.reviewStatus('gpt-a', run.judgmentId!);
+  assert.equal(current.review.candidateSha, 'd'.repeat(40), 'only the new candidate is judged');
+  const ids = new Set(current.work.map(w => w.workId));
+  const orphans = (await m.inbox('gpt-a')).works.filter(w => w.role === 'reviewer' && !ids.has(w.id));
+  assert.ok(orphans.length === 2 && orphans.every(w => w.state === 'ABORTED_NO_EFFECTS'), 'the old-candidate judges were withdrawn');
+  assert.deepEqual(abandoned.map(a => a.workId).sort(), orphans.map(w => w.id).sort());
 }));

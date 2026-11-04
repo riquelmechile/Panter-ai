@@ -63,6 +63,8 @@ export type HarnessHostHooks={
   pickupTimeoutMs?(host:Host):number;
   /** Hosts that were ever allowed to write to a repository (Panter-RDD's writer history), or null if it cannot be read. */
   writerHosts?():string[]|null;
+  /** Whether Panter-RDD attests remote reviews by their transport (remote hosts produce no runner signatures). */
+  remoteAttestation?():boolean;
   /** When a work's pickup clock starts (ISO), or null while it is legitimately waiting to be signalled; default createdAt. */
   pickupClockStart?(work:{id:string;target:Host;createdAt:string},limitMs:number):Promise<string|null>;
 };
@@ -193,23 +195,26 @@ export class AutomaticHarness {
     const profiles=await this.mesh.profiles();
     if(!hosts.every(h=>profiles.some(p=>p.host===h&&p.roles.includes('reviewer'))))return false;
     if(kind==='4r')return true;
-    // Judgment Day can only pass with blind judges on distinct hosts, none of which wrote code (Panter-RDD attests
-    // neither); otherwise its native review, which the runner can sign, is the one that can pass.
+    // Judgment Day goes remote only where Panter-RDD can attest it: transport attestation on, blind judges on distinct
+    // hosts, none of which wrote code. Otherwise its native review, which the runner can sign, is the one that can pass.
+    if(this.hooks.remoteAttestation?.()!==true)return false;
     if(new Set(hosts).size!==hosts.length)return false;
     // Same author history Panter-RDD checks: implementer work in the mesh, former leaders, and any host ever granted
-    // GitHub commit/PR (even for work it never picked up). Unreadable history attests nothing, so the judges run native.
-    const writers=this.hooks.writerHosts?this.hooks.writerHosts():[];
+    // GitHub commit/PR (even for work it never picked up). Missing or unreadable history: the judges run native.
+    const writers=this.hooks.writerHosts?this.hooks.writerHosts():null;
     if(writers===null)return false;
     const authors=[...await this.mesh.authorHosts(),...writers];
     return !hosts.some(h=>authors.includes(h!));
   }
-  /** Stop a remote review that will never be read (its candidate was corrected): withdraw its unstarted lenses and
-   * revoke what its lenses were granted. */
+  /** Stop a remote review that will never be read (its candidate was corrected, or it lost the race to be recorded):
+   * withdraw its lenses that have not really started (queued, or only held by a transport) and revoke what its lenses
+   * were granted. */
   private async retireRemoteReview(reviewId:string){
     const review=await this.mesh.reviewStatus(leaderHost(),reviewId).catch(()=>null);
     for(const w of review?.work??[]){
       if(w.state!=='QUEUED'&&w.state!=='RUNNING')continue;
-      if(w.state==='QUEUED')await this.mesh.withdrawUnstarted(leaderHost(),w.workId,'candidate corrected; this review is no longer read').catch(()=>null);
+      // Refused for a lens its host really started; that one keeps running unread, without its grants.
+      await this.mesh.withdrawUnstarted(leaderHost(),w.workId,'this review is no longer read').catch(()=>null);
       try{await this.hooks.abandoned?.({workId:w.workId,host:w.host});}catch{/* best effort */}
     }
   }
@@ -220,7 +225,11 @@ export class AutomaticHarness {
     const remote=await this.mesh.startReview(leaderHost(),{missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:key,
       materialFor:this.hooks.materialFor?host=>this.hooks.materialFor!(record,host):undefined,
       notesFor:(host,agentId)=>[this.hooks.accessFor?.(record,host,phase),reviewCompletionFormat(agentId,record.candidateSha!)].filter(Boolean).join('\n\n')});
-    await this.write(s=>{const r=s.runs.find(x=>x.id===record.id)!;if(!r[slot.id]){r[slot.id]=remote.id;r[slot.transport]='REMOTE';r.revision++;}});
+    // Recorded only for the candidate it reviews: a correction may have landed since this tick read the run.
+    const current=await this.write(s=>{const r=s.runs.find(x=>x.id===record.id)!;if(r.candidateSha!==record.candidateSha)return false;
+      if(!r[slot.id]){r[slot.id]=remote.id;r[slot.transport]='REMOTE';r.revision++;}return r[slot.id]===remote.id;});
+    // A session nobody will read is stopped instead of dispatched (and granted).
+    if(!current)return this.retireRemoteReview(remote.id);
     for(const workId of remote.workIds){const t=await this.mesh.workTarget(leaderHost(),workId).catch(()=>null);if(t)await this.dispatched(record,workId,phase,t.target);}
   }
   /** Advance a remote review session (4R or Judgment Day): pickup fallback, evidence retry, then Panter-RDD. */
@@ -290,9 +299,17 @@ export class AutomaticHarness {
       const verdict=await this.rdd.assess(tx.id);
       if(verdict.record.state==='APPROVED_PENDING_ACK')await this.rdd.acknowledge(tx.id,verdict.record.revision);
       if(['APPROVED_PENDING_ACK','ACKNOWLEDGED'].includes(verdict.record.state)){
+        // Only the session still current for the run completes its phase (a correction may have dropped it meanwhile).
         await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const item=r.steps.find(x=>x.id===phase.id)!;
-          if(item.status!=='COMPLETE'){item.status='COMPLETE';r.revision++;}});
+          if(r[slot.id]===reviewId&&item.status!=='COMPLETE'){item.status='COMPLETE';r.revision++;}});
         return this.tick(runId,runtime);
+      }
+      // Panter-RDD will not attest this remote Judgment Day (e.g. a judge host became a writer after dispatch): judge
+      // the same candidate native instead of waiting forever.
+      if(reviewPhase==='JUDGMENT'&&verdict.record.state==='NEEDS_RUNNER_ATTESTATION'){
+        await drop(true);
+        const next=await this.tick(runId,runtime);
+        return {...next,fallback:{phaseId:phase.id,previousReviewId:reviewId,reason:'REMOTE_JUDGMENT_NOT_ATTESTABLE'}};
       }
       return {...common,status:verdict.record.state,phaseId:phase.id,reviewId,review:evidence,panterRdd:verdict,next:[]};
     }
@@ -680,10 +697,13 @@ export class AutomaticHarness {
           const jd=await this.native.create({missionId:record.id,kind:'judgment-day',objective:record.objective,
             candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:judgment-day:${record.candidateSha}`});
           await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;
-            if(!r.judgmentId){r.judgmentId=jd.reviewId;r.judgmentTransport='NATIVE';r.revision++;}});
+            if(!r.judgmentId&&r.candidateSha===record.candidateSha){r.judgmentId=jd.reviewId;r.judgmentTransport='NATIVE';r.revision++;}});
         }
       }
-      const latest=await this.get(runId);ensure(latest?.judgmentId,'Judgment Day not prepared');
+      const latest=await this.get(runId);
+      // A correction landed while this tick prepared the session: start over on the new candidate.
+      if(latest&&!latest.judgmentId&&latest.candidateSha!==record.candidateSha)return this.tick(runId,runtime);
+      ensure(latest?.judgmentId,'Judgment Day not prepared');
       if(latest.judgmentTransport==='REMOTE')return this.remoteReviewTick(runId,runtime,phase,'JUDGMENT','judgment-day',latest,common);
       const status=await this.native.status(latest.judgmentId);
       if(!status.evidenceComplete){
@@ -717,10 +737,12 @@ export class AutomaticHarness {
         if(await this.remoteReviewReady(record,'REVIEW',kind,effectiveMode,runtime))await this.startRemoteReview(record,'REVIEW',kind);
         else{
           const native=await this.native.create({missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:review:${record.candidateSha}:${record.reviewAttempt??0}`});
-          await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(!r.reviewId){r.reviewId=native.reviewId;r.reviewTransport='NATIVE';r.revision++;}});
+          await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(!r.reviewId&&r.candidateSha===record.candidateSha){r.reviewId=native.reviewId;r.reviewTransport='NATIVE';r.revision++;}});
         }
       }
-      const now=await this.get(runId);ensure(now?.reviewId&&now.reviewTransport,'Review session not initialized');
+      const now=await this.get(runId);
+      if(now&&!now.reviewId&&now.candidateSha!==record.candidateSha)return this.tick(runId,runtime);
+      ensure(now?.reviewId&&now.reviewTransport,'Review session not initialized');
       if(now.reviewTransport==='NATIVE'){
         const review=await this.native.status(now.reviewId);
         if(review.soloEvidenceComplete){
