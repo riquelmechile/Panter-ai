@@ -28,3 +28,24 @@ test('harness work rings Grok one work at a time, never twice for the same work'
     assert.equal((await ringGrokForWork(m, bell, a.id)).reason, 'NOT_QUEUED');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('concurrent rings never ring two Grok works; the pickup clock starts at the ring', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-wake-'));
+  try {
+    const m = await MeshEngine.open(dir);
+    await m.setProfile('gpt-a', { host: 'grok', actorId: 'actor-grok', modelRequest: 'm', effortRequest: 'max', roles: ['reviewer'] }, 0);
+    const rung: string[] = [];
+    const bell = { configured: true, dispatch: async (id: string) => { rung.push(id); return { accepted: true, statusCode: 200 }; } };
+    const a = await m.delegate('gpt-a', { missionId: 'm', target: 'grok', role: 'reviewer', instruction: 'lens a', idempotencyKey: 'a' });
+    const b = await m.delegate('gpt-a', { missionId: 'm', target: 'grok', role: 'reviewer', instruction: 'lens b', idempotencyKey: 'b' });
+    const outcomes = await Promise.all([ringGrokForWork(m, bell, a.id), ringGrokForWork(m, bell, b.id)]);
+    assert.equal(outcomes.filter(o => o.rung).length, 1);
+    assert.equal(rung.length, 1);
+    const { pickupClockStart } = await import('../src/core/harness-wake.js');
+    const first = rung[0]!, second = first === a.id ? b : a;
+    const w1 = await m.workTarget('gpt-a', first);
+    assert.equal(await pickupClockStart(m, bell, { id: first, target: 'grok', createdAt: w1.createdAt }), (await m.grokWakeStatus('gpt-a', first)).reservedAt);
+    assert.equal(await pickupClockStart(m, bell, { id: second.id, target: 'grok', createdAt: second.createdAt }), null, 'waiting behind the rung work');
+    assert.equal(await pickupClockStart(m, { configured: false, dispatch: bell.dispatch }, { id: second.id, target: 'grok', createdAt: second.createdAt }), second.createdAt);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

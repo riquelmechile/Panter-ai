@@ -532,7 +532,9 @@ export class MeshEngine {
   /** Reserve one outbound doorbell after the authoritative work is committed.
    * A lost response is never blindly resent: RESERVED is an uncertain outcome.
    */
-  async reserveGrokWake(caller:Host,workId:string){
+  /** exclusive: refuse (send:false, busy:true) while Grok holds another work in progress or already rung and
+   * still queued, decided inside the same write so concurrent callers never both ring. */
+  async reserveGrokWake(caller:Host,workId:string,exclusive=false){
     check(caller===leaderHost(),`Only ${leaderLabel()} may signal delegated work`);
     return this.write(d=>{
       const w=d.works.find(w=>w.id===workId&&w.target==='grok');
@@ -540,6 +542,11 @@ export class MeshEngine {
       const existing=(d.grokWakeAttempts??[]).find(a=>a.workId===workId);
       if(existing)return {send:false,attempt:existing};
       check(w.state==='QUEUED','Only queued Grok work can receive wake');
+      if(exclusive){
+        const rung=new Set((d.grokWakeAttempts??[]).map(a=>a.workId));
+        const busy=d.works.some(o=>o.target==='grok'&&o.id!==workId&&(o.state==='RUNNING'||o.state==='OUTCOME_UNKNOWN'||(o.state==='QUEUED'&&rung.has(o.id))));
+        if(busy)return {send:false,busy:true};
+      }
       const attempt:GrokWakeAttempt={workId,state:'RESERVED',reservedAt:iso(),statusCode:null};
       (d.grokWakeAttempts??=[]).push(attempt);
       this.notify(d,leaderHost());
@@ -564,7 +571,7 @@ export class MeshEngine {
       const w=d.works.find(w=>w.id===workId&&w.target==='grok');
       check(w,'Grok work not found');
       const a=(d.grokWakeAttempts??[]).find(x=>x.workId===workId);
-      return {workId,state:a?.state??'DELIVERY_ONLY',statusCode:a?.statusCode??null,
+      return {workId,state:a?.state??'DELIVERY_ONLY',statusCode:a?.statusCode??null,reservedAt:a?.reservedAt??null,
         wakeObserved:a?.state==='SIGNAL_ACCEPTED'&&Boolean(a.claimedAt),
         claimedAt:a?.claimedAt??null};
     });

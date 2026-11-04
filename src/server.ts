@@ -16,7 +16,7 @@ import { GitHubWorkforce, GITHUB_WRITE_OPS } from './core/github-workforce.js';
 import { registerTaskWire } from './core/workforce-task-wire.js';
 import { WorkforceLongPoll, withListenHint } from './core/workforce-long-poll.js';
 import { GrokRoutineWake } from './core/grok-routine-wake.js';
-import { ringGrokForWork } from './core/harness-wake.js';
+import { ringGrokForWork, pickupClockStart } from './core/harness-wake.js';
 import { GeminiMailWake, MailError } from './core/gemini-mail-wake.js';
 import { WorkforceEvents, reconcileWorkforceEventOutbox } from './core/workforce-events.js';
 import { registerWorkforceEventWire } from './core/workforce-event-wire.js';
@@ -172,6 +172,7 @@ harness.setHostHooks({
     const comment = (phase === 'VERIFY' || phase === 'REVIEW' || phase === 'JUDGMENT') && run.githubPrNumber ? ` You may comment on PR #${run.githubPrNumber} with panter_github_comment.` : '';
     return `${target} ${claim} This phase is read-only on GitHub.${comment}`;
   },
+  pickupClockStart: work => pickupClockStart(mesh, grokRoutineWake, work),
   pickupTimeoutMs: host => (pickupPerHost.get(host) ?? (materialHosts.has(host) ? pickupMailSeconds : pickupSeconds)) * 1000,
   abandoned: async ({ workId }) => { if (githubWorkforce.configured) await githubWorkforce.revoke(leaderHost(), workId); },
 });
