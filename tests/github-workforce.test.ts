@@ -389,3 +389,12 @@ test('writer hosts: any grant with commit or pr, revoked or not, whatever the wo
   assert.equal(off.configured, false);
   assert.deepEqual(off.writerHosts(), ['gpt-a']);
 }));
+
+test('writer hosts: a legacy commit grant narrowed to comment-only keeps its host as a writer', () => fixture({}, async ({ gh, workId, mesh }) => {
+  await gh.grant('claude', { workId, repository: 'acme/site', ops: ['commit', 'pr'] });
+  // Simulate a ledger written before the writers set existed.
+  const db = (gh as any).db;
+  db.mutate('github_workforce', { version: 1, grants: [], audit: [] }, (d: any) => { delete d.writers; });
+  await gh.grant('claude', { workId, repository: 'acme/site', ops: ['comment'] });
+  assert.deepEqual(gh.writerHosts(), ['gpt-a']);
+}));
