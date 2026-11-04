@@ -300,3 +300,31 @@ test('a remote result breaking a phase rule is surfaced, never thrown from every
   assert.equal((await h.tick(s.id, all)).status, 'REMOTE_RESULT_NEEDS_STRUCTURED_EVIDENCE');
   assert.equal((await h.tick(s.id, all)).status, 'REMOTE_RESULT_NEEDS_STRUCTURED_EVIDENCE');
 }));
+
+test('a remote discovery outside the operator grant is REJECTED with its reason, and a manual report recovers the run', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-hosts-'));
+  try {
+    const m = await MeshEngine.open(dir), n = await NativeSubagentReview.open(dir);
+    const h = await AutomaticHarness.open(dir, m, n, undefined, undefined, undefined, true);
+    await m.setProfile('gpt-a', { host: 'gpt-b', actorId: 'actor-gpt-b', modelRequest: 'host-default', effortRequest: 'max', roles: ['explorer'] }, 0);
+    await m.bindSpecialist('gpt-a', { agentId: 'gentle-ai-explore', host: 'gpt-b', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] } as any, 0);
+    const g = await h.grantWrite({ project: 'app', objective: 'Repair unknown issue', allowedPaths: ['src'], ttlSeconds: 3600 });
+    const s = await h.start({ project: 'app', objective: 'Repair unknown issue', idempotencyKey: 'rej', writesAuthorized: true, writeGrantId: g.grantId });
+    const first = await h.tick(s.id, all);
+    const got = await m.pickup('gpt-b', 300) as any;
+    await m.complete('gpt-b', first.next[0]!.workId as string, got.work.attemptId, got.work.leaseGeneration,
+      JSON.stringify({ summary: 'found', evidence: ['read lib/a.ts'], discoveredPaths: ['lib/a.ts'] }));
+    const t = await h.tick(s.id, all) as any;
+    assert.equal(t.status, 'REMOTE_RESULT_REJECTED');
+    assert.match(t.detail, /exceeds operator grant/);
+    assert.equal((await h.tick(s.id, all)).status, 'REMOTE_RESULT_REJECTED');
+    await h.report(s.id, first.phaseId!, { summary: 'found', evidence: ['read src/a.ts'], discoveredPaths: ['src/a.ts'] });
+    assert.equal((await h.get(s.id))!.steps[0]!.status, 'COMPLETE');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('copied placeholders in any field are a template echo, not a result', async () => {
+  const { structuredResult } = await import('../src/core/auto-harness.js');
+  assert.equal(structuredResult('{"summary":"done","evidence":["e"],"runId":"<a unique id for this run of yours>"}'), null);
+  assert.equal(structuredResult('{"summary":"<Button> fixed","evidence":["e"]}')?.summary, '<Button> fixed');
+});

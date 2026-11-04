@@ -133,11 +133,13 @@ function fencedBlocks(text:string){
   }
   return out;
 }
+/** A copied completion-format placeholder such as "<what you did>". */
+const placeholder=(x:unknown)=>typeof x==='string'&&/^<[^<>]*>$/.test(x.trim());
 /** null or "" means "not given". */
 function given<T>(v:T):T|undefined{return v===null||v===''?undefined:v;}
 /** A remote phase result: one JSON object, bare, fenced or surrounded by prose. Every candidate in the text is
  * considered; if they disagree (e.g. a result-shaped object quoted from a diff), nothing is accepted. A copy of the
- * completion-format template (placeholders in angle brackets) is ignored. */
+ * completion-format template (a field that is just an <angle-bracket placeholder>) is ignored. */
 export function structuredResult(text:string|null|undefined):PhaseResult|null{
   if(!text||text.length>MAX_RESULT_TEXT)return null;
   const candidates=[text.trim(),...fencedBlocks(text),...objectSpans(text)];
@@ -145,7 +147,7 @@ export function structuredResult(text:string|null|undefined):PhaseResult|null{
   for(const c of candidates){
     let v:any;
     try{v=JSON.parse(c);}catch{continue;}
-    if(!v||typeof v!=='object'||Array.isArray(v)||typeof v.summary!=='string'||v.summary.trim().startsWith('<')||
+    if(!v||typeof v!=='object'||Array.isArray(v)||typeof v.summary!=='string'||[v.summary,v.runId,v.candidateSha].some(placeholder)||
       !Array.isArray(v.evidence)||!v.evidence.every((e:unknown)=>typeof e==='string'))continue;
     const r:PhaseResult={summary:v.summary,evidence:v.evidence};
     const candidateSha=given(v.candidateSha),runId=given(v.runId),discoveredPaths=given(v.discoveredPaths);
