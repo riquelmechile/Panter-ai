@@ -47,27 +47,45 @@ export class NativeReviewBridge {
 
 type LensFinding={location:string;severity:string;proofRefs:unknown[]};
 const SEVERITIES=['BLOCKER','CRITICAL','WARNING','SUGGESTION'];
-/** One lens report as the Panter envelope {agentId, candidateSha, findings[]}, bound to this exact lens and SHA.
- * Hosts often wrap it in prose or fences, or nest it as review_result.lens_results[] (still with candidateSha), or
- * write proof_refs: those forms are normalized. Without an explicit matching agentId and candidateSha the report
- * stays unbound. A free-form approval is never accepted. */
-export function lensEnvelope(text:string,agentId:string,candidateSha:string):(Record<string,any>&{findings:LensFinding[]})|'UNSTRUCTURED'|'UNBOUND'{
-  if(text.length>100_000)return 'UNSTRUCTURED';
+/** Every report in a lens's text that claims this exact lens and SHA (top-level or nested as
+ * review_result.lens_results[]), normalized (proof_refs -> proofRefs), valid or not. An echo of the
+ * completion-format template is ignored. */
+function boundReports(text:string,agentId:string,candidateSha:string):{objects:number;reports:Record<string,any>[]}{
   const objects:Record<string,any>[]=[];
   for(const c of jsonCandidates(text)){try{const v=JSON.parse(c);if(v&&typeof v==='object'&&!Array.isArray(v))objects.push(v);}catch{/* not JSON */}}
-  if(!objects.length)return 'UNSTRUCTURED';
-  const valid=new Map<string,Record<string,any>&{findings:LensFinding[]}>();
+  const distinct=new Map<string,Record<string,any>>();
   for(const obj of objects){
-    const nested=Array.isArray(obj.review_result?.lens_results)?obj.review_result.lens_results.filter((x:any)=>x&&(x.agentId??x.lens)===agentId):[];
+    const nested=Array.isArray(obj.review_result?.lens_results)?obj.review_result.lens_results.filter((x:any)=>x&&typeof x==='object'&&(x.agentId??x.lens)===agentId):[];
     const forms=[obj,...nested.map((x:any)=>({...x,agentId:x.agentId??x.lens,candidateSha:x.candidateSha??obj.candidateSha??obj.review_result?.candidateSha}))];
     for(const f of forms){
-      if(f.agentId!==agentId||f.candidateSha!==candidateSha||!Array.isArray(f.findings))continue;
-      const findings=f.findings.map((x:any)=>x&&typeof x==='object'?{...x,proofRefs:x.proofRefs??x.proof_refs}:x);
-      const ok=findings.every((x:any)=>!!x&&typeof x==='object'&&typeof x.location==='string'&&SEVERITIES.includes(x.severity)&&Array.isArray(x.proofRefs)&&x.proofRefs.length>0);
-      if(ok){const r={...f,findings};valid.set(JSON.stringify(r),r);}
+      if(f.agentId!==agentId||f.candidateSha!==candidateSha)continue;
+      const findings=Array.isArray(f.findings)?f.findings.map((x:any)=>x&&typeof x==='object'?{...x,proofRefs:x.proofRefs??x.proof_refs}:x):f.findings;
+      if(Array.isArray(findings)&&findings.some((x:any)=>typeof x?.severity==='string'&&x.severity.includes('|')))continue; // template echo
+      const r={...f,findings};
+      distinct.set(JSON.stringify(r),r);
     }
   }
-  return valid.size===1?[...valid.values()][0]!:'UNBOUND';
+  return {objects:objects.length,reports:[...distinct.values()]};
+}
+const severe=(x:any)=>typeof x?.severity==='string'&&/^(blocker|critical)$/i.test(x.severity.trim());
+/** One lens report as the Panter envelope {agentId, candidateSha, findings[]}, bound to this exact lens and SHA.
+ * Hosts often wrap it in prose or fences, or nest it as review_result.lens_results[], or write proof_refs: those
+ * forms are normalized. Exactly ONE report may claim this lens and SHA, and it must be fully valid: a second,
+ * different report (e.g. a clean draft next to a CRITICAL one) or an invalid one makes the lens unbound, so a
+ * severe finding can never be hidden. A free-form approval is never accepted. */
+export function lensEnvelope(text:string,agentId:string,candidateSha:string):(Record<string,any>&{findings:LensFinding[]})|'UNSTRUCTURED'|'UNBOUND'{
+  if(text.length>100_000)return 'UNSTRUCTURED';
+  const {objects,reports}=boundReports(text,agentId,candidateSha);
+  if(!objects)return 'UNSTRUCTURED';
+  if(reports.length!==1)return 'UNBOUND';
+  const r=reports[0]!;
+  const ok=Array.isArray(r.findings)&&r.findings.every((x:any)=>!!x&&typeof x==='object'&&typeof x.location==='string'&&SEVERITIES.includes(x.severity)&&Array.isArray(x.proofRefs)&&x.proofRefs.length>0);
+  return ok?r as Record<string,any>&{findings:LensFinding[]}:'UNBOUND';
+}
+/** Severe findings claimed for this lens and SHA in reports that were not accepted, so they are surfaced, never lost. */
+export function unacceptedSevere(text:string,agentId:string,candidateSha:string){
+  if(text.length>100_000)return 0;
+  return boundReports(text,agentId,candidateSha).reports.reduce((n,r)=>n+(Array.isArray(r.findings)?r.findings.filter(severe).length:0),0);
 }
 export function assessMeshReview(input:{candidateSha:string;kind:'4r'|'judgment-day';work:Array<{agentId?:string;state:string;receiptDigest:string|null;result:string|null;host:string}>}){
   const expected=input.kind==='4r'?['review-risk','review-readability','review-reliability','review-resilience']:['jd-judge-a','jd-judge-b'];
@@ -80,7 +98,12 @@ export function assessMeshReview(input:{candidateSha:string;kind:'4r'|'judgment-
     if(w.state!=='COMPLETED'||!w.receiptDigest||!w.result){reasons.push(`Missing finished receipt: ${w.agentId}`);return {agentId:w.agentId,accepted:false,findings:null};}
     const envelope=lensEnvelope(w.result,w.agentId??'',input.candidateSha);
     if(envelope==='UNSTRUCTURED'){reasons.push(`Unstructured report: ${w.agentId}`);return {agentId:w.agentId,accepted:false,findings:null};}
-    if(envelope==='UNBOUND'){reasons.push(`Unbound or insufficient report: ${w.agentId}`);return {agentId:w.agentId,accepted:false,findings:null};}
+    if(envelope==='UNBOUND'){
+      reasons.push(`Unbound or insufficient report: ${w.agentId}`);
+      const hidden=unacceptedSevere(w.result,w.agentId??'',input.candidateSha);
+      if(hidden)reasons.push(`Severe finding(s) reported in an unaccepted report: ${w.agentId} (${hidden})`);
+      return {agentId:w.agentId,accepted:false,findings:null};
+    }
     return {agentId:w.agentId,accepted:true,findings:envelope.findings.length};
   });
   return {candidateSha:input.candidateSha,kind:input.kind,reviewers:summaries,

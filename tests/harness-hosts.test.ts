@@ -354,3 +354,26 @@ test('remote 4R lens packets carry the exact review envelope for their own lens 
   assert.match(grok, /\\"agentId\\": \\"review-(risk|resilience)\\"/);
   assert.match(grok, /subagentRunId/);
 }));
+
+test('a clean lens report can never hide a severe one claimed for the same lens and SHA', async () => {
+  const { lensEnvelope, assessMeshReview } = await import('../src/core/native-review.js');
+  const clean = { agentId: 'review-risk', candidateSha: sha, findings: [] };
+  const crit = (extra: object) => ({ agentId: 'review-risk', candidateSha: sha, findings: [{ id: 'X', location: 'a.js:1', severity: 'CRITICAL', claim: 'c', ...extra }] });
+  // A: clean draft + CRITICAL without proofRefs.
+  assert.equal(lensEnvelope(`Draft:${JSON.stringify(clean)}\nFinal:${JSON.stringify(crit({}))}`, 'review-risk', sha), 'UNBOUND');
+  // B: clean + lowercase severity.
+  assert.equal(lensEnvelope(`${JSON.stringify(clean)}\n${JSON.stringify({ ...crit({ proofRefs: ['p'] }), findings: [{ location: 'a.js:1', severity: 'critical', proofRefs: ['p'] }] })}`, 'review-risk', sha), 'UNBOUND');
+  // D: two nested entries for the same lens.
+  const d = { candidateSha: sha, review_result: { lens_results: [{ lens: 'review-risk', findings: [] }, { lens: 'review-risk', findings: [{ location: 'a.js:1', severity: 'BLOCKER' }] }] } };
+  assert.equal(lensEnvelope(JSON.stringify(d), 'review-risk', sha), 'UNBOUND');
+  // C: a lone CRITICAL without proofRefs is unbound, and the assessment surfaces it.
+  const work = ['review-risk', 'review-readability', 'review-reliability', 'review-resilience'].map((agentId, i) => ({
+    agentId, state: 'COMPLETED', receiptDigest: 'r' + i, host: 'grok',
+    result: agentId === 'review-risk' ? JSON.stringify(crit({})) : JSON.stringify({ agentId, candidateSha: sha, findings: [] }) }));
+  const a = assessMeshReview({ candidateSha: sha, kind: '4r', work });
+  assert.equal(a.status, 'EVIDENCE_INCOMPLETE');
+  assert.ok(a.reasons.some((r: string) => /Severe finding\(s\) reported in an unaccepted report: review-risk \(1\)/.test(r)));
+  // An echoed template next to the real report does not unbind it.
+  const template = { agentId: 'review-risk', candidateSha: sha, findings: [{ id: '<stable id>', location: '<path:line>', severity: 'BLOCKER | CRITICAL | WARNING | SUGGESTION', claim: '<c>', proofRefs: ['<p>'] }] };
+  assert.equal(typeof lensEnvelope(`Format: ${JSON.stringify(template)}\n${JSON.stringify(clean)}`, 'review-risk', sha), 'object');
+});
