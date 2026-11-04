@@ -126,7 +126,8 @@ export class GeminiMailWake{
   }
 
   private async mailOne(workId:string,now:number):Promise<boolean>{
-    const attempt=this.db!.read('gemini_mail',seed).tickets.filter(t=>t.workId===workId).length+1;
+    // Monotonic per work: purging old tickets can never reuse an attempt number.
+    const attempt=Math.max(0,...this.db!.read('gemini_mail',seed).tickets.filter(t=>t.workId===workId).map(t=>t.attempt))+1;
     let work:MailClaim;
     // Only QUEUED work, never a live claim; a transport claim does not count as Gemini being present.
     try{work=await this.mesh.claim('gemini',workId,LEASE_SECONDS,true,true,true);}

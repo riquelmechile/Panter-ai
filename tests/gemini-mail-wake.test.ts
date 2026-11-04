@@ -292,3 +292,21 @@ test('closing undeliverable work as the transport records neither presence nor a
   assert.equal(m.workforce?.gemini?.lastReceiptAt, undefined);
   assert.equal((m.rearmIntents ?? []).some((i: any) => i.workId === work.id), false);
 }));
+
+test('attempt numbers never repeat, even after old tickets are purged', () => fixture(async ({ dir, mesh, sent, wake }) => {
+  const work = await delegate(mesh, 'm1');
+  const old = new Date(Date.now() - 8 * 24 * 3600_000).toISOString();
+  const recent = new Date(Date.now() - 3600_000).toISOString();
+  const db = SqliteLedger.open(dir);
+  db.mutate('gemini_mail', { version: 1, tickets: [], backoff: [] } as any, (d: any) => {
+    d.tickets.push({ workId: work.id, attemptId: 'a1', leaseGeneration: 1, tokenHash: 'x'.repeat(64), instructionDigest: 'y', expiresAt: old, createdAt: old, sentAt: old, usedAt: null, attempt: 1 });
+    d.tickets.push({ workId: work.id, attemptId: 'a2', leaseGeneration: 2, tokenHash: 'z'.repeat(64), instructionDigest: 'y', expiresAt: recent, createdAt: recent, sentAt: recent, usedAt: null, attempt: 2 });
+  });
+  db.close();
+  await wake.dispatchDue();
+  assert.equal(sent[0].payload.envelope.attempt, 3);
+  expire(dir, work.id);
+  await wake.dispatchDue();
+  assert.equal(sent.length, 1, 'a 4th attempt closes the task instead of mailing again');
+  assert.equal((await mesh.inbox('claude')).works.find(w => w.id === work.id)?.state, 'FAILED');
+}));
