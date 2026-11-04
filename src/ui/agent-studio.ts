@@ -6,7 +6,7 @@ const roleNames = ['explorer', 'architect', 'implementer', 'verifier', 'reviewer
 /** The server keeps exactly one orchestrator profile (PANTER_LEAD_HOST); default GPT-A when none is stored yet. */
 let leader: string = 'gpt-a';
 type Host = typeof hostNames[number];
-type Profile = { host: Host; actorId: string; modelRequest: string; effortRequest: string; roles: string[]; revision: number; preferNativeSubagents?:boolean; maxRequestedNativeWorkers?:number; coordinationMode?:'AUTO'|'GPT_A_ONLY' };
+type Profile = { host: Host; actorId: string; modelRequest: string; effortRequest: string; roles: string[]; revision: number; preferNativeSubagents?:boolean; maxRequestedNativeWorkers?:number; coordinationMode?:'AUTO'|'GPT_A_ONLY'; scheduledPickupEnabled?:boolean; scheduledPollIntervalSeconds?:number; executionRequest?:Record<string,unknown> };
 const hostBox = document.getElementById('hosts')!;
 const status = document.getElementById('status')!;
 const refresh = document.getElementById('refresh') as HTMLButtonElement;
@@ -85,7 +85,11 @@ function card(host: Host, existing?: Profile) {
       if(host===leader&&(!Number.isInteger(count)||count===undefined||count<0||count>32))throw new Error('Límite nativo inválido');
       const response = await call('panter_mesh_profile_set', {
         host, actorId: actor.value.trim(), modelRequest: model.value.trim(), effortRequest: effort.value.trim(),
-        roles: chosen, ...(host===leader?{coordinationMode:coordination!.value,preferNativeSubagents:prefer!.checked,maxRequestedNativeWorkers:count}:{}), expectedRevision: existing?.revision ?? 0,
+        roles: chosen, ...(host===leader?{coordinationMode:coordination!.value,preferNativeSubagents:prefer!.checked,maxRequestedNativeWorkers:count}:{
+          // A profile save replaces the whole profile: carry over worker settings this card does not edit.
+          ...(existing?.executionRequest?{executionRequest:existing.executionRequest}:{}),
+          ...(existing?.scheduledPickupEnabled!==undefined?{scheduledPickupEnabled:existing.scheduledPickupEnabled}:{}),
+          ...(existing?.scheduledPollIntervalSeconds!==undefined?{scheduledPollIntervalSeconds:existing.scheduledPollIntervalSeconds}:{})}), expectedRevision: existing?.revision ?? 0,
       }) as Profile;
       existing = response;
       subtitle.textContent = `Perfil guardado · revisión ${response.revision}`;

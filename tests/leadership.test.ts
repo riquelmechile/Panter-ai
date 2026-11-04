@@ -112,6 +112,30 @@ test('after switching leader, review bindings that target the new leader are ina
   assert.equal((await m.pending('claude')).length, 0);
 }));
 
+test('worker execution requests are worker-only, validated and frozen into each work', () => withMesh(async m => {
+  process.env.PANTER_LEAD_HOST = 'claude';
+  const gptA = { ...worker('gpt-a', ['reviewer']), modelRequest: 'gpt-6.1-sol', effortRequest: 'max',
+    executionRequest: { serviceTier: 'ultrafast', stream: true, parallelToolCalls: true, maxNativeSubagents: 16 } };
+  await m.setProfile('claude', gptA, 0);
+  await m.setProfile('claude', { ...worker('gpt-b', ['reviewer']), modelRequest: 'gpt-6-astra', effortRequest: 'ultra',
+    executionRequest: { serviceTier: 'ultrafast', stream: true, parallelToolCalls: true } }, 0);
+  await assert.rejects(m.setProfile('claude', { host: 'claude', actorId: 'actor-claude', modelRequest: 'x', effortRequest: 'max', roles: ['orchestrator'],
+    executionRequest: { maxNativeSubagents: 4 } }, 0), /Execution requests are worker-only/);
+  await assert.rejects(m.setProfile('claude', { ...gptA, executionRequest: { maxNativeSubagents: 33 } }, 1), /Invalid native subagent count/);
+  await assert.rejects(m.setProfile('claude', { ...gptA, executionRequest: { serviceTier: 'Ultra Fast!' } }, 1), /Invalid service tier/);
+  await assert.rejects(m.setProfile('claude', { ...gptA, executionRequest: { apiKey: 'x' } as never }, 1), /Invalid execution request/);
+  const w = await m.delegate('claude', { missionId: 'exec', target: 'gpt-a', role: 'reviewer', instruction: 'Read-only', idempotencyKey: 'exec-1' });
+  assert.deepEqual(w.executionRequest, { status: 'REQUESTED_UNVERIFIED', model: 'gpt-6.1-sol', reasoningEffort: 'max',
+    serviceTier: 'ultrafast', stream: true, parallelToolCalls: true, maxNativeSubagents: 16 });
+  const claimed = await m.claim('gpt-a', w.id);
+  assert.equal(claimed.executionRequest?.maxNativeSubagents, 16);
+  // Later profile edits do not rewrite requirements already frozen into delegated work.
+  await m.setProfile('claude', { ...gptA, executionRequest: { maxNativeSubagents: 2 } }, 1);
+  assert.equal((await m.claim('gpt-a', w.id)).executionRequest?.maxNativeSubagents, 16);
+  const b = await m.delegate('claude', { missionId: 'exec', target: 'gpt-b', role: 'reviewer', instruction: 'Read-only', idempotencyKey: 'exec-2' });
+  assert.equal(b.executionRequest?.reasoningEffort, 'ultra');
+  assert.equal(b.executionRequest?.maxNativeSubagents, undefined);
+}));
 test('switching gpt-a -> claude with persisted data: no leader worker paths, old results readable, roles normalized', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'panter-switch-'));
   try {
