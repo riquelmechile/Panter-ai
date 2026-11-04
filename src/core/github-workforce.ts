@@ -17,7 +17,7 @@ import {SqliteLedger} from './sqlite-ledger.js';
 export const GITHUB_WRITE_OPS=['commit','pr','comment','issue'] as const;
 export type GitHubWriteOp=typeof GITHUB_WRITE_OPS[number];
 export type GitHubGrant={workId:string;host:string;repository:string;ops:GitHubWriteOp[];branch:string|null;
-  base:string|null;numbers:number[];own?:number[];branchCreated:boolean;createdBranch?:{repository:string;branch:string};createdAt:string;revokedAt:string|null;writes:number;reads:number};
+  base:string|null;numbers:number[];own?:number[];branchCreated:boolean;createdBranch?:{repository:string;branch:string;lastSha?:string};createdAt:string;revokedAt:string|null;writes:number;reads:number};
 type Audit={at:string;workId:string;host:string;repository:string;op:string;ref:string;outcome:string};
 type Data={version:1;grants:GitHubGrant[];audit:Audit[]};
 const seed:Data={version:1,grants:[],audit:[]};
@@ -95,7 +95,9 @@ export function safeReadPath(path:string){
     'environments','deployments','alerts','attempts','caches','permissions','runners','pending_deployments','timing','annotations',
     'jobs','approvals','usage','deployment_protection_rules','tarball','zipball','assets'].includes(s)))return false;
   switch(a){
-    case 'contents': case 'readme': case 'commits': case 'compare': case 'pulls': case 'issues': case 'branches':
+    // compare/a...owner:branch would reach other forks of the network: same-repository refs only.
+    case 'compare': return !rawPath.includes(':');
+    case 'contents': case 'readme': case 'commits': case 'pulls': case 'issues': case 'branches':
     case 'tags': case 'releases': case 'languages': case 'check-runs': case 'check-suites': return true;
     case 'git': return ['trees','blobs','commits','ref','refs','tags'].includes(b??'');
     case 'actions': return b==='runs'||b==='workflows';
@@ -115,7 +117,9 @@ export function botCommand(text:string){
   const raw=text.replace(/\p{Cf}/gu,' ');
   for(const t of [raw,raw.normalize('NFKC')]){
     if(/<!--|<!\s*-\s*-/.test(t))return true;                        // hidden HTML, even split by invisibles
-    if(/(^|[^A-Za-z0-9_])@[A-Za-z0-9][A-Za-z0-9_-]*(?![A-Za-z0-9_/-])/.test(t))return true; // @mention (not @scope/pkg)
+    if(/&(#0*64|#x0*40|commat);/i.test(t))return true;                  // encoded @
+    // @mention after any non-alphanumeric (GitHub links "_@x_" too); @scope/pkg and @ts-* directives are not mentions.
+    if(/(^|[^A-Za-z0-9])@(?!ts-(ignore|expect-error|nocheck|check)\b)[A-Za-z0-9][A-Za-z0-9_-]*(?![A-Za-z0-9_/-])/.test(t))return true;
     if(/^\s*\/[A-Za-z][\w-]*(\s|$)/m.test(t)||/^\s*bors\b/im.test(t))return true;
   }
   return false;
@@ -187,6 +191,9 @@ export class GitHubWorkforce{
       check(!TERMINAL.has(work.state),'Work is finished');
       check(!existing||existing.repository===input.repository,'A grant cannot move to another repository; delegate a new work');
       check(!existing?.createdBranch||existing.branch===branch,'The working branch cannot change after it was created');
+      // One work per branch name in a repository (case-insensitive): two grants never share a working branch.
+      if(branch)check(!d.grants.some(x=>x.workId!==work.id&&x.repository.toLowerCase()===input.repository.toLowerCase()&&
+        (x.branch??'').toLowerCase()===branch.toLowerCase()),'Another work already uses that branch in this repository');
       out={workId:work.id,host:work.target,repository:input.repository,ops,branch,base,numbers,own:existing?.own??[],
         branchCreated:existing?.branchCreated??false,...(existing?.createdBranch?{createdBranch:existing.createdBranch}:{}),
         createdAt:iso(),revokedAt:null,writes:existing?.writes??0,reads:existing?.reads??0};
@@ -202,7 +209,13 @@ export class GitHubWorkforce{
     this.ensure();
     check(caller===this.leader(),'Only the leader revokes GitHub access');
     let found=false;
-    this.db!.mutate('github_workforce',seed,d=>{const g=d.grants.find(x=>x.workId===workId);if(g&&!g.revokedAt){g.revokedAt=iso();found=true;}});
+    this.db!.mutate('github_workforce',seed,d=>{
+      const g=d.grants.find(x=>x.workId===workId);
+      if(g){if(!g.revokedAt){g.revokedAt=iso();found=true;}return;}
+      // Revoking before any grant leaves a tombstone, so a later grant for this work is refused.
+      d.grants.push({workId,host:'',repository:'',ops:[],branch:null,base:null,numbers:[],branchCreated:false,
+        createdAt:iso(),revokedAt:iso(),writes:0,reads:0});found=true;
+    });
     return {workId,revoked:found};
   }
   audit(caller:string,workId?:string){
@@ -216,9 +229,11 @@ export class GitHubWorkforce{
   // ---- worker ----
   private current(workId:string){return this.db!.read('github_workforce',seed).grants.find(x=>x.workId===workId);}
   /** This grant created exactly this branch in exactly this repository. */
-  private ownsBranch(g:GitHubGrant){
+  private ownsBranch(g:GitHubGrant,headSha?:string){
     const c=this.current(g.workId)?.createdBranch;
-    return Boolean(c&&c.repository===g.repository&&c.branch===g.branch);
+    // Same repository, same name, AND the tip is the commit this work last wrote: a branch deleted and recreated
+    // by someone else (or another work) under the same name is never written.
+    return Boolean(c&&c.repository===g.repository&&c.branch===g.branch&&(headSha===undefined||c.lastSha===headSha));
   }
   /** Live claim + live grant (+ operation). Called on entry AND again right before every mutation. */
   private async authorize(caller:string,claim:Claim,op:'read'|GitHubWriteOp){
@@ -325,13 +340,14 @@ export class GitHubWorkforce{
           const base=g.base??repo.default_branch;
           check(validRefName(base),'Invalid base branch');
           head=this.ok(await this.call(g,'GET',`git/ref/heads/${refPath(base)}`),'base branch lookup').object.sha;
-          await this.authorize(caller,claim,'commit');
+          check((await this.authorize(caller,claim,'commit')).branch===branch,'Grant branch changed');
           this.ok(await this.call(g,'POST','git/refs',{ref:`refs/heads/${branch}`,sha:head}),'branch creation');
-          this.record(g,'branch',branch,`created from ${base}@${head}`,x=>{x.branchCreated=true;x.createdBranch={repository:g.repository,branch};});
+          this.record(g,'branch',branch,`created from ${base}@${head}`,x=>{if(x.branch===branch&&x.repository===g.repository){
+            x.branchCreated=true;x.createdBranch={repository:g.repository,branch,lastSha:head};}});
         }else{
           const found=this.ok(ref,'branch lookup');
           // Only the branch this grant created: never an existing branch that merely matches the name.
-          check(this.ownsBranch(g)&&found.ref===`refs/heads/${branch}`,'That branch already exists and was not created for this work');
+          check(this.ownsBranch(g,found.object?.sha)&&found.ref===`refs/heads/${branch}`,'That branch already exists and was not created for this work (or moved since this work last wrote it)');
           head=found.object.sha;
         }
         const info=this.ok(await this.call(g,'GET',`branches/${refPath(branch)}`),'branch check');
@@ -341,10 +357,12 @@ export class GitHubWorkforce{
           tree:files.map(f=>f.delete?{path:f.path,mode:'100644',type:'blob',sha:null}:{path:f.path,mode:'100644',type:'blob',content:f.content})}),'tree creation');
         const full=`${message.trim()}\n\nPanter-Work: ${g.workId}\nPanter-Host: ${g.host}`;
         const commit=this.ok(await this.call(g,'POST','git/commits',{message:full,tree:tree.sha,parents:[head]}),'commit creation');
-        await this.authorize(caller,claim,'commit'); // lease and grant still live right before moving the branch
+        // Lease and grant still live, and still on this branch, right before moving it.
+        check((await this.authorize(caller,claim,'commit')).branch===branch,'Grant branch changed');
         // force:false: a concurrent push to the branch makes this fail instead of being overwritten.
         this.ok(await this.call(g,'PATCH',`git/refs/heads/${refPath(branch)}`,{sha:commit.sha,force:false}),'branch update');
-        this.record(g,'commit',`${branch}@${commit.sha}`,`${files.length} file(s)`);
+        this.record(g,'commit',`${branch}@${commit.sha}`,`${files.length} file(s)`,x=>{
+          if(x.createdBranch&&x.createdBranch.branch===branch&&x.createdBranch.repository===g.repository)x.createdBranch.lastSha=commit.sha;});
         return {repository:g.repository,branch,commit:commit.sha,parent:head,files:files.length};
       }catch(e){this.record(g,'commit',branch,'error: '+(e instanceof Error?e.message:'error'));throw e;}
     });

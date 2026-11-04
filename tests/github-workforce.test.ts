@@ -282,3 +282,42 @@ test('one work cannot spend more than its hourly share of GitHub calls', () => f
   const r = await Promise.allSettled(Array.from({ length: 520 }, () => gh.read('gpt-a', claim, 'contents/a')));
   assert.equal(r.filter(x => x.status === 'fulfilled').length, 500);
 }));
+
+test('a same-named branch that moved since this work wrote it is never written; branch names are unique per repo', async () => {
+  let tip = 'base1'; let exists = false;
+  const routes: Record<string, Route> = {
+    ...repo,
+    'GET acme/site/git/ref/heads/panter/': (c) => exists ? [200, { ref: 'refs/heads/' + decodeURIComponent(c.url.split('git/ref/heads/')[1]!), object: { sha: tip } }] : [404, {}],
+    'GET acme/site/git/ref/heads/main': () => [200, { object: { sha: 'base1' } }],
+    'POST acme/site/git/refs': () => { exists = true; tip = 'base1'; return [201, {}]; },
+    'GET acme/site/branches/panter/': () => [200, { protected: false }],
+    'GET acme/site/git/commits/': () => [200, { tree: { sha: 't' } }],
+    'POST acme/site/git/trees': () => [201, { sha: 't2' }],
+    'POST acme/site/git/commits': () => [201, { sha: 'mine1' }],
+    'PATCH acme/site/git/refs/heads/panter/': (c) => { tip = c.body.sha; return [200, {}]; },
+  };
+  await fixture(routes, async ({ gh, mesh, workId, claim }) => {
+    await gh.grant('claude', { workId, repository: 'acme/site', ops: ['commit'], branch: 'panter/shared' });
+    await gh.commit('gpt-a', claim, 'one', [{ path: 'a.md', content: 'a' }]);
+    await gh.commit('gpt-a', claim, 'two', [{ path: 'a.md', content: 'b' }]); // tip is still ours
+    tip = 'someone-else'; // deleted and recreated, or pushed by another party
+    await assert.rejects(gh.commit('gpt-a', claim, 'three', [{ path: 'a.md', content: 'c' }]), /moved since this work last wrote it/);
+    const other = await mesh.delegate('claude', { missionId: 'm', target: 'gpt-a', role: 'explorer', instruction: 'Other', idempotencyKey: 'k2' });
+    await assert.rejects(gh.grant('claude', { workId: other.id, repository: 'acme/site', ops: ['commit'], branch: 'panter/SHARED' }), /already uses that branch/);
+  });
+});
+
+test('revoking before any grant leaves a tombstone', () => fixture({}, async ({ gh, workId }) => {
+  assert.equal((await gh.revoke('claude', workId)).revoked, true);
+  await assert.rejects(gh.grant('claude', { workId, repository: 'acme/site', ops: [] }), /revoked/);
+}));
+
+test('mention filter: underscores and entities caught; TS directives and scoped packages allowed; no cross-fork compare', async () => {
+  const { botCommand } = await import('../src/core/github-workforce.js');
+  for (const bad of ['_@claude_ please', '&#64;claude go', '&#x40;codex', '&commat;dependabot merge', '.@claude', '+@dependabot'])
+    assert.equal(botCommand(bad), true, bad);
+  for (const ok of ['bump @types/node to 22', 'add `// @ts-ignore` here', 'see https://npm.im/@scope/pkg', '/src/app.ts: fixed'])
+    assert.equal(botCommand(ok), false, ok);
+  assert.equal(safeReadPath('compare/main...panter/x'), true);
+  assert.equal(safeReadPath('compare/main...evil:main'), false);
+});

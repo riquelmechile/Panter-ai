@@ -43,7 +43,8 @@ export class LocalGitVerifier {
     try{
       const root=await realpath(config.root);
       const git=async(...args:string[])=>{
-        const r=await exec('git',args,{cwd:root,timeout:20000,maxBuffer:1024*512,windowsHide:true,env:childEnv({},true)});return r.stdout.trim();
+        // Fixed read-only git queries: operator env (minus Panter credentials) so safe.directory/GIT_CONFIG_GLOBAL keep working.
+        const r=await exec('git',args,{cwd:root,timeout:20000,maxBuffer:1024*512,windowsHide:true,env:childEnv()});return r.stdout.trim();
       };
       if(await git('rev-parse','--show-toplevel')!==root)throw new Error('Local Git checkout root mismatch');
       const observed=await git('rev-parse','--verify','HEAD');decision.checkedHead=observed;
