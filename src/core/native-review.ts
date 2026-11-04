@@ -59,14 +59,30 @@ function boundReports(text:string,agentId:string,candidateSha:string):{objects:n
     const forms=[obj,...nested.map((x:any)=>({...x,agentId:x.agentId??x.lens,candidateSha:x.candidateSha??obj.candidateSha??obj.review_result?.candidateSha}))];
     for(const f of forms){
       if(f.agentId!==agentId||f.candidateSha!==candidateSha)continue;
-      const findings=Array.isArray(f.findings)?f.findings.map((x:any)=>x&&typeof x==='object'?{...x,proofRefs:x.proofRefs??x.proof_refs}:x):f.findings;
-      if(Array.isArray(findings)&&findings.some((x:any)=>typeof x?.severity==='string'&&x.severity.includes('|')))continue; // template echo
+      const findings=Array.isArray(f.findings)?f.findings.map((x:any)=>{
+        if(!x||typeof x!=='object')return x;const {proof_refs,...rest}=x;return {...rest,proofRefs:x.proofRefs??proof_refs};
+      }):f.findings;
+      if(templateEcho(findings))continue;
       const r={...f,findings};
-      distinct.set(JSON.stringify(r),r);
+      distinct.set(canonical(r),r);
     }
   }
   return {objects:objects.length,reports:[...distinct.values()]};
 }
+/** Only an exact echo of the completion-format template: every finding is all placeholders. */
+const TEMPLATE_SEVERITY='BLOCKER | CRITICAL | WARNING | SUGGESTION';
+const placeholder=(v:unknown)=>typeof v==='string'&&/^<[^<>]*>$/.test(v.trim());
+function templateEcho(findings:unknown){
+  return Array.isArray(findings)&&findings.length>0&&findings.every((x:any)=>x&&x.severity===TEMPLATE_SEVERITY&&placeholder(x.location));
+}
+/** Order-independent serialization, so the same report written twice is one report. */
+function canonical(v:unknown):string{
+  if(Array.isArray(v))return `[${v.map(canonical).join(',')}]`;
+  if(v&&typeof v==='object')return `{${Object.keys(v).sort().map(k=>`${JSON.stringify(k)}:${canonical((v as any)[k])}`).join(',')}}`;
+  return JSON.stringify(v)??'null';
+}
+/** Every "severity": "critical|blocker" written anywhere in the raw text (any nesting, any case). */
+const rawSevere=(text:string)=>(text.match(/"severity"\s*:\s*"\s*(critical|blocker)\s*"/gi)??[]).length;
 const severe=(x:any)=>typeof x?.severity==='string'&&/^(blocker|critical)$/i.test(x.severity.trim());
 /** One lens report as the Panter envelope {agentId, candidateSha, findings[]}, bound to this exact lens and SHA.
  * Hosts often wrap it in prose or fences, or nest it as review_result.lens_results[], or write proof_refs: those
@@ -80,12 +96,17 @@ export function lensEnvelope(text:string,agentId:string,candidateSha:string):(Re
   if(reports.length!==1)return 'UNBOUND';
   const r=reports[0]!;
   const ok=Array.isArray(r.findings)&&r.findings.every((x:any)=>!!x&&typeof x==='object'&&typeof x.location==='string'&&SEVERITIES.includes(x.severity)&&Array.isArray(x.proofRefs)&&x.proofRefs.length>0);
-  return ok?r as Record<string,any>&{findings:LensFinding[]}:'UNBOUND';
+  if(!ok)return 'UNBOUND';
+  // Backstop: a severe finding written anywhere in the text (another key, another nesting, a truncated scan)
+  // that the accepted report does not carry means the lens is not accepted.
+  if(rawSevere(text)>r.findings.filter(severe).length)return 'UNBOUND';
+  return r as Record<string,any>&{findings:LensFinding[]};
 }
 /** Severe findings claimed for this lens and SHA in reports that were not accepted, so they are surfaced, never lost. */
 export function unacceptedSevere(text:string,agentId:string,candidateSha:string){
   if(text.length>100_000)return 0;
-  return boundReports(text,agentId,candidateSha).reports.reduce((n,r)=>n+(Array.isArray(r.findings)?r.findings.filter(severe).length:0),0);
+  const bound=boundReports(text,agentId,candidateSha).reports.reduce((n,r)=>n+(Array.isArray(r.findings)?r.findings.filter(severe).length:0),0);
+  return Math.max(bound,rawSevere(text));
 }
 export function assessMeshReview(input:{candidateSha:string;kind:'4r'|'judgment-day';work:Array<{agentId?:string;state:string;receiptDigest:string|null;result:string|null;host:string}>}){
   const expected=input.kind==='4r'?['review-risk','review-readability','review-reliability','review-resilience']:['jd-judge-a','jd-judge-b'];

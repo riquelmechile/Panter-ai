@@ -377,3 +377,24 @@ test('a clean lens report can never hide a severe one claimed for the same lens 
   const template = { agentId: 'review-risk', candidateSha: sha, findings: [{ id: '<stable id>', location: '<path:line>', severity: 'BLOCKER | CRITICAL | WARNING | SUGGESTION', claim: '<c>', proofRefs: ['<p>'] }] };
   assert.equal(typeof lensEnvelope(`Format: ${JSON.stringify(template)}\n${JSON.stringify(clean)}`, 'review-risk', sha), 'object');
 });
+
+test('lens backstop: a severe finding anywhere in the text that the accepted report lacks unbinds the lens', async () => {
+  const { lensEnvelope, unacceptedSevere } = await import('../src/core/native-review.js');
+  const clean = JSON.stringify({ agentId: 'review-risk', candidateSha: sha, findings: [] });
+  const critObj = { agentId: 'review-risk', candidateSha: sha, findings: [{ location: 'a.js:1', severity: 'CRITICAL', proofRefs: ['p'] }] };
+  // A "|" severity no longer hides the whole report.
+  const abuse = JSON.stringify({ ...critObj, findings: [...critObj.findings, { location: 'b.js:1', severity: 'CRITICAL|HIGH', proofRefs: ['p'] }] });
+  assert.equal(lensEnvelope(`${clean}\n${abuse}`, 'review-risk', sha), 'UNBOUND');
+  // More unclosed braces than the scan restarts, then a CRITICAL.
+  assert.equal(lensEnvelope(`${clean}\n${'if(x){ '.repeat(40)}\n${JSON.stringify(critObj)}`, 'review-risk', sha), 'UNBOUND');
+  // Nested under another key, or in snake_case.
+  assert.equal(lensEnvelope(`${clean}\n${JSON.stringify({ final: critObj })}`, 'review-risk', sha), 'UNBOUND');
+  assert.equal(lensEnvelope(`${clean}\n${JSON.stringify({ agent_id: 'review-risk', candidate_sha: sha, findings: critObj.findings })}`, 'review-risk', sha), 'UNBOUND');
+  assert.ok(unacceptedSevere(`${clean}\n${JSON.stringify({ final: critObj })}`, 'review-risk', sha) >= 1);
+  // A real accepted CRITICAL is still accepted and counted once.
+  const ok = lensEnvelope(JSON.stringify(critObj), 'review-risk', sha);
+  assert.ok(typeof ok === 'object' && ok.findings.length === 1);
+  // The same report written twice with a different key order is one report.
+  const reordered = JSON.stringify({ findings: [], candidateSha: sha, agentId: 'review-risk' });
+  assert.equal(typeof lensEnvelope(`${clean}\n${reordered}`, 'review-risk', sha), 'object');
+});
