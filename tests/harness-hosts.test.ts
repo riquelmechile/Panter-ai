@@ -493,7 +493,7 @@ test('a remote verification that fails runs native and its grant (PR comment) is
   assert.ok(abandoned.some(a => a.workId === workId));
 }));
 
-test('a read-only host that let its lease run out and never came back loses the phase to native', () => withHosts(async (h, m, { timeout }) => {
+test('a read-only host that let its lease run out and never came back loses the phase to native', () => withHosts(async (h, m, { timeout, abandoned }) => {
   const s = await h.start({ project: 'app', objective: 'Repair unknown issue', idempotencyKey: 'ro-lease', writesAuthorized: true });
   const first = await h.tick(s.id, all);
   const workId = first.next[0]!.workId as string;
@@ -508,5 +508,26 @@ test('a read-only host that let its lease run out and never came back loses the 
     const fb: any = await h.tick(s.id, all);
     assert.equal(fb.fallback?.reason, 'REMOTE_LEASE_LOST');
     assert.equal(fb.status, 'GPT_A_NATIVE');
+    assert.ok(abandoned.some(a => a.workId === workId));
+    const w = (await m.inbox('gpt-a')).works.find(x => x.id === workId);
+    assert.equal(w?.state, 'ABORTED_NO_EFFECTS', 'the orphan no longer counts as running');
+    await assert.rejects(m.claim('gpt-b', workId, 30), /./, 'a late reclaim is refused');
+  } finally { Date.now = original; }
+}));
+
+test('a read-only host that reclaims its expired work within the grace keeps the phase', () => withHosts(async (h, m, { timeout }) => {
+  const s = await h.start({ project: 'app', objective: 'Repair unknown issue', idempotencyKey: 'ro-reclaim', writesAuthorized: true });
+  const first = await h.tick(s.id, all);
+  const workId = first.next[0]!.workId as string;
+  await m.claim('gpt-b', workId, 30);
+  timeout.ms = 60_000;
+  const original = Date.now;
+  try {
+    Date.now = () => original() + 40_000;
+    await m.claim('gpt-b', workId, 600);
+    Date.now = () => original() + 200_000;
+    const t: any = await h.tick(s.id, all);
+    assert.equal(t.status, 'WAITING_REMOTE_PEER');
+    assert.equal(t.fallback, undefined);
   } finally { Date.now = original; }
 }));

@@ -455,7 +455,10 @@ export class AutomaticHarness {
           next:[],instruction:'The trusted operator confirmed no effects. A NEW fenced attempt may be dispatched on the next tick if authorization is still valid.'};
       }
       const readOnly=phase.phase==='DISCOVER'||phase.phase==='VERIFY';
-      const lost=readOnly&&work?.state==='RUNNING'?await this.leaseLostTooLong(work.id):null;
+      const expired=readOnly&&work?.state==='RUNNING'?await this.leaseLostTooLong(work.id):null;
+      // End the orphaned work in the mesh first (atomically refused if the host came back), so it never stays RUNNING.
+      const lost=expired?(await this.mesh.abandonExpiredReadOnly(leaderHost(),work!.id,expired.limit,
+        `${expired.host} let its lease expire for more than ${Math.round(expired.limit/1000)}s`).catch(()=>null))?.abandoned===true:false;
       if(work&&(work.state==='FAILED'||work.state==='OUTCOME_UNKNOWN'||lost)){
         // A read-only phase (discovery, verification) has nothing to reconcile: at most a verifier's PR comment, which
         // no gate reads. Revoke that work's grant and run the phase native instead of waiting for an operator. A writer
@@ -467,7 +470,8 @@ export class AutomaticHarness {
             st.redispatchGeneration=(st.redispatchGeneration??0)+1;r.revision++;return true;});
           if(reset)try{await this.hooks.abandoned?.({workId:work.id,host:work.target});}catch{/* best effort */}
           const next=await this.tick(runId,runtime);
-          return reset?{...next,fallback:{phaseId:phase.id,from:work.target,reason:work.state==='FAILED'?'REMOTE_FAILED':'REMOTE_LEASE_LOST'}}:next;
+          return reset?{...next,fallback:{phaseId:phase.id,from:work.target,
+            reason:lost?'REMOTE_LEASE_LOST':work.state==='FAILED'?'REMOTE_FAILED':'REMOTE_OUTCOME_UNKNOWN'}}:next;
         }
         return {...common,status:'REMOTE_OUTCOME_NEEDS_RECONCILIATION',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
       }
