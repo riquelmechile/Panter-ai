@@ -48,6 +48,6 @@ Panter guarda en su ledger quién era el líder. Si al arrancar el líder config
 - **Bindings de especialistas que apuntan al líder** quedan inactivos y se ven como no asignados. Se pueden reasignar a un worker con revisión 0, y mientras tanto las revisiones usan fases nativas.
 - **Revisiones nativas 4R y Judgment Day** guardan el modelo y el esfuerzo con que se congelaron, así que siguen siendo legibles después del cambio.
 
-Un ledger vacío no cuenta como cambio de líder. Hay un solo líder por proceso y solo el líder crea trabajo, así que el nuevo líder ve los resultados del trabajo que delegó el anterior: inbox, `resultGet` y el estado de los wakes de Grok y Claude.
+Un ledger vacío no cuenta como cambio de líder. Pero un ledger anterior a este cambio, sin líder registrado, se trata como liderado por GPT-A para las fases nativas: el nuevo líder las adopta aunque el mesh esté vacío. Los mensajes que el nuevo líder mandó cuando era worker se quedan con el líder anterior, así que nunca queda uno dirigido a sí mismo. Hay un solo líder por proceso y solo el líder crea trabajo, así que el nuevo líder ve los resultados del trabajo que delegó el anterior: inbox, `resultGet` y el estado de los wakes de Grok y Claude.
 
 Agent Studio toma el líder de `panter_gentle_catalog` (`leaderHost`).
