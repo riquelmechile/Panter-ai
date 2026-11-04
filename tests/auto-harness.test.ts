@@ -447,3 +447,21 @@ test('operator-reconciled no-effects A2A writer creates a NEW attempt rather tha
   assert.equal((await m.pending('grok')).filter(w=>w.missionId===run.id).length,1);
  }finally{Date.now=original;}
 }));
+
+test('a remote writer that finished FAILED still waits for reconciliation: it may have left effects',()=>withHarness(async(h,n,m)=>{
+ await m.setProfile('gpt-a',{host:'grok',actorId:'writer-grok-002',modelRequest:'host-default',
+   effortRequest:'max',roles:['implementer']},0);
+ await m.bindSpecialist('gpt-a',{agentId:'gentle-ai-worker',host:'grok',
+   modelRequest:'host-default',effortRequest:'max',skillIds:['gentle-ai']},0);
+ const run=await h.start({project:'app',objective:'Update short button copy',
+   idempotencyKey:'failed-writer',writesAuthorized:true,changeSurfaces:['src/ui/button.ts'],coordinationMode:'AUTO'});
+ const capacity={nativeSubagents:true,maxParallelSubagents:2,toolsAvailable:true,peerStates:{grok:'CONNECTED' as const}};
+ const first=await h.tick(run.id,capacity);
+ assert.equal(first.status,'REMOTE_A2A_DISPATCHED');
+ const workId=first.next[0]!.workId as string;
+ const c=await m.claim('grok',workId,60);
+ await m.complete('grok',workId,c.attemptId!,c.leaseGeneration,'push failed halfway',false);
+ const held:any=await h.tick(run.id,capacity);
+ assert.equal(held.status,'REMOTE_OUTCOME_NEEDS_RECONCILIATION');
+ assert.equal(held.fallback,undefined);
+}));

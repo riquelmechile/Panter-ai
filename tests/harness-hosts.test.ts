@@ -11,7 +11,7 @@ const sha = 'a'.repeat(40);
 const all = { nativeSubagents: true, maxParallelSubagents: 8, toolsAvailable: true,
   peerStates: { 'gpt-b': 'CONNECTED' as const, grok: 'CONNECTED' as const, gemini: 'CONNECTED' as const } };
 
-async function withHosts<T>(fn: (h: AutomaticHarness, m: MeshEngine, ctx: { dispatched: any[]; timeout: { ms: number } }) => Promise<T>) {
+async function withHosts<T>(fn: (h: AutomaticHarness, m: MeshEngine, ctx: { dispatched: any[]; timeout: { ms: number }; abandoned: any[] }) => Promise<T>) {
   const dir = await mkdtemp(join(tmpdir(), 'panter-hosts-'));
   try {
     const m = await MeshEngine.open(dir), n = await NativeSubagentReview.open(dir), h = await AutomaticHarness.open(dir, m, n);
@@ -24,14 +24,15 @@ async function withHosts<T>(fn: (h: AutomaticHarness, m: MeshEngine, ctx: { disp
     await bind('gentle-ai-explore', 'gpt-b');
     await bind('review-risk', 'grok'); await bind('review-readability', 'gemini');
     await bind('review-reliability', 'gpt-b'); await bind('review-resilience', 'grok');
-    const dispatched: any[] = []; const timeout = { ms: 3_600_000 };
+    const dispatched: any[] = []; const timeout = { ms: 3_600_000 }; const abandoned: any[] = [];
     const hooks: HarnessHostHooks = {
       materialFor: async (_run, host) => host === 'gemini' ? 'DIFF-MATERIAL-FOR-MAIL' : undefined,
       afterDispatch: async (x) => { dispatched.push({ phase: x.phase, host: x.host, workId: x.workId }); },
       pickupTimeoutMs: () => timeout.ms,
+      abandoned: async (x) => { abandoned.push(x); },
     };
     h.setHostHooks(hooks);
-    return await fn(h, m, { dispatched, timeout });
+    return await fn(h, m, { dispatched, timeout, abandoned });
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
 
@@ -459,3 +460,92 @@ test('no retry while any lens says something severe: accepted CRITICAL, failed l
     assert.equal((await h.get(id))!.reviewId, first, name);
   });
 });
+
+test('a read-only phase whose host fails runs native and its grant is released', () => withHosts(async (h, m, { abandoned }) => {
+  const s = await h.start({ project: 'app', objective: 'Repair unknown issue', idempotencyKey: 'ro-fail', writesAuthorized: true });
+  const first = await h.tick(s.id, all);
+  assert.equal(first.status, 'REMOTE_A2A_DISPATCHED');
+  const workId = first.next[0]!.workId as string;
+  const c: any = await m.claim('gpt-b', workId, 600);
+  await m.complete('gpt-b', workId, c.attemptId, c.leaseGeneration, 'No execution environment on this host.', false);
+  const fb: any = await h.tick(s.id, all);
+  assert.equal(fb.fallback?.reason, 'REMOTE_FAILED');
+  assert.equal(fb.fallback?.from, 'gpt-b');
+  assert.equal(fb.status, 'GPT_A_NATIVE', 'the discovery now runs native');
+  assert.deepEqual(abandoned.filter(a => a.workId === workId).map(a => a.host), ['gpt-b']);
+  assert.equal((await h.tick(s.id, all)).status, 'WAITING_HOST_PHASE_REPORT', 'never redispatched to the failed host');
+}));
+
+test('a remote verification that fails runs native and its grant (PR comment) is released', () => withHosts(async (h, m, { abandoned }) => {
+  await m.bindSpecialist('gpt-a', { agentId: 'gentle-ai-verify', host: 'gpt-b', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] } as any, 0);
+  const s = await h.start({ project: 'app', objective: 'Fix login security', idempotencyKey: 'v-fail', writesAuthorized: true, changeSurfaces: ['src/auth.ts'] });
+  let t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Plan', evidence: ['plan'] });
+  t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Done', evidence: ['tests'], candidateSha: sha, runId: 'impl-run-1' });
+  t = await h.tick(s.id, all);
+  assert.equal(t.status, 'REMOTE_A2A_DISPATCHED');
+  assert.equal((t.next[0] as any).host, 'gpt-b');
+  const workId = t.next[0]!.workId as string;
+  const c: any = await m.claim('gpt-b', workId, 600);
+  await m.complete('gpt-b', workId, c.attemptId, c.leaseGeneration, 'No execution environment.', false);
+  const fb: any = await h.tick(s.id, all);
+  assert.equal(fb.fallback?.reason, 'REMOTE_FAILED');
+  assert.equal(fb.status, 'GPT_A_NATIVE');
+  assert.ok(abandoned.some(a => a.workId === workId));
+}));
+
+test('a read-only host that let its lease run out and never came back loses the phase to native', () => withHosts(async (h, m, { timeout, abandoned }) => {
+  const s = await h.start({ project: 'app', objective: 'Repair unknown issue', idempotencyKey: 'ro-lease', writesAuthorized: true });
+  const first = await h.tick(s.id, all);
+  const workId = first.next[0]!.workId as string;
+  await m.claim('gpt-b', workId, 30);
+  assert.equal((await h.tick(s.id, all)).status, 'WAITING_REMOTE_PEER', 'a live lease keeps the phase remote');
+  timeout.ms = 60_000;
+  const original = Date.now;
+  try {
+    Date.now = () => original() + 31_000 + 30_000;
+    assert.equal((await h.tick(s.id, all)).status, 'WAITING_REMOTE_PEER', 'still within the grace after the lease');
+    Date.now = () => original() + 31_000 + 61_000;
+    const fb: any = await h.tick(s.id, all);
+    assert.equal(fb.fallback?.reason, 'REMOTE_LEASE_LOST');
+    assert.equal(fb.status, 'GPT_A_NATIVE');
+    assert.ok(abandoned.some(a => a.workId === workId));
+    const w = (await m.inbox('gpt-a')).works.find(x => x.id === workId);
+    assert.equal(w?.state, 'ABORTED_NO_EFFECTS', 'the orphan no longer counts as running');
+    await assert.rejects(m.claim('gpt-b', workId, 30), /./, 'a late reclaim is refused');
+  } finally { Date.now = original; }
+}));
+
+test('a read-only host that reclaims its expired work within the grace keeps the phase', () => withHosts(async (h, m, { timeout }) => {
+  const s = await h.start({ project: 'app', objective: 'Repair unknown issue', idempotencyKey: 'ro-reclaim', writesAuthorized: true });
+  const first = await h.tick(s.id, all);
+  const workId = first.next[0]!.workId as string;
+  await m.claim('gpt-b', workId, 30);
+  timeout.ms = 60_000;
+  const original = Date.now;
+  try {
+    Date.now = () => original() + 40_000;
+    await m.claim('gpt-b', workId, 600);
+    Date.now = () => original() + 200_000;
+    const t: any = await h.tick(s.id, all);
+    assert.equal(t.status, 'WAITING_REMOTE_PEER');
+    assert.equal(t.fallback, undefined);
+  } finally { Date.now = original; }
+}));
+
+test('a crash between ending the orphan and resetting the step still runs the phase native, never back on that host', () => withHosts(async (h, m, { timeout, abandoned }) => {
+  const s = await h.start({ project: 'app', objective: 'Repair unknown issue', idempotencyKey: 'ro-crash', writesAuthorized: true });
+  const first = await h.tick(s.id, all);
+  const workId = first.next[0]!.workId as string;
+  await m.claim('gpt-b', workId, 30);
+  timeout.ms = 60_000;
+  const original = Date.now;
+  try {
+    Date.now = () => original() + 31_000 + 61_000;
+    // Only the mesh write happened (as if the process stopped right after it).
+    assert.equal((await m.abandonExpiredReadOnly('gpt-a', workId, 60_000, 'test')).abandoned, true);
+    const t: any = await h.tick(s.id, all);
+    assert.equal(t.status, 'REMOTE_NO_EFFECTS_RECONCILED');
+    assert.ok(abandoned.some(a => a.workId === workId), 'its grant is still released');
+    assert.equal((await h.tick(s.id, all)).status, 'GPT_A_NATIVE', 'native, not re-sent to gpt-b');
+  } finally { Date.now = original; }
+}));

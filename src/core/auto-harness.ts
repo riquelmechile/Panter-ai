@@ -163,6 +163,14 @@ export class AutomaticHarness {
     if(start===null)return null;
     return Date.now()-Date.parse(start)>limit?{host:w.target,limit}:null;
   }
+  /** A started read-only work whose host let its lease run out and did not renew it within a further pickup timeout:
+   * the host is gone. (Read-only work never becomes OUTCOME_UNKNOWN; it stays RUNNING for its host to reclaim.) */
+  private async leaseLostTooLong(workId:string){
+    const w=await this.mesh.workTarget(leaderHost(),workId).catch(()=>null);
+    if(!w||w.state!=='RUNNING'||w.transportHeld||!w.leaseUntil)return null;
+    const limit=this.hooks.pickupTimeoutMs?.(w.target)??300_000;
+    return Date.now()-Date.parse(w.leaseUntil)>limit?{host:w.target,limit}:null;
+  }
   private constructor(private readonly sqlite:SqliteLedger,private readonly mesh:MeshEngine,private readonly native:NativeSubagentReview,private readonly github?:GitHubDeliveryGate,private readonly officialRdd?:NativeReviewBridge,private readonly rdd?:PanterRdd,private readonly requireWriteGrant=false){}
   static async open(dir:string,mesh:MeshEngine,native:NativeSubagentReview,github?:GitHubDeliveryGate,officialRdd?:NativeReviewBridge,rdd?:PanterRdd,requireWriteGrant=false){
     const engine=new AutomaticHarness(SqliteLedger.open(dir),mesh,native,github,officialRdd,rdd,requireWriteGrant);
@@ -439,15 +447,36 @@ export class AutomaticHarness {
           // A concurrent tick may already have reset this step after withdrawing it.
           if(!(st.execution==='REMOTE_A2A'&&st.remoteWorkId===work.id&&st.status==='ISSUED'))return;
           st.execution=undefined;st.remoteWorkId=undefined;st.status='PENDING';
-          // Withdrawn for a missed pickup: never re-send to that host, run it native.
+          // Withdrawn by the leader (missed pickup, or a lost lease): never re-send to that host, run it native.
           if(work.withdrawn){st.nativeOnly=true;st.fallbackFrom=work.target;}
           st.redispatchGeneration=(st.redispatchGeneration??0)+1;r.revision++;
         });
+        if(work.withdrawn)try{await this.hooks.abandoned?.({workId:work.id,host:work.target});}catch{/* best effort */}
         return {...common,status:'REMOTE_NO_EFFECTS_RECONCILED',phaseId:phase.id,workId:work.id,
-          next:[],instruction:'The trusted operator confirmed no effects. A NEW fenced attempt may be dispatched on the next tick if authorization is still valid.'};
+          next:[],instruction:work.withdrawn?'The leader withdrew this work without effects; the phase runs native on the next tick.':
+            'The trusted operator confirmed no effects. A NEW fenced attempt may be dispatched on the next tick if authorization is still valid.'};
       }
-      if(work?.state==='FAILED'||work?.state==='OUTCOME_UNKNOWN')
+      const readOnly=phase.phase==='DISCOVER'||phase.phase==='VERIFY';
+      const expired=readOnly&&work?.state==='RUNNING'?await this.leaseLostTooLong(work.id):null;
+      // End the orphaned work in the mesh first (atomically refused if the host came back), so it never stays RUNNING.
+      const lost=expired?(await this.mesh.abandonExpiredReadOnly(leaderHost(),work!.id,expired.limit,
+        `${expired.host} let its lease expire for more than ${Math.round(expired.limit/1000)}s`).catch(()=>null))?.abandoned===true:false;
+      if(work&&(work.state==='FAILED'||work.state==='OUTCOME_UNKNOWN'||lost)){
+        // A read-only phase (discovery, verification) has nothing to reconcile: at most a verifier's PR comment, which
+        // no gate reads. Revoke that work's grant and run the phase native instead of waiting for an operator. A writer
+        // still waits.
+        if(readOnly){
+          const reset=await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;
+            if(!(st.execution==='REMOTE_A2A'&&st.remoteWorkId===work.id&&st.status==='ISSUED'))return false;
+            st.execution=undefined;st.remoteWorkId=undefined;st.status='PENDING';st.nativeOnly=true;st.fallbackFrom=work.target;
+            st.redispatchGeneration=(st.redispatchGeneration??0)+1;r.revision++;return true;});
+          if(reset)try{await this.hooks.abandoned?.({workId:work.id,host:work.target});}catch{/* best effort */}
+          const next=await this.tick(runId,runtime);
+          return reset?{...next,fallback:{phaseId:phase.id,from:work.target,
+            reason:lost?'REMOTE_LEASE_LOST':work.state==='FAILED'?'REMOTE_FAILED':'REMOTE_OUTCOME_UNKNOWN'}}:next;
+        }
         return {...common,status:'REMOTE_OUTCOME_NEEDS_RECONCILIATION',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
+      }
       if(work?.state==='COMPLETED'){
         // Result is persisted in the Mesh ledger and never echoed via inbox.
         const persisted=await this.mesh.resultGet(leaderHost(),phase.remoteWorkId);

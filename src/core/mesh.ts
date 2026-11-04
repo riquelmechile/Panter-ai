@@ -937,7 +937,7 @@ export class MeshEngine {
     return this.read(d => {
       const w = d.works.find(w => w.id === id);
       check(w, 'Work not found');
-      return { id: w.id, target: w.target, role: w.role, state: w.state, createdAt: w.createdAt, transportHeld: Boolean(w.transportClaim && w.state === 'RUNNING') };
+      return { id: w.id, target: w.target, role: w.role, state: w.state, createdAt: w.createdAt, leaseUntil: w.leaseUntil, transportHeld: Boolean(w.transportClaim && w.state === 'RUNNING') };
     });
   }
   /** Leader withdraws remote read-only work nobody really started: still QUEUED, or only held by a transport
@@ -954,6 +954,26 @@ export class MeshEngine {
       w.result = `Withdrawn by ${leaderLabel()} before any worker started it: ${reason.slice(0, 300)}`; delete w.transportClaim; w.withdrawn = true;
       this.notify(d, w.target); this.notify(d, leaderHost());
       return { workId: w.id, state: w.state, withdrawn: true };
+    });
+  }
+  /** Leader ends started read-only work whose lease expired at least graceMs ago (its host is gone), so it stops
+   * counting as running (e.g. for the Grok doorbell). Refused if the host renewed or reclaimed it in the meantime; a
+   * writer is never ended this way. Read-only work leaves no effects to reconcile. */
+  async abandonExpiredReadOnly(caller: Host, id: string, graceMs: number, reason: string) {
+    check(caller === leaderHost(), `Only ${leaderLabel()} may abandon work`);
+    return this.write(d => {
+      const w = d.works.find(w => w.id === id);
+      check(w, 'Work not found');
+      if (w.state === 'ABORTED_NO_EFFECTS') return { workId: w.id, state: w.state, abandoned: false };
+      if (w.role === 'implementer' || w.state !== 'RUNNING' || w.transportClaim ||
+        !(Date.now() - Date.parse(w.leaseUntil ?? '') > graceMs)) return { workId: w.id, state: w.state, abandoned: false };
+      w.state = 'ABORTED_NO_EFFECTS'; w.attemptId = null; w.leaseUntil = null; w.completedAt = iso();
+      w.result = `Abandoned by ${leaderLabel()} after its lease expired unrenewed: ${reason.slice(0, 300)}`;
+      // Withdrawn by the leader: the harness never sends this phase back to that host, even after a crash between
+      // this write and its own.
+      w.withdrawn = true;
+      this.notify(d, w.target); this.notify(d, leaderHost());
+      return { workId: w.id, state: w.state, abandoned: true };
     });
   }
   async complete(caller: Host, id: string, attemptId: string, generation: number, result: string, success = true, transport = false, via?: 'gmail-relay') {
