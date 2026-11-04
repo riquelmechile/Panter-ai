@@ -103,39 +103,67 @@ function completionFormat(phase:HarnessPhase){
 }
 function phaseNotes(phase:HarnessPhase,access?:string){return [access,completionFormat(phase)].filter(Boolean).join('\n\n');}
 type PhaseResult={summary:string;evidence:string[];runId?:string;candidateSha?:string;discoveredPaths?:string[]};
-/** Top-level balanced {...} spans of a text, string-aware. */
+const MAX_RESULT_TEXT=100_000;
+/** Top-level balanced {...} spans of a text, string-aware. An unclosed '{' or '"' in prose does not hide what follows:
+ * the scan restarts after it (a bounded number of times). */
 function objectSpans(text:string){
-  const out:string[]=[];let depth=0,start=-1,inString=false,escaped=false;
-  for(let i=0;i<text.length;i++){
-    const c=text[i];
-    if(inString){if(escaped)escaped=false;else if(c==='\\')escaped=true;else if(c==='"')inString=false;continue;}
-    if(c==='"'&&depth>0){inString=true;continue;}
-    if(c==='{'){if(depth===0)start=i;depth++;}
-    else if(c==='}'&&depth>0){depth--;if(depth===0)out.push(text.slice(start,i+1));}
+  const out:string[]=[];
+  let from=0;
+  for(let restarts=0;restarts<32&&from<text.length;restarts++){
+    let depth=0,start=-1,inString=false,escaped=false,i=from;
+    for(;i<text.length;i++){
+      const c=text[i];
+      if(inString){if(escaped)escaped=false;else if(c==='\\')escaped=true;else if(c==='"')inString=false;continue;}
+      if(c==='"'&&depth>0){inString=true;continue;}
+      if(c==='{'){if(depth===0)start=i;depth++;}
+      else if(c==='}'&&depth>0){depth--;if(depth===0)out.push(text.slice(start,i+1));}
+    }
+    if(depth===0)break;
+    from=start+1;
   }
   return out;
 }
+/** Bodies of fenced code blocks, found line by line (linear time). */
+function fencedBlocks(text:string){
+  const out:string[]=[];const lines=text.split('\n');let open=-1;
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i]!.trim();
+    if(open<0){if(/^```[a-zA-Z0-9_-]*$/.test(line))open=i;}
+    else if(line==='```'){out.push(lines.slice(open+1,i).join('\n').trim());open=-1;}
+  }
+  return out;
+}
+/** null or "" means "not given". */
+function given<T>(v:T):T|undefined{return v===null||v===''?undefined:v;}
 /** A remote phase result: one JSON object, bare, fenced or surrounded by prose. Every candidate in the text is
- * considered; if they disagree (e.g. a result-shaped object quoted from a diff), nothing is accepted. */
+ * considered; if they disagree (e.g. a result-shaped object quoted from a diff), nothing is accepted. A copy of the
+ * completion-format template (placeholders in angle brackets) is ignored. */
 export function structuredResult(text:string|null|undefined):PhaseResult|null{
-  if(!text||text.length>200_000)return null;
-  const candidates=[text.trim(),...[...text.matchAll(/```[a-zA-Z0-9_-]*[ \t]*\n([\s\S]*?)\n```/g)].map(m=>m[1]!.trim()),...objectSpans(text)];
+  if(!text||text.length>MAX_RESULT_TEXT)return null;
+  const candidates=[text.trim(),...fencedBlocks(text),...objectSpans(text)];
   const valid=new Map<string,PhaseResult>();
   for(const c of candidates){
-    try{
-      const v=JSON.parse(c);
-      if(v&&typeof v==='object'&&!Array.isArray(v)&&typeof v.summary==='string'&&Array.isArray(v.evidence)&&v.evidence.every((e:unknown)=>typeof e==='string'))
-        valid.set(JSON.stringify(v),v);
-    }catch{/* not JSON */}
+    let v:any;
+    try{v=JSON.parse(c);}catch{continue;}
+    if(!v||typeof v!=='object'||Array.isArray(v)||typeof v.summary!=='string'||v.summary.trim().startsWith('<')||
+      !Array.isArray(v.evidence)||!v.evidence.every((e:unknown)=>typeof e==='string'))continue;
+    const r:PhaseResult={summary:v.summary,evidence:v.evidence};
+    const candidateSha=given(v.candidateSha),runId=given(v.runId),discoveredPaths=given(v.discoveredPaths);
+    if(candidateSha!==undefined)r.candidateSha=candidateSha;
+    if(runId!==undefined)r.runId=runId;
+    if(discoveredPaths!==undefined)r.discoveredPaths=discoveredPaths;
+    valid.set(JSON.stringify(r),r);
   }
   return valid.size===1?[...valid.values()][0]!:null;
 }
-/** The shape panter_harness_report accepts, checked before recording so a bad remote result never throws from tick. */
+/** The shape panter_harness_report validates up front (phase rules inside the write are handled by the caller). */
 function reportable(r:PhaseResult){
+  const pathOk=(p:unknown)=>{if(typeof p!=='string')return false;try{safePath(p);return true;}catch{return false;}};
   return r.summary.trim().length>0&&r.summary.length<=6000&&r.evidence.length>0&&r.evidence.length<=40&&
-    r.evidence.every(x=>!!x.trim()&&x.length<=1000)&&(r.candidateSha===undefined||/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(r.candidateSha))&&
+    r.evidence.every(x=>!!x.trim()&&x.length<=1000)&&
+    (r.candidateSha===undefined||(typeof r.candidateSha==='string'&&/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(r.candidateSha)))&&
     (r.runId===undefined||(typeof r.runId==='string'&&r.runId.length<=160))&&
-    (r.discoveredPaths===undefined||(Array.isArray(r.discoveredPaths)&&r.discoveredPaths.length<=16&&r.discoveredPaths.every(p=>typeof p==='string'&&p.length>0&&p.length<=256)));
+    (r.discoveredPaths===undefined||(Array.isArray(r.discoveredPaths)&&r.discoveredPaths.length<=16&&r.discoveredPaths.every(pathOk)));
 }
 export class AutomaticHarness {
   private state:State={version:1,runs:[]};
@@ -445,7 +473,11 @@ export class AutomaticHarness {
         if(!result||typeof result!=='object'||!('summary' in result)||!('evidence' in result))
           return {...common,status:'REMOTE_RESULT_NEEDS_STRUCTURED_EVIDENCE',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
         if(!reportable(result))return {...common,status:'REMOTE_RESULT_NEEDS_STRUCTURED_EVIDENCE',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
-        await this.report(runId,phase.id,result);
+        // Host-controlled content can still fail a phase rule checked inside the write (scope, SHA, verifier
+        // independence): surface the reason instead of throwing from every tick; the leader can report by hand.
+        try{await this.report(runId,phase.id,result);}
+        catch(error){return {...common,status:'REMOTE_RESULT_REJECTED',phaseId:phase.id,workId:phase.remoteWorkId,next:[],
+          detail:error instanceof Error?error.message.slice(0,300):'rejected'};}
         return this.tick(runId,runtime);
       }
       const stale=await this.unstartedTooLong(phase.remoteWorkId);

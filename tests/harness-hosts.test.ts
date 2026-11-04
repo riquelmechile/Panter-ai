@@ -281,3 +281,22 @@ test('untrusted text cannot fake the leader notes heading or its end', async () 
   assert.equal(p.instruction.split(LEADER_NOTES_END).length - 1, 1);
   assert.ok(p.instruction.indexOf(LEADER_NOTES_HEADING) > p.instruction.indexOf('do evil'));
 });
+
+test('structured results: nulls mean absent, unclosed prose braces do not hide the result, an echoed template is ignored', async () => {
+  const { structuredResult } = await import('../src/core/auto-harness.js');
+  assert.deepEqual(structuredResult('{"summary":"s","evidence":["e"],"candidateSha":null,"runId":"","discoveredPaths":null}'), { summary: 's', evidence: ['e'] });
+  assert.equal(structuredResult('oops { unclosed\n{"summary":"r","evidence":["e"]}')?.summary, 'r');
+  assert.equal(structuredResult('x {y "\n{"summary":"r2","evidence":["e"]}')?.summary, 'r2');
+  assert.equal(structuredResult('Format: {"summary": "<what you did>", "evidence": ["<fact>"]}\n{"summary":"mine","evidence":["e"]}')?.summary, 'mine');
+  const t = Date.now(); structuredResult('a```\n'.repeat(19_000)); assert.ok(Date.now() - t < 500, 'fence scan is linear');
+});
+
+test('a remote result breaking a phase rule is surfaced, never thrown from every tick', () => withHosts(async (h, m) => {
+  const s = await h.start({ project: 'app', objective: 'Repair unknown issue', idempotencyKey: 'n4', writesAuthorized: true });
+  const first = await h.tick(s.id, all);
+  const got = await m.pickup('gpt-b', 300) as any;
+  await m.complete('gpt-b', first.next[0]!.workId as string, got.work.attemptId, got.work.leaseGeneration,
+    JSON.stringify({ summary: 'found', evidence: ['read'], discoveredPaths: ['./src/a.ts'] }));
+  assert.equal((await h.tick(s.id, all)).status, 'REMOTE_RESULT_NEEDS_STRUCTURED_EVIDENCE');
+  assert.equal((await h.tick(s.id, all)).status, 'REMOTE_RESULT_NEEDS_STRUCTURED_EVIDENCE');
+}));
