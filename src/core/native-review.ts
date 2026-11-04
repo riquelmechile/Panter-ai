@@ -81,8 +81,29 @@ function canonical(v:unknown):string{
   if(v&&typeof v==='object')return `{${Object.keys(v).sort().map(k=>`${JSON.stringify(k)}:${canonical((v as any)[k])}`).join(',')}}`;
   return JSON.stringify(v)??'null';
 }
-/** Every "severity": "critical|blocker" written anywhere in the raw text (any nesting, any case). */
-const rawSevere=(text:string)=>(text.match(/"severity"\s*:\s*"\s*(critical|blocker)\s*"/gi)??[]).length;
+const SEVERE_VALUE=/\b(critical|blocker)\b/i;
+const SEVERITY_KEY=/^(severity|sev|level|priority)$/i;
+/** Severity-like text written anywhere outside strict JSON (YAML, single or typographic quotes, prose "severity: critical"). */
+const rawSevere=(text:string)=>(text.match(/["'\u201c\u201d]?\b(severity|sev|level|priority)\b["'\u201c\u201d]?\s*[:=]\s*["'\u201c\u201d]?\s*(critical|blocker)\b(?!\s*\|)/gi)??[]).length;
+/** Severe values under severity-like keys in every parsed JSON object of the text, at any depth (bounded), each distinct object once. */
+function structuralSevere(text:string){
+  const seen=new Set<string>();let n=0;
+  const walk=(v:unknown,depth:number):void=>{
+    if(depth>32||!v||typeof v!=='object')return;
+    if(Array.isArray(v)){for(const x of v)walk(x,depth+1);return;}
+    for(const [k,x] of Object.entries(v)){
+      if(SEVERITY_KEY.test(k)&&typeof x==='string'&&x!==TEMPLATE_SEVERITY&&SEVERE_VALUE.test(x))n++;
+      else walk(x,depth+1);
+    }
+  };
+  for(const c of jsonCandidates(text)){
+    let v:unknown;try{v=JSON.parse(c);}catch{continue;}
+    if(!v||typeof v!=='object')continue;
+    const key=canonical(v);if(seen.has(key))continue;seen.add(key);
+    walk(v,0);
+  }
+  return n;
+}
 const severe=(x:any)=>typeof x?.severity==='string'&&/^(blocker|critical)$/i.test(x.severity.trim());
 /** One lens report as the Panter envelope {agentId, candidateSha, findings[]}, bound to this exact lens and SHA.
  * Hosts often wrap it in prose or fences, or nest it as review_result.lens_results[], or write proof_refs: those
@@ -97,16 +118,17 @@ export function lensEnvelope(text:string,agentId:string,candidateSha:string):(Re
   const r=reports[0]!;
   const ok=Array.isArray(r.findings)&&r.findings.every((x:any)=>!!x&&typeof x==='object'&&typeof x.location==='string'&&SEVERITIES.includes(x.severity)&&Array.isArray(x.proofRefs)&&x.proofRefs.length>0);
   if(!ok)return 'UNBOUND';
-  // Backstop: a severe finding written anywhere in the text (another key, another nesting, a truncated scan)
-  // that the accepted report does not carry means the lens is not accepted.
-  if(rawSevere(text)>r.findings.filter(severe).length)return 'UNBOUND';
+  // Backstop for the one dangerous outcome, a lens accepted as clean: if the accepted report carries no severe
+  // finding, nothing severity-like may appear anywhere else in the text (another key or nesting, escapes, a
+  // truncated scan, non-JSON forms). A report that already carries a severe finding blocks the gate by itself.
+  if(!r.findings.some(severe)&&(structuralSevere(text)>0||rawSevere(text)>0))return 'UNBOUND';
   return r as Record<string,any>&{findings:LensFinding[]};
 }
 /** Severe findings claimed for this lens and SHA in reports that were not accepted, so they are surfaced, never lost. */
 export function unacceptedSevere(text:string,agentId:string,candidateSha:string){
   if(text.length>100_000)return 0;
   const bound=boundReports(text,agentId,candidateSha).reports.reduce((n,r)=>n+(Array.isArray(r.findings)?r.findings.filter(severe).length:0),0);
-  return Math.max(bound,rawSevere(text));
+  return Math.max(bound,structuralSevere(text),rawSevere(text));
 }
 export function assessMeshReview(input:{candidateSha:string;kind:'4r'|'judgment-day';work:Array<{agentId?:string;state:string;receiptDigest:string|null;result:string|null;host:string}>}){
   const expected=input.kind==='4r'?['review-risk','review-readability','review-reliability','review-resilience']:['jd-judge-a','jd-judge-b'];

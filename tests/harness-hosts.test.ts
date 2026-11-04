@@ -398,3 +398,19 @@ test('lens backstop: a severe finding anywhere in the text that the accepted rep
   const reordered = JSON.stringify({ findings: [], candidateSha: sha, agentId: 'review-risk' });
   assert.equal(typeof lensEnvelope(`${clean}\n${reordered}`, 'review-risk', sha), 'object');
 });
+
+test('lens backstop: a clean report is not accepted next to any structured or non-JSON severe value', async () => {
+  const { lensEnvelope } = await import('../src/core/native-review.js');
+  const clean = JSON.stringify({ agentId: 'review-risk', candidateSha: sha, findings: [] });
+  const bad = [
+    '{"final":{"findings":[{"severity":"\\u0043RITICAL"}]}}',
+    '{"\\u0073everity":"CRITICAL"}',
+    '{"x":{"severity":"Critical!"}}', '{"x":{"severity":"CRITICAL - security"}}', '{"x":{"level":"blocker"}}',
+    "{'severity': 'critical'}", 'severity: CRITICAL', '“severity”: “critical”',
+  ];
+  for (const b of bad) assert.equal(lensEnvelope(`${clean}\n${b}`, 'review-risk', sha), 'UNBOUND', b);
+  // Honest repeats and the echoed template stay accepted.
+  assert.equal(typeof lensEnvelope(`Summary: ${clean}\nFinal:\n\`\`\`json\n${clean}\n\`\`\``, 'review-risk', sha), 'object');
+  const template = JSON.stringify({ agentId: 'review-risk', candidateSha: sha, findings: [{ id: '<stable id>', location: '<path:line>', severity: 'BLOCKER | CRITICAL | WARNING | SUGGESTION', claim: '<c>', proofRefs: ['<p>'] }] });
+  assert.equal(typeof lensEnvelope(`Format: ${template}\n${clean}`, 'review-risk', sha), 'object');
+});
