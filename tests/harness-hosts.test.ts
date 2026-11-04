@@ -366,7 +366,8 @@ test('a report accepted as clean carries no severe value anywhere, in any shape;
   const clean = { agentId: 'review-risk', candidateSha: sha, findings: [] };
   for (const extra of [{ final: { findings: [{ severity: 'CRITICAL' }] } }, { x: { severity: ['CRITICAL'] } }, { x: { severity: { value: 'Critical!' } } },
     { x: { severity_level: 'blocker' } }, { x: { severityLevel: 'CRITICAL - security' } }, { x: { level: 'critical' } },
-    { severityCounts: { critical: 1, blocker: 0 } }, { summary: { bySeverity: { blocker: 2 } } }])
+    { severityCounts: { critical: 1, blocker: 0 } }, { summary: { bySeverity: { blocker: 2 } } },
+    { severityCounts: { critical_count: 1 } }, { severityCounts: { criticalCount: 1 } }, { x: { criticalLevel: 1 } }, { priorities: [{ critical: 1 }] }])
     assert.equal(lensEnvelope(JSON.stringify({ ...clean, ...extra }), 'review-risk', sha), 'UNBOUND', JSON.stringify(extra));
   assert.equal(typeof lensEnvelope(JSON.stringify({ ...clean, severityCounts: { critical: 0, blocker: 0, warning: 1 } }), 'review-risk', sha), 'object');
   const crit = { ...clean, findings: [{ id: 'X', location: 'a.js:1', severity: 'CRITICAL', claim: 'c', proofRefs: ['p'] }] };

@@ -68,9 +68,10 @@ function severeUnderSeverityKeys(root:unknown){
     if(depth>64){n++;continue;}
     const entries=Array.isArray(v)?v.map(x=>['',x] as const):Object.entries(v);
     for(const [k,x] of entries){
-      const inSev=underSeverity||(k!==''&&/sev|level|priority/i.test(k));
-      // Under a severity-like key, a key naming a severe level with a non-zero value counts too: {"bySeverity":{"critical":1}}.
-      if(inSev&&k!==''&&SEVERE_VALUE.test(k)&&!(x===0||x===false||x===null||x===''||x==='0'||(Array.isArray(x)&&x.length===0)))n++;
+      const inSev=underSeverity||(k!==''&&/sev|level|priorit/i.test(k));
+      // Under a severity-like key, a key naming a severe level (any spelling: critical_count, criticalCount) with a
+      // non-zero value counts too: {"bySeverity":{"critical":1}}.
+      if(inSev&&k!==''&&/critical|blocker/i.test(k)&&!(x===0||x===false||x===null||x===''||x==='0'||(Array.isArray(x)&&x.length===0)))n++;
       stack.push([x,depth+1,inSev]);
     }
   }
