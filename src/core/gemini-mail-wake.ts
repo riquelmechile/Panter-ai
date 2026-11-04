@@ -273,6 +273,16 @@ export function mimeTexts(raw:string):string[]{
   return [...plain,...html];
 }
 
+/** Rejoin hard-wrapped lines. A mailer that cuts at a fixed width (every line but the last equally long) may cut
+ * inside a word, so those lines join with nothing. A mailer that wraps at words leaves lines of varying length and
+ * drops the space it broke at, so those lines join with a space. */
+export function unwrap(text:string):string{
+  const lines=text.split(/\r?\n/);
+  const inner=lines.slice(0,-1);
+  const fixedWidth=inner.every(l=>l.length===inner[0]!.length);
+  return lines.reduce((acc,line,i)=>i===0?line:acc+(fixedWidth||lines[i-1]!.endsWith(' ')||line.startsWith(' ')?'':' ')+line,'');
+}
+
 /** JSON objects that follow each result marker, in order (the reply comes before any quoted template). */
 export function markedJson(text:string):unknown[]{
   const out:unknown[]=[];
@@ -296,7 +306,8 @@ export function markedJson(text:string):unknown[]{
     if(end<0)continue;
     const block=text.slice(start,end+1);
     try{out.push(JSON.parse(block));continue;}catch{/* maybe hard-wrapped */}
-    // Plain-text mailers may hard-wrap long lines at ~76 columns, even inside strings.
+    // Plain-text mailers may hard-wrap long lines at ~76 columns, even inside strings (see unwrap).
+    try{out.push(JSON.parse(unwrap(block)));continue;}catch{/* fall back to joining every break */}
     try{out.push(JSON.parse(block.replace(/\r?\n/g,'')));}catch{/* quoted copy; try the next marker */}
   }
   return out;

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MeshEngine } from '../src/core/mesh.js';
 import { SqliteLedger } from '../src/core/sqlite-ledger.js';
-import { GeminiMailWake, GEMINI_MAIL_RESULT_MARKER, mimeTexts, markedJson } from '../src/core/gemini-mail-wake.js';
+import { GeminiMailWake, GEMINI_MAIL_RESULT_MARKER, mimeTexts, markedJson, unwrap } from '../src/core/gemini-mail-wake.js';
 import { lensEnvelope } from '../src/core/native-review.js';
 
 before(() => { process.env.PANTER_LEAD_HOST = 'claude'; });
@@ -327,3 +327,20 @@ test('attempt numbers never repeat, even after old tickets are purged', () => fi
   assert.equal(sent.length, 1, 'a 4th attempt closes the task instead of mailing again');
   assert.equal((await mesh.inbox('claude')).works.find(w => w.id === work.id)?.state, 'FAILED');
 }));
+
+test('a reply wrapped at spaces keeps its spaces; a word broken at full width is rejoined without one', () => {
+  const sha = '3c4ec64f01f32e60868424833addb9a9a9b73fd0';
+  const json = JSON.stringify({ agentId: 'jd-judge-b', candidateSha: sha, evidence: ['Read leader-supplied diff main...' + sha + ' in riquelmechile/panter-e2e (2 files modified, 1 commit ahead).',
+    'Verified add(a, b) remains unchanged and export function multiply(a, b) returns a * b.'] });
+  // Word wrap at <=76 columns, dropping the space at each break (what the Gemini relay produced).
+  const words = json.split(' '); const lines: string[] = []; let line = '';
+  for (const w of words) { if (line && (line + ' ' + w).length > 76) { lines.push(line); line = w; } else line = line ? line + ' ' + w : w; }
+  lines.push(line);
+  const parsed = markedJson(`${GEMINI_MAIL_RESULT_MARKER}\r\n${lines.join('\r\n')}`)[0] as any;
+  assert.equal(parsed.candidateSha, sha);
+  assert.match(parsed.evidence[0], /^Read leader-supplied diff main\.\.\./);
+  assert.match(parsed.evidence[1], /remains unchanged and export function/);
+  // A fixed-width cut (every line but the last equally long) is rejoined without spaces; word-wrapped lines with one.
+  assert.equal(unwrap('abcd\nefgh\nij'), 'abcdefghij');
+  assert.equal(unwrap('ab cd\nefghij\nkl'), 'ab cd efghij kl');
+});

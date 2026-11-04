@@ -844,3 +844,52 @@ test('a review started for a candidate that a correction replaced meanwhile is r
   assert.ok(orphans.length === 2 && orphans.every(w => w.state === 'ABORTED_NO_EFFECTS'), 'the old-candidate judges were withdrawn');
   assert.deepEqual(abandoned.map(a => a.workId).sort(), orphans.map(w => w.id).sort());
 }));
+
+test('closing a run withdraws its queued remote work, revokes grants and stops it for good', () => withHosts(async (h, m, { abandoned }) => {
+  const s = await h.start({ project: 'app', objective: 'Repair unknown issue', idempotencyKey: 'close1', writesAuthorized: true });
+  const first = await h.tick(s.id, all);
+  assert.equal(first.status, 'REMOTE_A2A_DISPATCHED');
+  const workId = first.next[0]!.workId as string;
+  const run = (await h.get(s.id))!;
+  await assert.rejects(h.close(s.id, 'abandoned', run.revision - 1), /Stale harness revision/);
+  const closed = await h.close(s.id, 'abandoned test run', run.revision);
+  assert.ok(closed.closedAt);
+  assert.equal((await m.inbox('gpt-a')).works.find(w => w.id === workId)?.state, 'ABORTED_NO_EFFECTS');
+  assert.ok(abandoned.some(a => a.workId === workId));
+  const t = await h.tick(s.id, all);
+  assert.equal(t.status, 'HARNESS_CLOSED');
+  assert.equal(t.closedReason, 'abandoned test run');
+  await assert.rejects(h.report(s.id, run.steps[0]!.id, { summary: 'late', evidence: ['x'] }), /closed/);
+  // Idempotent: closing again keeps the first close.
+  assert.equal((await h.close(s.id, 'again', 999)).closedReason, 'abandoned test run');
+}));
+
+test('closing a run retires its remote Judgment Day judges', () => withHosts(async (h, m) => {
+  const id = await toJudgment(h, m, 'close2');
+  assert.equal((await h.tick(id, all)).status, 'WAITING_REMOTE_REVIEW');
+  const run = (await h.get(id))!;
+  await h.close(id, 'superseded', run.revision);
+  const judges = (await m.reviewStatus('gpt-a', run.judgmentId!)).work;
+  assert.ok(judges.every(w => w.state === 'ABORTED_NO_EFFECTS'));
+}));
+
+test('a phase sent native by one host goes remote again once it is bound to another host', () => withHosts(async (h, m, { timeout }) => {
+  await m.bindSpecialist('gpt-a', { agentId: 'gentle-ai-verify', host: 'gpt-b', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] } as any, 0);
+  const s = await h.start({ project: 'app', objective: 'Fix login security', idempotencyKey: 'scope1', writesAuthorized: true, changeSurfaces: ['src/auth.ts'] });
+  let t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Plan', evidence: ['plan'] });
+  t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Done', evidence: ['tests'], candidateSha: sha, runId: 'impl-run-1' });
+  t = await h.tick(s.id, all);
+  assert.equal(t.status, 'REMOTE_A2A_DISPATCHED');
+  timeout.ms = 0; await new Promise(r => setTimeout(r, 5));
+  const fb: any = await h.tick(s.id, all);
+  assert.equal(fb.fallback?.from, 'gpt-b');
+  timeout.ms = 3_600_000;
+  await h.report(s.id, fb.phaseId, { summary: 'Verified', evidence: ['checks'], candidateSha: sha, runId: 'verify-run-1' });
+  await h.tick(s.id, all);
+  // A correction sends VERIFY again: still bound to gpt-b, it stays native; bound to grok, grok gets it.
+  await h.recordCorrection(s.id, { candidateSha: 'e'.repeat(40), runId: 'fix-run-scope1', evidence: ['fixed'] }, (await h.get(s.id))!.revision);
+  await m.bindSpecialist('gpt-a', { agentId: 'gentle-ai-verify', host: 'grok', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] } as any, 1);
+  const again: any = await h.tick(s.id, all);
+  assert.equal(again.status, 'REMOTE_A2A_DISPATCHED');
+  assert.equal(again.next[0].host, 'grok');
+}));
