@@ -51,6 +51,8 @@ export type HarnessTickResult={runId:string;mode:HarnessMode;risk:'LOW'|'HIGH';r
 export type HarnessHostHooks={
   /** Read-only material for hosts that cannot reach the repository (e.g. Gemini by e-mail). */
   materialFor?(run:HarnessRun,host:Host):Promise<string|undefined>;
+  /** Trusted note telling the host how to reach the run's repository for this phase (tools, grant, branch). */
+  accessFor?(run:HarnessRun,host:Host,phase:HarnessPhase):string|undefined;
   /** Called for remote work whose result will never be read (e.g. a running lens of an abandoned review), to revoke its grants. */
   abandoned?(input:{workId:string;host:Host}):Promise<void>;
   /** Called after a phase or review lens was dispatched to a host (e.g. to attach a work-scoped GitHub grant). */
@@ -94,6 +96,23 @@ export function chooseHarness(input:HarnessInput){
   return {paths,risk,tier,reasons,phases,reviewKind,mode:input.coordinationMode??'AUTO'};
 }
 
+/** How a remote phase reports back, so the harness can record it without the leader re-typing it. */
+const PHASE_COMPLETION_FORMAT='Complete this work with exactly one JSON object and nothing else: {"summary": "<what you did and found>", "evidence": ["<one observed fact per item: commands run and their results, files read, commits made>"], "candidateSha": "<the exact 40-hex commit you produced or verified, if any>", "runId": "<a unique id for this run of yours>"}. Never claim evidence you did not observe.';
+function phaseNotes(access?:string){return [access,PHASE_COMPLETION_FORMAT].filter(Boolean).join('\n\n');}
+/** A remote phase result: one JSON object, also accepted inside a fenced block or surrounded by prose. */
+export function structuredResult(text:string|null|undefined):{summary:string;evidence:string[];runId?:string;candidateSha?:string;discoveredPaths?:string[]}|null{
+  if(!text)return null;
+  const tries=[text.trim()];
+  const fenced=/```(?:json)?\s*\n([\s\S]*?)\n```/.exec(text);if(fenced)tries.push(fenced[1]!.trim());
+  const a=text.indexOf('{'),b=text.lastIndexOf('}');if(a>=0&&b>a)tries.push(text.slice(a,b+1));
+  for(const t of tries){
+    try{
+      const v=JSON.parse(t);
+      if(v&&typeof v==='object'&&typeof v.summary==='string'&&Array.isArray(v.evidence)&&v.evidence.every((e:unknown)=>typeof e==='string'))return v;
+    }catch{/* try the next form */}
+  }
+  return null;
+}
 export class AutomaticHarness {
   private state:State={version:1,runs:[]};
   private pending:Promise<unknown>=Promise.resolve();
@@ -398,11 +417,12 @@ export class AutomaticHarness {
       if(work?.state==='COMPLETED'){
         // Result is persisted in the Mesh ledger and never echoed via inbox.
         const persisted=await this.mesh.resultGet(leaderHost(),phase.remoteWorkId);
-        let result:unknown;
-        try{result=JSON.parse(persisted.result??'');}catch{result=null;}
+        const result=structuredResult(persisted.result);
         if(!result||typeof result!=='object'||!('summary' in result)||!('evidence' in result))
           return {...common,status:'REMOTE_RESULT_NEEDS_STRUCTURED_EVIDENCE',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
-        await this.report(runId,phase.id,result as {summary:string;evidence:string[];runId?:string;candidateSha?:string;discoveredPaths?:string[]});
+        try{await this.report(runId,phase.id,result);}
+        catch(error){return {...common,status:'REMOTE_RESULT_NEEDS_STRUCTURED_EVIDENCE',phaseId:phase.id,workId:phase.remoteWorkId,next:[],
+          detail:[`Remote result rejected: ${error instanceof Error?error.message.slice(0,200):'invalid'}`]};}
         return this.tick(runId,runtime);
       }
       const stale=await this.unstartedTooLong(phase.remoteWorkId);
@@ -494,7 +514,8 @@ export class AutomaticHarness {
         });
         if(remoteReady){
           const remote=await this.mesh.startReview(leaderHost(),{missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:review:${record.candidateSha}:${record.reviewAttempt??0}`,
-            materialFor:this.hooks.materialFor?host=>this.hooks.materialFor!(record,host):undefined});
+            materialFor:this.hooks.materialFor?host=>this.hooks.materialFor!(record,host):undefined,
+            notesFor:host=>this.hooks.accessFor?.(record,host,'REVIEW')});
           await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(!r.reviewId){r.reviewId=remote.id;r.reviewTransport='REMOTE';r.revision++;}});
           for(const workId of remote.workIds){const t=await this.mesh.workTarget(leaderHost(),workId).catch(()=>null);if(t)await this.dispatched(record,workId,'REVIEW',t.target);}
         }else{
@@ -657,7 +678,8 @@ export class AutomaticHarness {
       const work=await this.mesh.delegateBoundSpecialist(leaderHost(),{missionId:record.id,agentId:phase.agentId,objective:packetObjective,
         candidateSha:record.candidateSha??undefined,allowedEditSurfaces:phase.phase==='IMPLEMENT'?record.paths:undefined,
         idempotencyKey:`harness:${record.id}:${phase.id}:${record.candidateSha??'none'}:${record.correctionAttempts??0}:${phase.redispatchGeneration??0}`,
-        material:this.hooks.materialFor?await this.hooks.materialFor(record,binding.host):undefined});
+        material:this.hooks.materialFor?await this.hooks.materialFor(record,binding.host):undefined,
+        leaderNotes:phaseNotes(this.hooks.accessFor?.(record,binding.host,phase.phase))});
       await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;
         if(st.status==='PENDING'){st.status='ISSUED';st.execution='REMOTE_A2A';st.remoteWorkId=work.id;r.revision++;}});
       await this.dispatched(record,work.id,phase.phase,binding.host);

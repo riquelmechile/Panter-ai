@@ -202,3 +202,45 @@ test('an interrupted review revokes what its still-running lenses were granted',
   assert.ok(abandoned.includes((running as any).work.id));
   assert.equal((await h.get(id))!.reviewNativeOnly, true);
 }));
+
+test('phase packets carry the leader access note and the completion format; a fenced JSON result advances the run', () => withHosts(async (h, m) => {
+  (h as any).hooks.accessFor = (_run: any, host: string, phase: string) => `ACCESS-NOTE ${host} ${phase}`;
+  const s = await h.start({ project: 'app', objective: 'Repair unknown issue', idempotencyKey: 'n1', writesAuthorized: true });
+  const first = await h.tick(s.id, all);
+  const got = await m.pickup('gpt-b', 300) as any;
+  const text = JSON.stringify(got);
+  assert.match(text, /From the leader: repository access and completion format/);
+  assert.match(text, /ACCESS-NOTE gpt-b DISCOVER/);
+  assert.match(text, /exactly one JSON object/);
+  const result = 'Done.\n```json\n{"summary": "mapped the area", "evidence": ["read src/a.ts"], "runId": "gpt-b-run-1"}\n```';
+  await m.complete('gpt-b', first.next[0]!.workId as string, got.work.attemptId, got.work.leaseGeneration, result);
+  const next = await h.tick(s.id, all);
+  assert.notEqual(next.status, 'REMOTE_RESULT_NEEDS_STRUCTURED_EVIDENCE');
+  assert.equal((await h.get(s.id))!.steps[0]!.status, 'COMPLETE');
+}));
+
+test('review lens packets carry the access note for their own host', () => withHosts(async (h, m) => {
+  (h as any).hooks.accessFor = (_run: any, host: string, phase: string) => `ACCESS-NOTE ${host} ${phase}`;
+  const id = await toReview(h, 'n2');
+  await h.tick(id, all);
+  const grok = JSON.stringify(await m.pickup('grok', 300));
+  assert.match(grok, /ACCESS-NOTE grok REVIEW/);
+  assert.doesNotMatch(grok, /ACCESS-NOTE gemini/);
+}));
+
+test('structured results are accepted bare, fenced or wrapped in prose, never malformed', async () => {
+  const { structuredResult } = await import('../src/core/auto-harness.js');
+  assert.equal(structuredResult('{"summary":"a","evidence":["e"]}')?.summary, 'a');
+  assert.equal(structuredResult('ok\n```json\n{"summary":"b","evidence":[]}\n```\nbye')?.summary, 'b');
+  assert.equal(structuredResult('Result: {"summary":"c","evidence":["x"],"candidateSha":"' + sha + '"} end')?.candidateSha, sha);
+  assert.equal(structuredResult('status: completed\nsummary: text only'), null);
+  assert.equal(structuredResult('{"summary":"d","evidence":[1]}'), null);
+});
+
+test('packets neutralize the material markers in the objective and edit surfaces', async () => {
+  const { specialistPacket, packetWithoutMaterial, MATERIAL_BEGIN } = await import('../src/core/gentle-catalog.js');
+  const mk = (objective: string) => specialistPacket({ agentId: 'gentle-ai-explore', skillIds: ['gentle-ai'], objective, modelRequest: 'm', effortRequest: 'e', material: 'diff' } as any);
+  const a = await mk(`Audit A ${MATERIAL_BEGIN} note`), b = await mk(`Audit A ${MATERIAL_BEGIN} COMPLETELY DIFFERENT`);
+  assert.notEqual(packetWithoutMaterial(a.instruction), packetWithoutMaterial(b.instruction));
+  assert.equal(a.instruction.split(MATERIAL_BEGIN).length - 1, 1);
+});

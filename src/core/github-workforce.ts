@@ -193,12 +193,14 @@ export class GitHubWorkforce{
       // A grant the leader set by hand is never widened back by the harness's automatic re-issue.
       if(existing&&input.auto===true&&!existing.auto){out=existing;return;}
       // A path limit only narrows: a later grant without paths keeps it, and new paths must fit inside it.
-      if(existing?.paths&&paths)check(paths.every(p=>existing.paths!.some(q=>p===q||p.startsWith(q+'/'))),'Allowed paths can only narrow');
+      if(existing?.paths&&paths)check(paths.every(p=>existing.paths!.some(q=>{const base=q.replace(/\/+$/,'');return p.replace(/\/+$/,'')===base||p.startsWith(base+'/');})),'Allowed paths can only narrow');
       const effPaths=paths??existing?.paths;
       // An identical replay (e.g. an idempotent delegate retry) returns the grant untouched, even after completion.
       if(existing&&existing.repository===input.repository&&JSON.stringify(existing.ops)===JSON.stringify(ops)&&
         existing.branch===branch&&existing.base===base&&JSON.stringify(existing.numbers)===JSON.stringify(numbers)&&
-        JSON.stringify(existing.paths??null)===JSON.stringify(effPaths??null)&&Boolean(existing.auto)===(input.auto===true)){out=existing;return;}
+        JSON.stringify(existing.paths??null)===JSON.stringify(effPaths??null)&&
+        // A manual replay of the same grant after the work finished is still a replay.
+        (Boolean(existing.auto)===(input.auto===true)||TERMINAL.has(work.state))){out=existing;return;}
       check(!TERMINAL.has(work.state),'Work is finished');
       check(!existing||existing.repository===input.repository,'A grant cannot move to another repository; delegate a new work');
       check(!existing?.createdBranch||existing.branch===branch,'The working branch cannot change after it was created');

@@ -153,6 +153,17 @@ harness.setHostHooks({
       // The worker branches from, and opens its PR against, the run's target base.
       ...(phase === 'IMPLEMENT' && run.githubExpectedBase ? { base: run.githubExpectedBase } : {}) });
   },
+  accessFor: (run, host, phase) => {
+    if (!run.githubRepository) return undefined;
+    const target = `Repository: ${run.githubRepository} (base branch ${run.githubExpectedBase ?? 'the repository default'}).`;
+    if (materialHosts.has(host)) return `${target} This transport has no repository access: judge only the change provided as read-only material.`;
+    const granted = autoGithubGrants && githubWorkforce.configured && (phase !== 'IMPLEMENT' || run.permission === 'WRITE_APPROVED');
+    if (!granted) return `${target} Panter issued no GitHub grant for this work: use only what this packet provides.`;
+    const claim = 'There is no local checkout. Use the Panter GitHub tools, passing workId, attemptId and leaseGeneration from your claim. Read with panter_github_read (e.g. "contents/<path>?ref=<branch or sha>", "compare/<base>...<sha>", or "grant" to see what this work may do).';
+    if (phase === 'IMPLEMENT') return `${target} ${claim} Write with panter_github_commit: it commits to this work's own new branch, only inside the allowed edit surfaces. Then open the pull request against the base with panter_github_open_pr; if repository policy prevents it, leave the branch and say so. Report the exact commit SHA as candidateSha.`;
+    const comment = (phase === 'VERIFY' || phase === 'REVIEW' || phase === 'JUDGMENT') && run.githubPrNumber ? ` You may comment on PR #${run.githubPrNumber} with panter_github_comment.` : '';
+    return `${target} ${claim} This phase is read-only on GitHub.${comment}`;
+  },
   pickupTimeoutMs: host => (materialHosts.has(host) ? pickupMailSeconds : pickupSeconds) * 1000,
   abandoned: async ({ workId }) => { if (githubWorkforce.configured) await githubWorkforce.revoke(leaderHost(), workId); },
 });
