@@ -15,6 +15,7 @@ import { MeshEngine, HOSTS, isHost } from './core/mesh.js';
 import { registerTaskWire } from './core/workforce-task-wire.js';
 import { WorkforceLongPoll, withListenHint } from './core/workforce-long-poll.js';
 import { GrokRoutineWake } from './core/grok-routine-wake.js';
+import { GeminiMailWake, MailError } from './core/gemini-mail-wake.js';
 import { WorkforceEvents, reconcileWorkforceEventOutbox } from './core/workforce-events.js';
 import { registerWorkforceEventWire } from './core/workforce-event-wire.js';
 import { appWorkforceTurn } from './core/workforce-app-turn.js';
@@ -102,6 +103,9 @@ const grokRoutineWake = new GrokRoutineWake();
 const claudeRoutineWake = new ClaudeRoutineWake();
 const workforceEvents = new WorkforceEvents(dataDir);
 mesh.setStandingListenerCheck(host=>workforceLongPoll.isListening(host));
+// Gemini's only event trigger is a Gmail monitor: wake it by e-mail through the operator's relay.
+const geminiMailWake = new GeminiMailWake(dataDir, mesh, ()=>workforceLongPoll.isListening('gemini'),
+  leaderHost()==='gemini' ? {} : process.env);
 const nativeSubagentReview = await NativeSubagentReview.open(dataDir);
 const githubGate = new GitHubDeliveryGate({
   allowedRepositories:(process.env.PANTER_GITHUB_ALLOWED_REPOS??'').split(',').map(x=>x.trim()).filter(Boolean),
@@ -884,6 +888,15 @@ const reconcileEvents=()=>{
 };
 for(const host of appEventHosts())mesh.events.on(host,reconcileEvents);
 const eventRetry=setInterval(reconcileEvents,30_000);
+if(geminiMailWake.configured){
+  const mailGemini=()=>void geminiMailWake.dispatchDue().then(({sent,failed})=>{
+    if(sent.length)console.error(`Gemini mail wake sent for ${sent.length} work item(s)`);
+    if(failed.length)console.error(`Gemini mail wake deferred for ${failed.length} work item(s)`);
+  }).catch(()=>console.error('Gemini mail wake dispatch failed'));
+  // Give an open Gemini chat a moment to take new work before waking an idle one by e-mail.
+  mesh.events.on('gemini',()=>{const t=setTimeout(mailGemini,25_000);t.unref();});
+  setInterval(mailGemini,30_000).unref();
+}
 eventRetry.unref();
 reconcileEvents();
 
@@ -907,6 +920,24 @@ const http = createServer(async (req, res) => {
   if (oauth && req.method === 'GET' && (req.url === '/.well-known/oauth-protected-resource' || req.url === '/.well-known/oauth-protected-resource/mcp')) {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
     res.end(JSON.stringify(oauth.protectedResourceMetadata())); return;
+  }
+  if (req.method === 'POST' && (req.url === '/a2a/gemini/email-validate' || req.url === '/a2a/gemini/email-result')) {
+    const host = hostname(req.headers.host);
+    const reply = (status: number, body: unknown) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
+    if (!host || !(allowedHosts.length ? allowedHosts.includes(host) : ['localhost','127.0.0.1','::1'].includes(host))) { reply(403, { ok: false }); return; }
+    if (!geminiMailWake.configured) { reply(404, { ok: false, error: 'disabled' }); return; }
+    const chunks: Buffer[] = []; let size = 0;
+    for await (const chunk of req) { size += (chunk as Buffer).length; if (size > 900_000) { reply(413, { ok: false }); return; } chunks.push(chunk as Buffer); }
+    let payload: unknown;
+    try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { reply(400, { ok: false, error: 'invalid_json' }); return; }
+    try {
+      reply(200, req.url === '/a2a/gemini/email-validate'
+        ? geminiMailWake.validateEnvelope((payload as { envelope?: unknown })?.envelope)
+        : await geminiMailWake.acceptResult(payload));
+    } catch (error) {
+      reply(error instanceof MailError ? error.status : 500, { ok: false, error: error instanceof Error ? error.message : 'error' });
+    }
+    return;
   }
   if (embedded && req.url !== '/mcp') {
     const host = hostname(req.headers.host);

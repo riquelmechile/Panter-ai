@@ -857,6 +857,19 @@ export class MeshEngine {
       return {receipt,rearm:{status:'PENDING_RETRY' as const}};
     }
   }
+  /** A transport that claimed read-only work but could not deliver it (e.g. the Gemini mail relay failed
+   *  before any e-mail left) returns it to the queue. Fenced to the exact attempt; never for writers. */
+  async releaseUnsentClaim(caller: Host, id: string, attemptId: string, generation: number) {
+    check(caller!==leaderHost(),'Only workers may release delegated work');
+    return this.write(d => {
+      const w = d.works.find(w => w.id === id && w.target === caller);
+      check(w && w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
+      check(w.role !== 'implementer', 'Writer claims are never released automatically');
+      w.state = 'QUEUED'; w.attemptId = null; w.leaseUntil = null;
+      this.notify(d, caller);
+      return {workId:w.id,state:w.state};
+    });
+  }
   async heartbeat(caller: Host, id: string, attemptId: string, generation: number, leaseSeconds = 300) {
     check(caller!==leaderHost(),'Only workers may renew delegated work');
     return this.write(d => {
