@@ -17,7 +17,8 @@ type Subscription={id:string;owner:EventHost;url:string;secret:string;expiresAt:
 type Delivery={id:string;subId:string;workId:string;state:'PENDING'|'SENDING'|'ACCEPTED'|'FAILED';
   attempts:number;nextAt:number;lastStatus:number|null;terminalAt?:number;
   failureReason?:'SUBSCRIPTION_INACTIVE'};
-type EventData={version:1;subscriptions:Subscription[];deliveries:Delivery[]};
+/** revocations: per-owner epoch bumped by dropOwners; a subscribe that started before a bump never persists. */
+type EventData={version:1;subscriptions:Subscription[];deliveries:Delivery[];revocations?:Record<string,number>};
 type PostResult={status:number;body:string};
 export type EventPost=(url:string,headers:Record<string,string>,body:string)=>Promise<PostResult>;
 const seed:EventData={version:1,subscriptions:[],deliveries:[]};
@@ -141,6 +142,7 @@ function subId(owner:EventHost,url:string){
   return 'sub_'+hash(owner+'\n'+url+'\n'+WORK_EVENT+'\n'+JSON.stringify({host:owner})).slice(0,32);
 }
 const isLive=(s:Subscription,t=now())=>Date.parse(s.expiresAt)>t;
+export const MAX_EVENT_TTL_MS=7*86_400_000;
 
 export class WorkforceEvents{
   private readonly db:SqliteLedger;
@@ -173,11 +175,16 @@ export class WorkforceEvents{
     const u=validCallback(args.delivery.url);
     const secret=args.delivery.secret;
     secretBytes(secret);
-    const requested=args.ttlMs===undefined||args.ttlMs===null?86_400_000:args.ttlMs;
+    // Up to 7 days per grant (also for ttlMs null/omitted). refreshBefore leaves a quarter of the
+    // lifetime as margin so the host renews well before delivery would stop.
+    const requested=args.ttlMs===undefined||args.ttlMs===null?MAX_EVENT_TTL_MS:args.ttlMs;
     if(!Number.isInteger(requested)||requested<60_000)throw Error('Invalid event subscription TTL');
-    const ttl=Math.min(86_400_000,requested);
+    const ttl=Math.min(MAX_EVENT_TTL_MS,requested);
     const id=subId(actor,u.toString());
-    const exists=this.db.read('events',seed).subscriptions.find(s=>s.id===id&&isLive(s)&&s.secret===secret);
+    const current=this.db.read('events',seed);
+    // Revocation epoch seen before the (slow) callback verification; checked again when persisting.
+    const epoch=current.revocations?.[actor]??0;
+    const exists=current.subscriptions.find(s=>s.id===id&&isLive(s)&&s.secret===secret);
     if(!exists){
       const challenge=randomBytes(24).toString('base64url');
       const message='msg_verification_'+randomBytes(12).toString('hex');
@@ -198,13 +205,16 @@ export class WorkforceEvents{
     const saved:Subscription={id,owner:actor,url:u.toString(),secret,
       expiresAt,verifiedAt:new Date().toISOString()};
     this.db.mutate('events',seed,d=>{
+      // Revoked while verifying: the connection that asked is gone, so nothing is stored.
+      if((d.revocations?.[actor]??0)!==epoch)throw Error('Connection revoked during subscription');
       const i=d.subscriptions.findIndex(x=>x.id===id);
       if(i<0)d.subscriptions.push(saved);
       else d.subscriptions[i]=saved;
       // Preserve durable pending events on refresh and key rotation.
       // The exact raw body is re-signed on each attempt with the current key.
     });
-    return {id,refreshBefore:expiresAt,cursor:null,truncated:false};
+    const refreshBefore=new Date(Date.parse(expiresAt)-Math.floor(ttl/4)).toISOString();
+    return {id,refreshBefore,cursor:null,truncated:false};
   }
   unsubscribe(actor:string,args:{name:string;arguments:unknown;delivery:{url:string}}){
     assertActor(actor);if(args.name!==WORK_EVENT)throw Error('Unknown event');
@@ -216,6 +226,24 @@ export class WorkforceEvents{
       d.deliveries=d.deliveries.filter(x=>x.subId!==id);
     });
     return {};
+  }
+  /** Revoked OAuth connection: stop waking that host until one of its live connections subscribes again.
+   *  Subscriptions are keyed by host, not client, so every subscription of the host is dropped;
+   *  pending deliveries then fail as SUBSCRIPTION_INACTIVE on the next flush. */
+  dropOwners(hosts:readonly string[]){
+    const owners=new Set(hosts);
+    if(!owners.size)return 0;
+    return this.db.mutate('events',seed,d=>{
+      d.revocations??={};
+      for(const owner of owners)d.revocations[owner]=(d.revocations[owner]??0)+1;
+      const dropped=new Set(d.subscriptions.filter(s=>owners.has(s.owner)).map(s=>s.id));
+      d.subscriptions=d.subscriptions.filter(s=>!dropped.has(s.id));
+      // Close their outbox entries in the same transaction so they never sit ahead of live hosts.
+      const t=now();
+      for(const x of d.deliveries)if(dropped.has(x.subId)&&(x.state==='PENDING'||x.state==='SENDING')){
+        x.state='FAILED';x.terminalAt=t;x.failureReason='SUBSCRIPTION_INACTIVE';}
+      return dropped.size;
+    }).result;
   }
   /** Reconcile only real QUEUED pointers for the authenticated host. */
   queue(actor:EventHost,workIds:string[]){
@@ -256,14 +284,18 @@ export class WorkforceEvents{
     for(let n=0;n<Math.min(20,limit);n++){
       const item=this.db.mutate('events',seed,d=>{
         const t=now();
-        const next=d.deliveries.find(x=>(x.state==='PENDING'&&x.nextAt<=t)||
-          (x.state==='SENDING'&&x.nextAt<=t));
-        if(!next)return null;
-        const sub=d.subscriptions.find(s=>s.id===next.subId&&isLive(s,t));
-        if(!sub){next.state='FAILED';next.terminalAt=t;next.failureReason='SUBSCRIPTION_INACTIVE';return null;}
-        if(next.attempts>=5){next.state='FAILED';next.terminalAt=t;return null;}
-        next.attempts++;next.state='SENDING';next.nextAt=t+60_000;
-        return {delivery:{...next},sub:{...sub}};
+        // Dead entries (inactive subscription, attempts exhausted) are closed and skipped in the same
+        // pass, so they can never hold back deliverable events queued behind them.
+        for(;;){
+          const next=d.deliveries.find(x=>(x.state==='PENDING'&&x.nextAt<=t)||
+            (x.state==='SENDING'&&x.nextAt<=t));
+          if(!next)return null;
+          const sub=d.subscriptions.find(s=>s.id===next.subId&&isLive(s,t));
+          if(!sub){next.state='FAILED';next.terminalAt=t;next.failureReason='SUBSCRIPTION_INACTIVE';continue;}
+          if(next.attempts>=5){next.state='FAILED';next.terminalAt=t;continue;}
+          next.attempts++;next.state='SENDING';next.nextAt=t+60_000;
+          return {delivery:{...next},sub:{...sub}};
+        }
       }).result;
       if(!item)break;
       attempted++;

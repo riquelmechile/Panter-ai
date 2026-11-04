@@ -249,3 +249,79 @@ test('renewed subscription retries expiration-failed events for still-queued wor
   assert.equal(deliveries,1);
   assert.equal(engine.queue('gpt-b',[workId]),0);
 }));
+
+test('subscriptions last up to 7 days and ask for renewal with a quarter of the lifetime as margin',()=>fixture(async dir=>{
+  const echo:EventPost=async(_url,_headers,body)=>{
+    const parsed=JSON.parse(body) as {challenge?:string};
+    return {status:200,body:JSON.stringify({challenge:parsed.challenge})};
+  };
+  const e=new WorkforceEvents(dir,echo);
+  const t0=Date.now();
+  const open=await e.subscribe('gpt-b',{...args,ttlMs:null});
+  const refresh=Date.parse(open.refreshBefore!)-t0;
+  assert.ok(refresh>5.2*86_400_000&&refresh<=5.25*86_400_000+5_000,`refreshBefore ${refresh}`);
+  const capped=await e.subscribe('gpt-b',{...args,ttlMs:30*86_400_000});
+  assert.ok(Date.parse(capped.refreshBefore!)-Date.now()<=5.25*86_400_000+5_000);
+  const short=await e.subscribe('gpt-b',{...args,ttlMs:3_600_000});
+  const s=Date.parse(short.refreshBefore!)-Date.now();
+  assert.ok(s>2_600_000&&s<=2_700_000+5_000,`short refreshBefore ${s}`);
+  await assert.rejects(e.subscribe('gpt-b',{...args,ttlMs:1000}),/Invalid event subscription TTL/);
+}));
+
+test('a revoked connection stops receiving work events at once, not at subscription expiry',()=>fixture(async dir=>{
+  let deliveries=0;
+  const post:EventPost=async(_u,_h,b)=>{
+    const body=JSON.parse(b) as {type?:string;challenge?:string};
+    if(body.type==='verification')return {status:200,body:JSON.stringify({challenge:body.challenge})};
+    deliveries++;return {status:200,body:''};
+  };
+  const engine=new WorkforceEvents(dir,post);
+  await engine.subscribe('gpt-b',args);
+  await engine.subscribe('gemini',{...args,arguments:{host:'gemini'},delivery:{...args.delivery,url:callback+'-gemini'}});
+  engine.queue('gpt-b',[workId]);
+  assert.equal(engine.dropOwners(['gpt-b']),1);
+  assert.equal(engine.hasActive('gpt-b'),false);
+  assert.equal(engine.hasActive('gemini'),true);
+  assert.equal(await engine.flush(),0);
+  assert.equal(deliveries,0);
+  assert.equal(engine.status('gpt-a').pending,0);
+  assert.equal(engine.dropOwners([]),0);
+}));
+
+test('dead outbox entries never hold back live deliveries queued behind them',()=>fixture(async dir=>{
+  const delivered:string[]=[];
+  const post:EventPost=async(url,_h,b)=>{
+    const body=JSON.parse(b) as {type?:string;challenge?:string;data?:{workId:string}};
+    if(body.type==='verification')return {status:200,body:JSON.stringify({challenge:body.challenge})};
+    delivered.push(url);return {status:200,body:''};
+  };
+  const engine=new WorkforceEvents(dir,post);
+  const geminiUrl=callback+'-gemini';
+  await engine.subscribe('gpt-b',args);
+  await engine.subscribe('gemini',{...args,arguments:{host:'gemini'},delivery:{...args.delivery,url:geminiUrl}});
+  const ids=Array.from({length:5},(_,i)=>`00000000-0000-4000-8000-00000000001${i}`);
+  engine.queue('gpt-b',ids);
+  engine.queue('gemini',['00000000-0000-4000-8000-000000000099']);
+  // Revoking GPT-B closes its five entries at once; the Gemini event is delivered on the next flush.
+  assert.equal(engine.dropOwners(['gpt-b']),1);
+  assert.equal(engine.status('gpt-a').pending,1);
+  assert.equal(await engine.flush(),1);
+  assert.deepEqual(delivered,[geminiUrl]);
+}));
+
+test('a subscribe still verifying when the connection is revoked is never stored',()=>fixture(async dir=>{
+  let engine!:WorkforceEvents;
+  const post:EventPost=async(_u,_h,b)=>{
+    const body=JSON.parse(b) as {type?:string;challenge?:string};
+    // The admin revokes while the callback verification is in flight.
+    if(body.type==='verification'){engine.dropOwners(['gpt-b']);return {status:200,body:JSON.stringify({challenge:body.challenge})};}
+    return {status:200,body:''};
+  };
+  engine=new WorkforceEvents(dir,post);
+  await assert.rejects(engine.subscribe('gpt-b',args),/revoked during subscription/);
+  assert.equal(engine.hasActive('gpt-b'),false);
+  // A fresh subscribe after the revoke (by a still-valid connection) works normally.
+  const ok=new WorkforceEvents(dir,async(_u,_h,b)=>{const x=JSON.parse(b) as {challenge?:string};return {status:200,body:JSON.stringify({challenge:x.challenge})};});
+  await ok.subscribe('gpt-b',args);
+  assert.equal(ok.hasActive('gpt-b'),true);
+}));

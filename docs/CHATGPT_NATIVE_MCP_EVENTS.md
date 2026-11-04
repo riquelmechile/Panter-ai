@@ -48,10 +48,14 @@ again when it calls the MCP pickup tool.
 
 ChatGPT will send `events/subscribe` with its HTTPS callback URL and
 `whsec_` signing secret. Panter verifies the callback using a signed
-challenge before persisting a 24-hour renewable subscription. ChatGPT
-refreshes the subscription before expiration.
+challenge before persisting a renewable subscription of up to 7 days (also
+when `ttlMs` is null or omitted). `refreshBefore` is set a quarter of the
+granted lifetime before expiry, so ChatGPT renews with margin; delivery
+stops only at `expiresAt`. Renewal is still an observed host behaviour:
+check that the subscription's expiry moves forward before relying on it.
 
-Only a real subscribed GPT-B actor is eligible for this event wake path.
+Only a real subscribed ChatGPT or Gemini app worker (GPT-A, GPT-B or Gemini,
+never the configured leader) is eligible for this event wake path.
 A connected OAuth registration alone is insufficient. The route is
 read-only by default: `implementer` remains subject to separate
 authorization/explicit host approval paths and is not cold-started by the
@@ -110,3 +114,9 @@ Reference: https://developers.google.com/connected-apps/mcp/server-optimization
   human interaction and no duplicate claims before declaring the wake live.
 - CI, independent GitHub review, and Xanxito 4R approval on exact SHA
   are required before deployment.
+
+## Revocar una conexión
+
+`panter_oauth_client_revoke` también borra en el acto las suscripciones a eventos de los hosts de ese cliente, y los avisos pendientes quedan `FAILED` (`SUBSCRIPTION_INACTIVE`). Las suscripciones van por host, no por cliente: si el host tiene otra conexión viva, esa conexión debe volver a suscribirse. La respuesta trae esos hosts en `hostsToResubscribe`.
+
+Una suscripción que todavía estaba verificando su callback cuando se revocó la conexión no se guarda: Panter lleva un contador de revocaciones por host y lo compara antes de persistir. El borrado se hace antes y después de revocar, así que una caída a mitad de camino no deja suscripciones de una conexión ya revocada. Además, después de guardar una suscripción, Panter vuelve a validar el token de esa misma request: si la conexión se revocó mientras la request seguía en curso, la suscripción se borra.
