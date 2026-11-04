@@ -26,11 +26,14 @@ Quien verifica o revisa nunca es el host que implementó (el harness lo comprueb
 - **Nota del líder en cada paquete**: al final del paquete Panter indica el repositorio y la base, cómo leer y escribir con las herramientas `panter_github_*` (no hay checkout local; se pasa `workId`, `attemptId` y `leaseGeneration` del claim) y qué puede hacer esa fase. Las fases piden además terminar con un único JSON `{"summary", "evidence", "candidateSha", "runId"}`; el harness también lo acepta dentro de un bloque de código o rodeado de texto. A los hosts por correo se les dice que solo juzguen el material.
 - **Plazo para empezar**: si el host no toma la fase a tiempo (sigue en cola, o solo la tiene el transporte de correo sin respuesta), Panter la retira sin efectos y la fase pasa a ejecución nativa del líder; no se vuelve a mandar a ese host en esa corrida. Una fase que el host ya empezó nunca se retira. En la revisión 4R, si una lente se retira por no aparecer a tiempo, toda la revisión pasa a nativa y se revocan los permisos de las lentes que ya estaban corriendo; si el host alcanzó a tomarla, la revisión remota sigue.
 
+- **Timbre de Grok**: Grok solo despierta con su webhook de rutina (`PANTER_WAKE_GROK_URL` / `PANTER_WAKE_GROK_KEY`). El harness lo toca para cada fase o lente que le despacha, un trabajo a la vez: si Grok ya tiene uno en curso o uno tocado sin tomar, el siguiente se toca en el primer tick después de que quede libre. Cada trabajo se toca una sola vez (el estado queda en `panter_workforce_grok_wake_status`). Como las lentes de Grok van en fila, conviene darle un plazo propio con `PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS_GROK`.
+
 ```
 PANTER_HARNESS_AUTO_GITHUB_GRANTS=1             # autorización del operador para permisos por fase
 PANTER_MATERIAL_HOSTS=gemini
 PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS=180          # GPT-A, GPT-B, Grok
 PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS_MAIL=1200    # hosts por correo (Gemini)
+PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS_GROK=600     # opcional, plazo propio por host (GPT_A, GPT_B, GROK, GEMINI)
 ```
 
 Para que el harness despache a un host, el líder lo informa como `CONNECTED` en `peerStates` del tick (los hosts con suscripción a eventos, webhook o correo se despiertan solos).
