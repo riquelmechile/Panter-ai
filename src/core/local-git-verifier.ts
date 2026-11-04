@@ -2,6 +2,7 @@
  * This runner NEVER accepts cwd or command strings from the AI host.
  * Commands are argv arrays loaded from a protected operator config file.
  */
+import {childEnv} from './child-env.js';
 import { createHash } from 'node:crypto';
 import { realpath, readFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
@@ -42,14 +43,15 @@ export class LocalGitVerifier {
     try{
       const root=await realpath(config.root);
       const git=async(...args:string[])=>{
-        const r=await exec('git',args,{cwd:root,timeout:20000,maxBuffer:1024*512,windowsHide:true});return r.stdout.trim();
+        const r=await exec('git',args,{cwd:root,timeout:20000,maxBuffer:1024*512,windowsHide:true,env:childEnv({},true)});return r.stdout.trim();
       };
       if(await git('rev-parse','--show-toplevel')!==root)throw new Error('Local Git checkout root mismatch');
       const observed=await git('rev-parse','--verify','HEAD');decision.checkedHead=observed;
       if(observed!==candidateSha)throw new Error('Local Git HEAD differs from frozen candidate');
       if(await git('status','--porcelain','--untracked-files=normal'))throw new Error('Local worktree has uncommitted or untracked files');
       for(const argv of config.checks){
-        const result=await exec(argv[0]!,argv.slice(1),{cwd:root,timeout:120000,maxBuffer:1024*512,windowsHide:true});
+        // Checks may run worker-written code: they never see Panter's credentials.
+        const result=await exec(argv[0]!,argv.slice(1),{cwd:root,timeout:120000,maxBuffer:1024*512,windowsHide:true,env:childEnv({CI:'1'},true)});
         decision.checkDigests.push(createHash('sha256').update(JSON.stringify({argv,stdout:result.stdout,stderr:result.stderr})).digest('hex'));
       }
       if(await git('rev-parse','--verify','HEAD')!==candidateSha||await git('status','--porcelain','--untracked-files=normal'))

@@ -2,6 +2,7 @@
  * Official native authority lives in Gentle AI Go; never invent review approval.
  * Disabled by default, and limited to operator-configured local repository and binary.
  */
+import {childEnv} from './child-env.js';
 import { execFile } from 'node:child_process';
 import { realpath } from 'node:fs/promises';
 import { promisify } from 'node:util';
@@ -24,7 +25,7 @@ export class NativeReviewBridge {
       const {stdout}=await run(this.cfg.binary,['review',...args],{
         cwd:this.root,timeout:12000,maxBuffer,windowsHide:true,
         // Never hand Panter's own credentials (e.g. the workforce GitHub token) to the external binary.
-        env:{...Object.fromEntries(Object.entries(process.env).filter(([k])=>!/^PANTER_.*(TOKEN|SECRET|KEY|PASSWORD)/.test(k))),NO_COLOR:'1'},
+        env:childEnv({NO_COLOR:'1'}),
       });
       if(stdout.length>maxBuffer)throw new Error('Response too large');
       let data:unknown;try{data=JSON.parse(stdout)}catch{data={raw:stdout.slice(0,12000)}}
