@@ -668,6 +668,24 @@ test('Judgment Day runs native when a judge host wrote code: Panter-RDD would ne
   assert.equal((await h.get(id))!.judgmentTransport, 'NATIVE');
 }));
 
+test('Judgment Day runs native when a judge host was ever granted GitHub writes, or that history is unreadable', () => withHosts(async (h, m) => {
+  const writers: { list: string[] | null } = { list: ['gemini'] };
+  h.setHostHooks({ writerHosts: () => writers.list });
+  const id = await toJudgment(h, m, 'jd10');
+  assert.equal((await h.tick(id, all)).status, 'READY_FOR_HOST_NATIVE_DISPATCH');
+  assert.equal((await h.get(id))!.judgmentTransport, 'NATIVE');
+  // Unreadable writer history: Panter-RDD attests nothing, so the judges never go remote.
+  writers.list = null;
+  const other = await (async () => { const s = await h.start({ project: 'app', objective: 'Add another helper', idempotencyKey: 'jd11', writesAuthorized: true, changeSurfaces: ['src/util.ts'], judgmentDayRequested: true });
+    const t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Done', evidence: ['tests'], candidateSha: sha, runId: 'impl-run-jd11' }); return s.id; })();
+  assert.equal((await h.tick(other, all)).status, 'READY_FOR_HOST_NATIVE_DISPATCH');
+  // A writer history that names neither judge leaves Judgment Day remote.
+  writers.list = ['gpt-a'];
+  const third = await (async () => { const s = await h.start({ project: 'app', objective: 'Add a third helper', idempotencyKey: 'jd12', writesAuthorized: true, changeSurfaces: ['src/util.ts'], judgmentDayRequested: true });
+    const t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Done', evidence: ['tests'], candidateSha: sha, runId: 'impl-run-jd12' }); return s.id; })();
+  assert.equal((await h.tick(third, all)).status, 'WAITING_REMOTE_REVIEW');
+}));
+
 test('a Judgment Day prepared before remote judges existed stays native', () => withHosts(async (h, m) => {
   const id = await toJudgment(h, m, 'jd9', ['grok', 'grok']);
   await h.tick(id, all);

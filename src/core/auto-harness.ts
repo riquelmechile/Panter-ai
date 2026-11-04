@@ -61,6 +61,8 @@ export type HarnessHostHooks={
   afterDispatch?(input:{run:HarnessRun;workId:string;phase:HarnessPhase;host:Host}):Promise<void>;
   /** How long a host may leave a dispatched phase unstarted before it runs native instead. */
   pickupTimeoutMs?(host:Host):number;
+  /** Hosts that were ever allowed to write to a repository (Panter-RDD's writer history), or null if it cannot be read. */
+  writerHosts?():string[]|null;
   /** When a work's pickup clock starts (ISO), or null while it is legitimately waiting to be signalled; default createdAt. */
   pickupClockStart?(work:{id:string;target:Host;createdAt:string},limitMs:number):Promise<string|null>;
 };
@@ -194,7 +196,11 @@ export class AutomaticHarness {
     // Judgment Day can only pass with blind judges on distinct hosts, none of which wrote code (Panter-RDD attests
     // neither); otherwise its native review, which the runner can sign, is the one that can pass.
     if(new Set(hosts).size!==hosts.length)return false;
-    const authors=await this.mesh.authorHosts();
+    // Same author history Panter-RDD checks: implementer work in the mesh, former leaders, and any host ever granted
+    // GitHub commit/PR (even for work it never picked up). Unreadable history attests nothing, so the judges run native.
+    const writers=this.hooks.writerHosts?this.hooks.writerHosts():[];
+    if(writers===null)return false;
+    const authors=[...await this.mesh.authorHosts(),...writers];
     return !hosts.some(h=>authors.includes(h!));
   }
   /** Stop a remote review that will never be read (its candidate was corrected): withdraw its unstarted lenses and
