@@ -34,10 +34,15 @@ export class PanterRdd {
   private serial:Promise<unknown>=Promise.resolve();
   private constructor(private readonly file:string,private readonly native:NativeSubagentReview,
     private readonly mesh:MeshEngine,private readonly github:GitHubDeliveryGate|null,
-    private readonly runnerKeys:Readonly<Record<string,string>>,private readonly localGit:LocalGitVerifier|null){}
-  static async open(dir:string,native:NativeSubagentReview,mesh:MeshEngine,github:GitHubDeliveryGate|null=null,runnerKeys:Readonly<Record<string,string>>={},localGit:LocalGitVerifier|null=null){
+    private readonly runnerKeys:Readonly<Record<string,string>>,private readonly localGit:LocalGitVerifier|null,
+    private readonly transportAttestation:boolean){}
+  /** transportAttestation (operator opt-in): a remote lens report counts as attested when Panter itself received it
+   * as the terminal receipt of that exact frozen lens work from the bound worker host over its authenticated
+   * channel. That proves which host delivered which report for which packet and SHA — not which model ran or how
+   * well; the lens contents are still judged as usual. */
+  static async open(dir:string,native:NativeSubagentReview,mesh:MeshEngine,github:GitHubDeliveryGate|null=null,runnerKeys:Readonly<Record<string,string>>={},localGit:LocalGitVerifier|null=null,transportAttestation=false){
     await mkdir(resolve(dir),{recursive:true,mode:0o700});
-    const a=new PanterRdd(join(resolve(dir),'panter-rdd.json'),native,mesh,github,runnerKeys,localGit);
+    const a=new PanterRdd(join(resolve(dir),'panter-rdd.json'),native,mesh,github,runnerKeys,localGit,transportAttestation);
     try{
       const d:unknown=JSON.parse(await readFile(a.file,'utf8'));
       demand(d&&typeof d==='object'&&'version' in d&&d.version===1&&'reviews' in d&&Array.isArray(d.reviews),'Invalid Panter-RDD ledger');
@@ -111,7 +116,7 @@ export class PanterRdd {
   async assess(id:string){
     const current=await this.get(id);demand(current,'Unknown Panter-RDD transaction');
     if(current.state==='SUPERSEDED')return {record:current,reason:'A new candidate superseded this review',approved:false};
-    let severe=0,complete=false,independence=false,runnerAttested=false,receipts:string[]=[];
+    let severe=0,complete=false,independence=false,runnerAttested=false,transportAttested=false,receipts:string[]=[];
     const authorRuns=new Set([current.implementerRunId,...(current.implementerRunIds??[])].filter((id):id is string=>!!id));
     if(current.source==='NATIVE'){
       const r=await this.native.status(current.reviewId);
@@ -152,17 +157,29 @@ export class PanterRdd {
           evidence:data.evidence as string[],findings:data.findings},
           data.attestation as {keyId:string;signature:string}|undefined,this.runnerKeys);
       });
+      // Panter is the trusted transport: each report is the terminal receipt of its own frozen lens work, completed
+      // by that work's bound worker host. A report naming another packet is not this lens's report; a report that
+      // does not know its packet digest (e-mail transport) is bound by the work itself.
+      transportAttested=this.transportAttestation&&!runnerAttested&&complete&&independence&&r.work.every((w,index)=>{
+        const data=parsed[index];
+        return !!data&&w.state==='COMPLETED'&&/^[0-9a-f]{64}$/.test(w.receiptDigest??'')&&w.host!==leaderHost()&&
+          data.agentId===w.agentId&&data.candidateSha===current.candidateSha&&typeof data.subagentRunId==='string'&&
+          Array.isArray(data.evidence)&&data.evidence.length>0&&Array.isArray(data.findings)&&
+          /^[0-9a-f]{64}$/.test(w.packetDigest??'')&&
+          (!/^[0-9a-f]{64}$/.test(String(data.packetDigest??''))||data.packetDigest===w.packetDigest);
+      });
     }
+    const attested=runnerAttested||transportAttested;
     const evidenceHash=complete&&independence?digest({id:current.reviewId,sha:current.candidateSha,receipts}):null;
     let github:GitHubDecision|null=null;
     let local:LocalGitDecision|null=null;
-    if(complete&&independence&&runnerAttested&&severe===0&&current.repository&&current.prNumber&&this.github){
+    if(complete&&independence&&attested&&severe===0&&current.repository&&current.prNumber&&this.github){
       github=await this.github.inspect({repository:current.repository,prNumber:current.prNumber,expectedSha:current.candidateSha,expectedBase:current.expectedBase,deliveryStrategy:current.deliveryStrategy,parentAuthorizedSinglePr:current.deliveryStrategy==='single-pr'});
     }
-    if(complete&&independence&&runnerAttested&&severe===0&&!current.prNumber&&current.localProject&&this.localGit)
+    if(complete&&independence&&attested&&severe===0&&!current.prNumber&&current.localProject&&this.localGit)
       local=await this.localGit.inspect(current.localProject,current.candidateSha);
     const hasTrustedProof=github?.state==='REVIEWABLE'||local?.state==='REVIEWABLE';
-    const state:PanterRddState=!complete||!independence?'NEEDS_REVIEW_EVIDENCE':severe?'NEEDS_CORRECTION':!runnerAttested?'NEEDS_RUNNER_ATTESTATION':
+    const state:PanterRddState=!complete||!independence?'NEEDS_REVIEW_EVIDENCE':severe?'NEEDS_CORRECTION':!attested?'NEEDS_RUNNER_ATTESTATION':
       hasTrustedProof?'APPROVED_PENDING_ACK':'NEEDS_GITHUB_PROOF';
     const githubHash=hasTrustedProof?digest(github?.state==='REVIEWABLE'?{sha:github.headSha,checks:github.satisfied,pr:current.prNumber}:
       {sha:local!.checkedHead,checks:local!.checkDigests,project:current.localProject}):null;
@@ -177,9 +194,10 @@ export class PanterRdd {
       return r;
     });
     return {record,approved:record.state==='APPROVED_PENDING_ACK'||record.state==='ACKNOWLEDGED',
-      assurance:runnerAttested?'GITHUB_CHECKS_VERIFIED__RUNNER_SIGNED' as const:'REVIEW_RUNS_HOST_REPORTED_ONLY' as const,reviewComplete:complete,
-      distinctReviewerRuns:independence,runnerAttested,severeFindings:severe,github,local,
-      note:'Approval requires verified runner signatures bound to each frozen slot and exact GitHub proof. Runner signatures attest the registered execution host, not a provider model identity; review never authorizes delivery.'};
+      assurance:runnerAttested?'GITHUB_CHECKS_VERIFIED__RUNNER_SIGNED' as const:transportAttested?'GITHUB_CHECKS_VERIFIED__TRANSPORT_ATTESTED' as const:'REVIEW_RUNS_HOST_REPORTED_ONLY' as const,reviewComplete:complete,
+      distinctReviewerRuns:independence,runnerAttested,transportAttested,severeFindings:severe,github,local,
+      note:transportAttested?'Each lens report is the terminal receipt Panter received from its bound worker host for that exact frozen lens work: it attests which host delivered which report, not which model ran or how well. Review never authorizes delivery.':
+        'Approval requires verified runner signatures bound to each frozen slot (or, when the operator enables it, Panter transport attestation of remote lens receipts) and exact GitHub proof. Runner signatures attest the registered execution host, not a provider model identity; review never authorizes delivery.'};
   }
   /** Burn/ack only after fresh source verification. Acknowledgement is NOT permission to merge. */
   async acknowledge(id:string,expectedRevision:number){
