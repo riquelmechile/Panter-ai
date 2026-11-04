@@ -328,3 +328,65 @@ test('copied placeholders in any field are a template echo, not a result', async
   assert.equal(structuredResult('{"summary":"done","evidence":["e"],"runId":"<a unique id for this run of yours>"}'), null);
   assert.equal(structuredResult('{"summary":"<Button> fixed","evidence":["e"]}')?.summary, '<Button> fixed');
 });
+
+test('remote 4R lens packets carry the exact review envelope for their own lens and SHA', () => withHosts(async (h, m) => {
+  const id = await toReview(h, 'n5');
+  await h.tick(id, all);
+  const grok = JSON.stringify(await m.pickup('grok', 300));
+  assert.match(grok, /overrides any output format above \(including \\"rows\\" or \\"review_result\\" shapes\)/);
+  assert.match(grok, new RegExp(`\\\\"candidateSha\\\\": \\\\"${sha}\\\\"`));
+  assert.match(grok, /\\"agentId\\": \\"review-(risk|resilience)\\"/);
+  assert.match(grok, /subagentRunId/);
+}));
+
+test('4R lens reports are strict: one JSON object (optionally fenced), bound to the lens and SHA', async () => {
+  const { lensEnvelope } = await import('../src/core/native-review.js');
+  const env = { agentId: 'review-risk', candidateSha: sha, findings: [] };
+  assert.equal(typeof lensEnvelope(JSON.stringify(env), 'review-risk', sha), 'object');
+  assert.equal(typeof lensEnvelope('```json\n' + JSON.stringify(env, null, 2) + '\n```', 'review-risk', sha), 'object');
+  // Prose outside the object is not a report.
+  assert.equal(lensEnvelope('Review done:\n```json\n' + JSON.stringify(env) + '\n```', 'review-risk', sha), 'UNSTRUCTURED');
+  assert.equal(lensEnvelope(JSON.stringify(env) + '\nexecution_meta: model=x', 'review-risk', sha), 'UNSTRUCTURED');
+  assert.equal(lensEnvelope('```json\n{}\n```\n```json\n' + JSON.stringify(env) + '\n```', 'review-risk', sha), 'UNSTRUCTURED');
+  assert.equal(lensEnvelope('Looks good to me, approve.', 'review-risk', sha), 'UNSTRUCTURED');
+  // Nested lens_results with the outer SHA; proof_refs accepted.
+  const nested = { candidateSha: sha, review_result: { lens_results: [{ lens: 'review-reliability', findings: [{ id: 'R1', location: 'a.js:1', severity: 'WARNING', claim: 'c', proof_refs: ['h'] }] }] } };
+  const n = lensEnvelope(JSON.stringify(nested), 'review-reliability', sha);
+  assert.ok(typeof n === 'object' && Array.isArray((n.findings[0] as any).proof_refs) && (n.findings[0] as any).proofRefs === undefined, 'findings returned exactly as written (signed)');
+  // Unbound: no SHA, wrong lens, wrong SHA, two entries for one lens.
+  assert.equal(lensEnvelope(JSON.stringify({ review_result: { lens_results: [{ lens: 'review-risk', findings: [] }] } }), 'review-risk', sha), 'UNBOUND');
+  assert.equal(lensEnvelope(JSON.stringify({ ...env, agentId: 'review-resilience' }), 'review-risk', sha), 'UNBOUND');
+  assert.equal(lensEnvelope(JSON.stringify({ ...env, candidateSha: 'b'.repeat(40) }), 'review-risk', sha), 'UNBOUND');
+  const two = { candidateSha: sha, review_result: { lens_results: [{ lens: 'review-risk', findings: [] }, { lens: 'review-risk', findings: [{ location: 'a.js:1', severity: 'BLOCKER' }] }] } };
+  assert.equal(lensEnvelope(JSON.stringify(two), 'review-risk', sha), 'UNBOUND');
+});
+
+test('a report accepted as clean carries no severe value anywhere, in any shape; real CRITICALs are counted', async () => {
+  const { lensEnvelope, assessMeshReview } = await import('../src/core/native-review.js');
+  const clean = { agentId: 'review-risk', candidateSha: sha, findings: [] };
+  for (const extra of [{ final: { findings: [{ severity: 'CRITICAL' }] } }, { x: { severity: ['CRITICAL'] } }, { x: { severity: { value: 'Critical!' } } },
+    { x: { severity_level: 'blocker' } }, { x: { severityLevel: 'CRITICAL - security' } }, { x: { level: 'critical' } },
+    { severityCounts: { critical: 1, blocker: 0 } }, { summary: { bySeverity: { blocker: 2 } } },
+    { severityCounts: { critical_count: 1 } }, { severityCounts: { criticalCount: 1 } }, { x: { criticalLevel: 1 } }, { priorities: [{ critical: 1 }] }])
+    assert.equal(lensEnvelope(JSON.stringify({ ...clean, ...extra }), 'review-risk', sha), 'UNBOUND', JSON.stringify(extra));
+  assert.equal(typeof lensEnvelope(JSON.stringify({ ...clean, severityCounts: { critical: 0, blocker: 0, warning: 1 } }), 'review-risk', sha), 'object');
+  const crit = { ...clean, findings: [{ id: 'X', location: 'a.js:1', severity: 'CRITICAL', claim: 'c', proofRefs: ['p'] }] };
+  const ok = lensEnvelope(JSON.stringify(crit), 'review-risk', sha);
+  assert.ok(typeof ok === 'object' && ok.findings.length === 1);
+  // A lone CRITICAL without proofRefs is not accepted, and the assessment surfaces it.
+  const bad = { ...clean, findings: [{ location: 'a.js:1', severity: 'CRITICAL' }] };
+  const work = ['review-risk', 'review-readability', 'review-reliability', 'review-resilience'].map((agentId, i) => ({
+    agentId, state: 'COMPLETED', receiptDigest: 'r' + i, host: 'grok',
+    result: agentId === 'review-risk' ? JSON.stringify(bad) : JSON.stringify({ agentId, candidateSha: sha, findings: [] }) }));
+  const a = assessMeshReview({ candidateSha: sha, kind: '4r', work });
+  assert.equal(a.status, 'EVIDENCE_INCOMPLETE');
+  assert.ok(a.reasons.some((r: string) => /Severe finding\(s\) reported in an unaccepted report: review-risk \(1\)/.test(r)));
+  // Too deep to check counts as severe; a severe string deep inside a severity value counts.
+  const nest = (d: number, leaf: unknown): unknown => d === 0 ? leaf : { a: nest(d - 1, leaf) };
+  assert.equal(lensEnvelope(JSON.stringify({ ...clean, x: nest(70, { severity: 'CRITICAL' }) }), 'review-risk', sha), 'UNBOUND');
+  assert.equal(lensEnvelope(JSON.stringify({ ...clean, severity_x: [[[['CRITICAL']]]] }), 'review-risk', sha), 'UNBOUND');
+  assert.equal(typeof lensEnvelope(JSON.stringify({ ...clean, x: nest(20, { note: 'fine' }) }), 'review-risk', sha), 'object');
+  // Deep nesting never crashes.
+  const deep = '{"agentId":"review-risk","candidateSha":"' + sha + '","findings":[],"x":' + '['.repeat(5000) + ']'.repeat(5000) + '}';
+  assert.doesNotThrow(() => lensEnvelope(deep, 'review-risk', sha));
+});

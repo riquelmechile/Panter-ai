@@ -44,6 +44,69 @@ export class NativeReviewBridge {
   status(){return this.readOnly('status',['status','--cwd',this.root,'--contract','gentle-ai.review-integration/v2','--next-transition','--json']);}
 }
 
+type LensFinding={location:string;severity:string;proofRefs:unknown[]};
+const SEVERITIES=['BLOCKER','CRITICAL','WARNING','SUGGESTION'];
+const SEVERE_VALUE=/\b(critical|blocker)\b/i;
+/** A lens report is strict: the whole text is ONE JSON object, optionally inside a single code fence. Any prose
+ * outside it makes the report unstructured, so nothing written elsewhere can contradict what is counted. */
+function strictJson(text:string):Record<string,any>|null{
+  let t=text.replace(/\r\n/g,'\n').trim();
+  const fence=/^```[a-zA-Z0-9_-]*[ \t]*\n([\s\S]*)\n```$/.exec(t);
+  if(fence){t=fence[1]!.trim();if(t.includes('\n```'))return null;}
+  if(!t.startsWith('{'))return null;
+  try{const v=JSON.parse(t);return v&&typeof v==='object'&&!Array.isArray(v)?v:null;}catch{return null;}
+}
+/** Severe values anywhere in the parsed report under severity-like keys (severity, sev, level, priority and
+ * variants such as severity_level), whatever the value's shape: strings inside arrays or objects under such a key
+ * count too. Iterative; anything deeper than the bound counts as severe (fail closed). */
+function severeUnderSeverityKeys(root:unknown){
+  let n=0;const stack:Array<[unknown,number,boolean]>=[[root,0,false]];
+  while(stack.length){
+    const [v,depth,underSeverity]=stack.pop()!;
+    if(typeof v==='string'){if(underSeverity&&SEVERE_VALUE.test(v))n++;continue;}
+    if(!v||typeof v!=='object')continue;
+    if(depth>64){n++;continue;}
+    const entries=Array.isArray(v)?v.map(x=>['',x] as const):Object.entries(v);
+    for(const [k,x] of entries){
+      const inSev=underSeverity||(k!==''&&/sev|level|priorit/i.test(k));
+      // Under a severity-like key, a key naming a severe level (any spelling: critical_count, criticalCount) with a
+      // non-zero value counts too: {"bySeverity":{"critical":1}}.
+      if(inSev&&k!==''&&/critical|blocker/i.test(k)&&!(x===0||x===false||x===null||x===''||x==='0'||(Array.isArray(x)&&x.length===0)))n++;
+      stack.push([x,depth+1,inSev]);
+    }
+  }
+  return n;
+}
+const isSevere=(x:any)=>typeof x?.severity==='string'&&/^(blocker|critical)$/i.test(x.severity.trim());
+/** One lens report as the Panter envelope {agentId, candidateSha, findings[]}, bound to this exact lens and SHA.
+ * The whole text must be that one JSON object (a single code fence around it is allowed). It may also nest the
+ * lens as review_result.lens_results[] (inheriting candidateSha); exactly one entry may claim the lens.
+ * proof_refs is accepted as proofRefs. A report accepted as clean must not carry a severe value anywhere else. */
+export function lensEnvelope(text:string,agentId:string,candidateSha:string):(Record<string,any>&{findings:LensFinding[]})|'UNSTRUCTURED'|'UNBOUND'{
+  if(text.length>100_000)return 'UNSTRUCTURED';
+  const obj=strictJson(text);
+  if(!obj)return 'UNSTRUCTURED';
+  const nested=Array.isArray(obj.review_result?.lens_results)?obj.review_result.lens_results.filter((x:any)=>x&&typeof x==='object'&&(x.agentId??x.lens)===agentId):[];
+  const forms=[obj,...nested.map((x:any)=>({...x,agentId:x.agentId??x.lens,candidateSha:x.candidateSha??obj.candidateSha??obj.review_result?.candidateSha}))]
+    .filter(f=>f.agentId===agentId&&f.candidateSha===candidateSha);
+  if(forms.length!==1)return 'UNBOUND';
+  const f=forms[0]!;
+  if(!Array.isArray(f.findings))return 'UNBOUND';
+  const findings=f.findings.map((x:any)=>{if(!x||typeof x!=='object')return x;const {proof_refs,...rest}=x;return {...rest,proofRefs:x.proofRefs??proof_refs};});
+  const ok=findings.every((x:any)=>!!x&&typeof x==='object'&&typeof x.location==='string'&&SEVERITIES.includes(x.severity)&&Array.isArray(x.proofRefs)&&x.proofRefs.length>0);
+  if(!ok)return 'UNBOUND';
+  if(!findings.some(isSevere)&&severeUnderSeverityKeys(obj)>0)return 'UNBOUND';
+  // Return the findings exactly as the lens wrote them: Panter-RDD verifies runner signatures over them, so the
+  // proof_refs alias is only used to validate, never written back.
+  return f as Record<string,any>&{findings:LensFinding[]};
+}
+/** Severe values claimed in a report that was not accepted, so they are surfaced, never lost. */
+export function unacceptedSevere(text:string){
+  if(text.length>100_000)return 0;
+  const obj=strictJson(text);
+  if(obj)return severeUnderSeverityKeys(obj);
+  return (text.match(/\b(severity|sev|level|priority)\b\W{0,6}[:=]\W{0,6}(critical|blocker)\b/gi)??[]).length;
+}
 export function assessMeshReview(input:{candidateSha:string;kind:'4r'|'judgment-day';work:Array<{agentId?:string;state:string;receiptDigest:string|null;result:string|null;host:string}>}){
   const expected=input.kind==='4r'?['review-risk','review-readability','review-reliability','review-resilience']:['jd-judge-a','jd-judge-b'];
   const reasons:string[]=[];
@@ -53,15 +116,20 @@ export function assessMeshReview(input:{candidateSha:string;kind:'4r'|'judgment-
   const summaries=input.work.map(w=>{
     if(!expected.includes(w.agentId??''))reasons.push('Unexpected reviewer identity');
     if(w.state!=='COMPLETED'||!w.receiptDigest||!w.result){reasons.push(`Missing finished receipt: ${w.agentId}`);return {agentId:w.agentId,accepted:false,findings:null};}
-    let parsed:unknown;try{parsed=JSON.parse(w.result)}catch{reasons.push(`Unstructured report: ${w.agentId}`);return {agentId:w.agentId,accepted:false,findings:null};}
-    if(!parsed||typeof parsed!=='object'){reasons.push(`Invalid report: ${w.agentId}`);return {agentId:w.agentId,accepted:false,findings:null};}
-    const obj=parsed as Record<string,unknown>;
-    // Accept a Panter envelope, not a free-form model approval. Never call it native Go authority.
-    const validated=obj.candidateSha===input.candidateSha&&obj.agentId===w.agentId&&Array.isArray(obj.findings)&&
-      (obj.findings as unknown[]).every(f=>!!f&&typeof f==='object'&&typeof (f as any).location==='string'&&typeof (f as any).severity==='string'&&
-        ['BLOCKER','CRITICAL','WARNING','SUGGESTION'].includes((f as any).severity)&&Array.isArray((f as any).proofRefs)&& (f as any).proofRefs.length>0);
-    if(!validated)reasons.push(`Unbound or insufficient report: ${w.agentId}`);
-    return {agentId:w.agentId,accepted:validated,findings:validated?(obj.findings as unknown[]).length:null};
+    const envelope=lensEnvelope(w.result,w.agentId??'',input.candidateSha);
+    if(envelope==='UNSTRUCTURED'){
+      reasons.push(`Unstructured report: ${w.agentId}`);
+      const hidden=unacceptedSevere(w.result);
+      if(hidden)reasons.push(`Severe finding(s) reported in an unaccepted report: ${w.agentId} (${hidden})`);
+      return {agentId:w.agentId,accepted:false,findings:null};
+    }
+    if(envelope==='UNBOUND'){
+      reasons.push(`Unbound or insufficient report: ${w.agentId}`);
+      const hidden=unacceptedSevere(w.result);
+      if(hidden)reasons.push(`Severe finding(s) reported in an unaccepted report: ${w.agentId} (${hidden})`);
+      return {agentId:w.agentId,accepted:false,findings:null};
+    }
+    return {agentId:w.agentId,accepted:true,findings:envelope.findings.length};
   });
   return {candidateSha:input.candidateSha,kind:input.kind,reviewers:summaries,
     status:reasons.length?'EVIDENCE_INCOMPLETE':'EVIDENCE_COLLECTED_UNVERIFIED',reasons,

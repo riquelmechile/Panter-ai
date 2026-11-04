@@ -5,6 +5,7 @@ import { SqliteLedger } from './sqlite-ledger.js';
  * Persisted orchestration decisions are not authorizations or external proof.
  */
 import { createHash, randomUUID } from 'node:crypto';
+import { jsonCandidates } from './json-extract.js';
 import { specialistPacket, GENTLE_AGENTS, type GentleAgentId } from './gentle-catalog.js';
 import { hostRequest } from './policy.js';
 import { type Host, type MeshEngine } from './mesh.js';
@@ -102,37 +103,12 @@ function completionFormat(phase:HarnessPhase){
   return `This completion format overrides any output format above. Complete this work with exactly one JSON object and nothing else: {"summary": "<what you did and found>", "evidence": ["<one observed fact per item: commands run and their results, files read, commits made>"], "candidateSha": "<the exact 40-hex commit you produced or verified, if any>", "runId": "<a unique id for this run of yours>"${discover}}. Never claim evidence you did not observe.`;
 }
 function phaseNotes(phase:HarnessPhase,access?:string){return [access,completionFormat(phase)].filter(Boolean).join('\n\n');}
+/** How a remote 4R / Judgment Day lens reports back: the envelope assessMeshReview accepts. */
+function reviewCompletionFormat(agentId:string,candidateSha:string){
+  return `This completion format overrides any output format above (including "rows" or "review_result" shapes). Complete this review with exactly one JSON object and nothing else: {"agentId": "${agentId}", "candidateSha": "${candidateSha}", "packetDigest": "<work.specialist.packetDigest from your claim>", "subagentRunId": "<a unique id for this review run of yours>", "findings": [{"id": "<stable id>", "location": "<path:line>", "severity": "BLOCKER | CRITICAL | WARNING | SUGGESTION", "claim": "<concrete user-impact claim>", "proofRefs": ["<changed-hunk or file:line you read>"]}], "evidence": ["<what you read or ran>"]}. Use an empty findings array when you find nothing. Never claim evidence you did not observe.`;
+}
 type PhaseResult={summary:string;evidence:string[];runId?:string;candidateSha?:string;discoveredPaths?:string[]};
 const MAX_RESULT_TEXT=100_000;
-/** Top-level balanced {...} spans of a text, string-aware. An unclosed '{' or '"' in prose does not hide what follows:
- * the scan restarts after it (a bounded number of times). */
-function objectSpans(text:string){
-  const out:string[]=[];
-  let from=0;
-  for(let restarts=0;restarts<32&&from<text.length;restarts++){
-    let depth=0,start=-1,inString=false,escaped=false,i=from;
-    for(;i<text.length;i++){
-      const c=text[i];
-      if(inString){if(escaped)escaped=false;else if(c==='\\')escaped=true;else if(c==='"')inString=false;continue;}
-      if(c==='"'&&depth>0){inString=true;continue;}
-      if(c==='{'){if(depth===0)start=i;depth++;}
-      else if(c==='}'&&depth>0){depth--;if(depth===0)out.push(text.slice(start,i+1));}
-    }
-    if(depth===0)break;
-    from=start+1;
-  }
-  return out;
-}
-/** Bodies of fenced code blocks, found line by line (linear time). */
-function fencedBlocks(text:string){
-  const out:string[]=[];const lines=text.split('\n');let open=-1;
-  for(let i=0;i<lines.length;i++){
-    const line=lines[i]!.trim();
-    if(open<0){if(/^```[a-zA-Z0-9_-]*$/.test(line))open=i;}
-    else if(line==='```'){out.push(lines.slice(open+1,i).join('\n').trim());open=-1;}
-  }
-  return out;
-}
 /** A copied completion-format placeholder such as "<what you did>". */
 const placeholder=(x:unknown)=>typeof x==='string'&&/^<[^<>]*>$/.test(x.trim());
 /** null or "" means "not given". */
@@ -142,7 +118,7 @@ function given<T>(v:T):T|undefined{return v===null||v===''?undefined:v;}
  * completion-format template (a field that is just an <angle-bracket placeholder>) is ignored. */
 export function structuredResult(text:string|null|undefined):PhaseResult|null{
   if(!text||text.length>MAX_RESULT_TEXT)return null;
-  const candidates=[text.trim(),...fencedBlocks(text),...objectSpans(text)];
+  const candidates=jsonCandidates(text);
   const valid=new Map<string,PhaseResult>();
   for(const c of candidates){
     let v:any;
@@ -572,7 +548,7 @@ export class AutomaticHarness {
         if(remoteReady){
           const remote=await this.mesh.startReview(leaderHost(),{missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:review:${record.candidateSha}:${record.reviewAttempt??0}`,
             materialFor:this.hooks.materialFor?host=>this.hooks.materialFor!(record,host):undefined,
-            notesFor:host=>this.hooks.accessFor?.(record,host,'REVIEW')});
+            notesFor:(host,agentId)=>[this.hooks.accessFor?.(record,host,'REVIEW'),reviewCompletionFormat(agentId,record.candidateSha!)].filter(Boolean).join('\n\n')});
           await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(!r.reviewId){r.reviewId=remote.id;r.reviewTransport='REMOTE';r.revision++;}});
           for(const workId of remote.workIds){const t=await this.mesh.workTarget(leaderHost(),workId).catch(()=>null);if(t)await this.dispatched(record,workId,'REVIEW',t.target);}
         }else{

@@ -733,7 +733,7 @@ export class MeshEngine {
    * one durable ledger commit for all review delegations. Native Pi's provider
    * judgment authority is NOT emulated; a controller must evaluate results.
    */
-  async startReview(caller:Host,input:{missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;materialFor?:(host:Host)=>Promise<string|undefined>;notesFor?:(host:Host)=>string|undefined}) {
+  async startReview(caller:Host,input:{missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;materialFor?:(host:Host)=>Promise<string|undefined>;notesFor?:(host:Host,agentId:string)=>string|undefined}) {
     check(caller===leaderHost(),`Only ${leaderLabel()} can initiate reviews`);
     check(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(input.candidateSha),'Invalid frozen candidate SHA');
     check(input.missionId.trim().length>0 && input.missionId.length<=120,'Invalid mission');
@@ -748,7 +748,7 @@ export class MeshEngine {
     const packets=await Promise.all(ids.map((id,i)=>{
       const binding=configured[i]!;
       return (async()=>specialistPacket({agentId:id,skillIds:binding.skillIds,objective:input.objective,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,candidateSha:input.candidateSha,
-        material:input.materialFor?await input.materialFor(binding.host):undefined,leaderNotes:input.notesFor?.(binding.host)}))();
+        material:input.materialFor?await input.materialFor(binding.host):undefined,leaderNotes:input.notesFor?.(binding.host,id)}))();
     }));
     return this.write(d=>{
       check(!d.profiles.some(p=>p.host===leaderHost()&&p.coordinationMode==='GPT_A_ONLY'),
