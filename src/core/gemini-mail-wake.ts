@@ -28,16 +28,16 @@ type Ticket={workId:string;attemptId:string;leaseGeneration:number;tokenHash:str
   envelopeDigest?:string;validatedAt?:string|null;
   expiresAt:string;createdAt:string;sentAt:string|null;usedAt:string|null;attempt:number};
 type Backoff={workId:string;attempts:number;nextAt:number};
-/** Written before claiming, removed with the ticket insert: a crash in between never strands the work. */
-type Intent={workId:string;at:number};
-type MailData={version:1;tickets:Ticket[];backoff:Backoff[];intents?:Intent[]};
-const seed:MailData={version:1,tickets:[],backoff:[],intents:[]};
+type MailData={version:1;tickets:Ticket[];backoff:Backoff[]};
+const seed:MailData={version:1,tickets:[],backoff:[]};
+const REFUSAL_LIMIT=8;
 
 export type MailClaim={id:string;state:string;attemptId:string|null;leaseGeneration:number;leaseUntil:string|null;
   instruction:string;role:string;missionId:string};
 export type MailMesh={
   pending(host:'gemini'):Promise<Array<{workId:string;role:string;createdAt:string}>>;
-  claim(host:'gemini',workId:string,leaseSeconds:number,requireQueued:boolean,requireFree:boolean):Promise<MailClaim>;
+  claim(host:'gemini',workId:string,leaseSeconds:number,requireQueued:boolean,requireFree:boolean,transport:boolean):Promise<MailClaim>;
+  requeueExpiredReadOnly(host:'gemini'):Promise<string[]>;
   complete(host:'gemini',id:string,attemptId:string,generation:number,result:string,success:boolean):Promise<unknown>;
   releaseUnsentClaim(host:'gemini',id:string,attemptId:string,generation:number):Promise<unknown>;
 };
@@ -97,31 +97,27 @@ export class GeminiMailWake{
     return sameHash(sha(header.trim()),this.relayKeyHash);
   }
 
-  /** Mail every due Gemini work once (or retry an expired, unanswered one). Never runs concurrently. */
+  /** Mail every due Gemini work once. Never runs concurrently.
+   *
+   * Recovery does not depend on this module's own bookkeeping: first, the mesh returns to the queue every
+   * read-only Gemini work whose lease ran out, whatever the reason (mail never answered, a crash between
+   * claim and send, a failed release, a chat that vanished). Then queued work is mailed, or left for an
+   * open Gemini chat that is listening. A work therefore never stays RUNNING past its lease. */
   async dispatchDue(now=Date.now()):Promise<{sent:string[];failed:string[]}>{
     const out={sent:[] as string[],failed:[] as string[]};
     if(!this.configured||this.running)return out;
     this.running=true;
     try{
+      await this.mesh.requeueExpiredReadOnly('gemini').catch(()=>[]);
+      if(this.isListening())return out; // an open Gemini chat takes queued work directly
+      const pending=(await this.mesh.pending('gemini')).filter(w=>w.role!=='implementer');
       const data=this.db!.read('gemini_mail',seed);
-      // An open Gemini chat that is already waiting takes the work directly; mail only wakes an idle Gemini.
-      // Mailed work whose lease expired goes back to the queue so that chat can pick it up.
-      if(this.isListening()){
-        for(const t of data.tickets.filter(t=>!t.usedAt&&Date.parse(t.expiresAt)<=now))
-          await this.requeueExpired(t.workId).catch(()=>{});
-        return out;
-      }
       const blocked=(id:string)=>(data.backoff??[]).some(b=>b.workId===id&&b.nextAt>now);
-      const queued=(await this.mesh.pending('gemini'))
-        .filter(w=>w.role!=='implementer'&&now-Date.parse(w.createdAt)>=this.minAgeMs&&!blocked(w.workId))
-        .map(w=>w.workId);
-      // Unanswered tickets whose lease expired: re-mail with a fresh lease, up to MAX_ATTEMPTS. This includes a
-      // ticket whose send never finished (process stopped mid-send: sentAt null) so its work is never stranded.
-      const retry=data.tickets.filter(t=>!t.usedAt&&Date.parse(t.expiresAt)<=now&&!blocked(t.workId)&&
-        !data.tickets.some(n=>n.workId===t.workId&&n.attempt>t.attempt)).map(t=>t.workId);
-      // Claimed but the process stopped before its ticket was saved: retry once that claim's lease is over.
-      const stranded=(data.intents??[]).filter(i=>now-i.at>=LEASE_SECONDS*1000&&!blocked(i.workId)).map(i=>i.workId);
-      for(const workId of [...new Set([...queued,...retry,...stranded])].slice(0,5)){
+      // Forget backoff of works that are no longer waiting, so the list cannot grow forever.
+      if((data.backoff??[]).some(b=>!pending.some(w=>w.workId===b.workId)))
+        this.db!.mutate('gemini_mail',seed,d=>{d.backoff=(d.backoff??[]).filter(b=>pending.some(w=>w.workId===b.workId));});
+      const due=pending.filter(w=>now-Date.parse(w.createdAt)>=this.minAgeMs&&!blocked(w.workId)).map(w=>w.workId);
+      for(const workId of due.slice(0,5)){
         const sent=await this.mailOne(workId,now).catch(()=>false);
         (sent?out.sent:out.failed).push(workId);
       }
@@ -129,38 +125,16 @@ export class GeminiMailWake{
     }finally{this.running=false;}
   }
 
-  private async requeueExpired(workId:string){
-    try{
-      const w=await this.mesh.claim('gemini',workId,30,false,true);
-      if(w.state==='RUNNING'&&w.attemptId)await this.mesh.releaseUnsentClaim('gemini',workId,w.attemptId,w.leaseGeneration);
-    }finally{
-      this.db!.mutate('gemini_mail',seed,d=>{for(const t of d.tickets)if(t.workId===workId&&!t.usedAt)t.usedAt=iso();});
-    }
-  }
-
   private async mailOne(workId:string,now:number):Promise<boolean>{
-    const before=this.db!.read('gemini_mail',seed);
-    const previous=before.tickets.filter(t=>t.workId===workId);
-    const stranded=(before.intents??[]).some(i=>i.workId===workId);
-    const attempt=previous.length+1;
-    const dropIntent=(d:MailData)=>{d.intents=(d.intents??[]).filter(i=>i.workId!==workId);};
-    this.db!.mutate('gemini_mail',seed,d=>{dropIntent(d);d.intents!.push({workId,at:now});d.intents=d.intents!.slice(-1000);});
+    const attempt=this.db!.read('gemini_mail',seed).tickets.filter(t=>t.workId===workId).length+1;
     let work:MailClaim;
-    // requireFree: a live claim (e.g. an open Gemini chat that picked the work up) is never adopted.
-    try{work=await this.mesh.claim('gemini',workId,LEASE_SECONDS,previous.length===0&&!stranded,true);}
-    catch{
-      // Completed, taken by a live Gemini chat, or no longer claimable: stop retrying its old tickets.
-      this.db!.mutate('gemini_mail',seed,d=>{dropIntent(d);for(const t of d.tickets)if(t.workId===workId&&!t.usedAt)t.usedAt=iso();});
-      return false;
-    }
-    if(work.state!=='RUNNING'||!work.attemptId||!work.leaseUntil||work.role==='implementer'){
-      this.db!.mutate('gemini_mail',seed,dropIntent);
-      return false;
-    }
+    // Only QUEUED work, never a live claim; a transport claim does not count as Gemini being present.
+    try{work=await this.mesh.claim('gemini',workId,LEASE_SECONDS,true,true,true);}
+    catch{return false;} // taken, finished or a transient error: the queue and lease expiry decide what's next
+    if(work.state!=='RUNNING'||!work.attemptId||!work.leaseUntil||work.role==='implementer')return false;
     if(attempt>MAX_ATTEMPTS){
       await this.mesh.complete('gemini',workId,work.attemptId,work.leaseGeneration,
         `Gemini mail relay: no reply after ${MAX_ATTEMPTS} e-mailed attempts; Gemini did not complete this task.`,false);
-      this.db!.mutate('gemini_mail',seed,dropIntent);
       return false;
     }
     const token=randomBytes(32).toString('base64url');
@@ -170,37 +144,38 @@ export class GeminiMailWake{
     const ticket:Ticket={workId,attemptId:work.attemptId,leaseGeneration:work.leaseGeneration,tokenHash:sha(token),
       instructionDigest:sha(work.instruction),envelopeDigest:sha(canonical(envelope)),validatedAt:null,
       expiresAt:work.leaseUntil,createdAt:iso(now),sentAt:null,usedAt:null,attempt};
-    this.db!.mutate('gemini_mail',seed,d=>{dropIntent(d);d.tickets.push(ticket);d.tickets=d.tickets.slice(-5000);});
+    this.db!.mutate('gemini_mail',seed,d=>{d.tickets.push(ticket);d.tickets=d.tickets.slice(-5000);});
     let status=0;
     try{
       status=await this.sender(this.relayUrl,JSON.stringify({version:GEMINI_MAIL_ENVELOPE_VERSION,
         recipient:this.recipient,envelope}),{'content-type':'application/json','user-agent':'Panter-Gemini-Mail/1',
-        ...(this.relayKey?{'x-panter-relay-key':this.relayKey}:{})});
+        'x-panter-relay-key':this.relayKey});
     }catch{status=0;}
-    // Timeout, network error or 5xx: the e-mail may already have left. Keep the ticket and lease as an
-    // unknown outcome; lease expiry drives any retry, so Gemini never gets two live copies of one task.
-    const definitiveRefusal=status>=400&&status<500;
-    if(!definitiveRefusal&&!(status>=200&&status<300)){
-      this.db!.mutate('gemini_mail',seed,d=>{
-        const t=d.tickets.find(x=>x.workId===workId&&x.attempt===attempt);if(t)t.sentAt=iso();
-      });
+    const markSent=(clearBackoff:boolean)=>this.db!.mutate('gemini_mail',seed,d=>{
+      const t=d.tickets.find(x=>x.workId===workId&&x.attempt===attempt);if(t)t.sentAt=iso();
+      if(clearBackoff)d.backoff=(d.backoff??[]).filter(b=>b.workId!==workId);
+    });
+    if(status>=200&&status<300){markSent(true);return true;}
+    // Timeout, network error or 5xx: the e-mail may already have left. Keep ticket and lease as an unknown
+    // outcome; when the lease ends the work is requeued and mailed again with a new token.
+    if(!(status>=400&&status<500)){markSent(false);return false;}
+    // The relay refused before sending.
+    if(status===401||status===403)console.warn(`Gemini mail relay refused the send (HTTP ${status}): check RELAY_SECRET and the relay bindings`);
+    const refusals=((data:MailData)=>(data.backoff??[]).find(b=>b.workId===workId)?.attempts??0)(this.db!.read('gemini_mail',seed))+1;
+    if(refusals>=REFUSAL_LIMIT){
+      await this.mesh.complete('gemini',workId,work.attemptId,work.leaseGeneration,
+        `Gemini mail relay refused this task ${refusals} times (last HTTP ${status}); it was not delivered to Gemini.`,false).catch(()=>{});
+      this.db!.mutate('gemini_mail',seed,d=>{d.backoff=(d.backoff??[]).filter(b=>b.workId!==workId);});
       return false;
     }
-    if(status>=200&&status<300){
-      this.db!.mutate('gemini_mail',seed,d=>{
-        const t=d.tickets.find(x=>x.workId===workId&&x.attempt===attempt);if(t)t.sentAt=iso();
-        d.backoff=(d.backoff??[]).filter(b=>b.workId!==workId);
-      });
-      return true;
-    }
-    // The relay refused before sending: return the work to the queue and back off before retrying.
-    if(status===401||status===403)console.warn(`Gemini mail relay refused the send (HTTP ${status}): check RELAY_SECRET and the relay bindings`);
-    await this.mesh.releaseUnsentClaim('gemini',workId,work.attemptId,work.leaseGeneration).catch(()=>{});
+    // Back to the queue with backoff. Only a confirmed release forgets the ticket; otherwise it still counts and
+    // the lease expiry requeues the work.
+    const released=await this.mesh.releaseUnsentClaim('gemini',workId,work.attemptId,work.leaseGeneration).then(()=>true,()=>false);
     this.db!.mutate('gemini_mail',seed,d=>{
-      d.tickets=d.tickets.filter(x=>!(x.workId===workId&&x.attempt===attempt));
+      if(released)d.tickets=d.tickets.filter(x=>!(x.workId===workId&&x.attempt===attempt));
       d.backoff??=[];
       const b=d.backoff.find(x=>x.workId===workId)??(d.backoff.push({workId,attempts:0,nextAt:0}),d.backoff.at(-1)!);
-      b.attempts++;b.nextAt=Date.now()+Math.min(30*60_000,60_000*2**(b.attempts-1));
+      b.attempts=refusals;b.nextAt=Date.now()+Math.min(30*60_000,60_000*2**(refusals-1));
     });
     return false;
   }

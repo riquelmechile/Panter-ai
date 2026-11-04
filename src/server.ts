@@ -924,9 +924,12 @@ function mailRelayRate(client: string): boolean {
 }
 let mailRelayKeyWarnAt = 0;
 async function handleMailRelay(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let bodyRead = false;
   const reply = (status: number, body: unknown) => {
     if (res.headersSent) return;
-    res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body));
+    // Refused before reading the body: close, so Node does not keep draining an unwanted upload.
+    res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...(bodyRead ? {} : { connection: 'close' }) });
+    res.end(JSON.stringify(body));
   };
   const host = hostname(req.headers.host);
   if (!host || !(allowedHosts.length ? allowedHosts.includes(host) : ['localhost','127.0.0.1','::1'].includes(host))) { reply(403, { ok: false }); return; }
@@ -946,6 +949,7 @@ async function handleMailRelay(req: IncomingMessage, res: ServerResponse): Promi
   try {
     for await (const chunk of req) { size += (chunk as Buffer).length; if (size > 450_000) { reply(413, { ok: false }); return; } chunks.push(chunk as Buffer); }
   } catch { reply(400, { ok: false, error: 'aborted' }); return; } // client hung up mid-body
+  bodyRead = true;
   let payload: unknown;
   try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { reply(400, { ok: false, error: 'invalid_json' }); return; }
   try {

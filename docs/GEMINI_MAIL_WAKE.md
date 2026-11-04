@@ -16,7 +16,10 @@ Reglas:
 - Las dos rutas públicas tienen límite de tamaño (~300 KB de correo) y la lectura del correo es lineal (también el HTML).
 - `PANTER_GEMINI_MAIL_RELAY_SECRET` es **obligatoria**: Panter y el Worker comparten esa clave en la cabecera `x-panter-relay-key`. El Worker la exige a quien le pide enviar y la manda a Panter; Panter rechaza (401) sin leer el cuerpo a quien no la tenga y registra una advertencia. Las peticiones sin clave pasan antes por un límite anónimo de 30/min por cliente (IPv6 agrupado por /64), así que tráfico basura no puede agotar el cupo del relay real. Si el cliente corta la conexión a mitad del cuerpo, Panter responde 400 y sigue vivo.
 - Detrás de un proxy o túnel, sin `PANTER_TRUSTED_PROXY_CIDRS` todos los clientes anónimos comparten la IP del proxy; la clave compartida hace que eso no afecte al relay. Si usas `docs/nginx-panter.conf.example`, `/a2a/gemini/` sale por `location /`.
-- Si el proceso se cae a mitad de un envío (o entre reclamar la tarea y guardar su ticket), al vencer el lease se trata igual que un intento sin respuesta y se reintenta.
+- La recuperación no depende de la contabilidad del relay: en cada pasada Panter devuelve a la cola toda tarea de solo lectura de Gemini cuyo lease venció (correo sin respuesta, caída a mitad del envío, error transitorio, chat que desapareció). Ninguna tarea queda RUNNING más allá de su lease.
+- Reclamar una tarea para mandarla por correo no cuenta como que Gemini esté presente.
+- Si el relay rechaza la misma tarea 8 veces seguidas, se cierra como fallida en vez de reintentar para siempre.
+- Si Panter se está reiniciando, el Worker reintenta entregar la respuesta de Gemini unos segundos antes de rebotarla.
 - Si un chat de Gemini está escuchando y una tarea enviada por correo venció, vuelve a la cola para que la tome ese chat.
 - Si Gemini no responde antes de que venza el lease, Panter reenvía con un lease y token nuevos (máximo 3 intentos) y después cierra la tarea como fallida.
 - Aunque alguien obtuviera la clave del Worker, no puede enviar nada que Panter no reconozca ni completar trabajo sin el token del lease vigente.

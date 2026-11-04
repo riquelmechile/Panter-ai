@@ -104,7 +104,7 @@ function expire(dir: string, workId: string) {
   const db = SqliteLedger.open(dir);
   const past = new Date(Date.now() - 1000).toISOString();
   db.mutate('mesh', {} as any, (d: any) => { const w = d.works.find((x: any) => x.id === workId); w.leaseUntil = past; });
-  db.mutate('gemini_mail', {} as any, (d: any) => { for (const t of d.tickets) if (t.workId === workId) t.expiresAt = past; });
+  db.mutate('gemini_mail', { version: 1, tickets: [], backoff: [] } as any, (d: any) => { for (const t of d.tickets) if (t.workId === workId) t.expiresAt = past; });
   db.close();
 }
 
@@ -211,19 +211,60 @@ test('a ticket stranded mid-send by a restart is retried once its lease expires'
   assert.equal(sent[1].payload.envelope.attempt, 2);
 }));
 
-test('a claim whose ticket was never saved (crash in between) is retried after its lease', () => fixture(async ({ dir, mesh, sent, wake }) => {
+test('a claim whose ticket was never saved (crash in between) is requeued and mailed after its lease', () => fixture(async ({ dir, mesh, sent, wake }) => {
   const work = await delegate(mesh, 'i1');
-  // State left by a crash: the intent and the claim are saved, the ticket is not.
-  const db = SqliteLedger.open(dir);
-  db.mutate('gemini_mail', { version: 1, tickets: [], backoff: [] } as any, (d: any) => { d.intents = [{ workId: work.id, at: Date.now() }]; });
-  db.close();
-  await mesh.claim('gemini', work.id, 3600);
-  assert.deepEqual((await wake.dispatchDue()).sent, [], 'not while the stranded lease may still be live');
+  await mesh.claim('gemini', work.id, 3600, true, true, true); // claimed, then the process stopped
+  assert.deepEqual((await wake.dispatchDue()).sent, [], 'not while that lease may still be live');
   expire(dir, work.id);
-  assert.deepEqual((await wake.dispatchDue(Date.now() + 3_601_000)).sent, [work.id]);
+  assert.deepEqual((await wake.dispatchDue()).sent, [work.id]);
   assert.equal(sent.length, 1);
   assert.equal(sent[0].payload.envelope.work_id, work.id);
-  const check = SqliteLedger.open(dir);
-  assert.deepEqual(check.read('gemini_mail', {} as any).intents, [], 'a saved ticket clears its intent');
-  check.close();
+}));
+
+test('a transient claim error never strands the work; the next pass mails it', () => fixture(async ({ dir, mesh, sent }) => {
+  const work = await delegate(mesh, 't1');
+  let fail = true;
+  const flaky = Object.create(mesh, { claim: { value: async (...a: Parameters<MeshEngine['claim']>) => {
+    if (fail) { fail = false; throw new Error('SQLITE_BUSY'); } return mesh.claim(...a); } } });
+  const wake = new GeminiMailWake(dir, flaky, () => false, env, async (_u, b) => { sent.push({ payload: JSON.parse(b) }); return 202; }, 0);
+  assert.deepEqual((await wake.dispatchDue()).failed, [work.id]);
+  assert.equal((await mesh.inbox('claude')).works.find(w => w.id === work.id)?.state, 'QUEUED');
+  assert.deepEqual((await wake.dispatchDue()).sent, [work.id]);
+}));
+
+test('mailing a task does not mark Gemini as present', () => fixture(async ({ dir, mesh, sent, wake }) => {
+  await delegate(mesh, 'p1');
+  await wake.dispatchDue();
+  assert.equal(sent.length, 1);
+  const db = SqliteLedger.open(dir);
+  const presence = (db.read('mesh', {} as any) as any).workforce?.gemini;
+  db.close();
+  assert.equal(presence?.lastClaimAt, undefined, 'a transport claim is not Gemini showing up');
+}));
+
+test('a relay that keeps refusing ends the task as failed instead of retrying forever', () => fixture(async ({ dir, mesh, status, wake }) => {
+  const work = await delegate(mesh, 'r1');
+  status.code = 400;
+  for (let i = 0; i < 8; i++) {
+    const db = SqliteLedger.open(dir);
+    db.mutate('gemini_mail', { version: 1, tickets: [], backoff: [] } as any, (d: any) => { for (const b of d.backoff ?? []) b.nextAt = 0; });
+    db.close();
+    await wake.dispatchDue();
+  }
+  assert.equal((await mesh.inbox('claude')).works.find(w => w.id === work.id)?.state, 'FAILED');
+}));
+
+test('a failed release after a refusal keeps the lease tracked; expiry requeues the work', () => fixture(async ({ dir, mesh, sent, status }) => {
+  const work = await delegate(mesh, 'f1');
+  const noRelease = Object.create(mesh, { releaseUnsentClaim: { value: async () => { throw new Error('io'); } } });
+  const wake = new GeminiMailWake(dir, noRelease, () => false, env, async (_u, b) => { sent.push({ payload: JSON.parse(b) }); return status.code; }, 0);
+  status.code = 403;
+  await wake.dispatchDue();
+  assert.equal((await mesh.inbox('claude')).works.find(w => w.id === work.id)?.state, 'RUNNING');
+  expire(dir, work.id);
+  const db = SqliteLedger.open(dir);
+  db.mutate('gemini_mail', {} as any, (d: any) => { for (const b of d.backoff ?? []) b.nextAt = 0; });
+  db.close();
+  status.code = 202;
+  assert.deepEqual((await wake.dispatchDue()).sent, [work.id]);
 }));

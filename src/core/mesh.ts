@@ -785,7 +785,7 @@ export class MeshEngine {
 
   pending(caller: Host) { return this.read(d => d.works.filter(w => w.target === caller && w.state === 'QUEUED').map(w => ({ workId: w.id, missionId: w.missionId, role: w.role, createdAt: w.createdAt }))); }
   /** requireFree: never hand back another attempt's live lease (a transport retry must own a new claim). */
-  async claim(caller: Host, workId: string, leaseSeconds = 300, requireQueued = false, requireFree = false) {
+  async claim(caller: Host, workId: string, leaseSeconds = 300, requireQueued = false, requireFree = false, transport = false) {
     check(caller!==leaderHost(),'Only workers may claim delegated work');
     check(leaseSeconds >= 30 && leaseSeconds <= 3600, 'Invalid lease');
     const offered=await this.read(d=>d.works.find(w=>w.id===workId&&w.target===caller)??null);
@@ -805,7 +805,8 @@ export class MeshEngine {
         return { ...w, instruction: '', result: null };
       }
       w.state = 'RUNNING'; w.leaseGeneration++; w.attemptId = randomUUID();
-      if (caller !== leaderHost()) {
+      // A transport claim (e.g. Panter mailing the task) is not evidence that the worker itself showed up.
+      if (caller !== leaderHost() && !transport) {
         const presence = (d.workforce ??= {})[caller as WorkerHost] ??= {};
         presence.lastClaimAt = iso();
         const grokWake=(d.grokWakeAttempts??[]).find(a=>a.workId===w.id);
@@ -860,6 +861,20 @@ export class MeshEngine {
   }
   /** A transport that claimed read-only work but could not deliver it (e.g. the Gemini mail relay failed
    *  before any e-mail left) returns it to the queue. Fenced to the exact attempt; never for writers. */
+  /** Read-only work of one worker whose lease ran out goes back to the queue (fencing out the old attempt).
+   * Writers are never touched: their expiry is OUTCOME_UNKNOWN territory. */
+  async requeueExpiredReadOnly(host: Host) {
+    check(host !== leaderHost(), 'Leader work is not requeued');
+    const due = (d: MeshData) => d.works.filter(w => w.target === host && w.state === 'RUNNING' && w.role !== 'implementer' &&
+      Date.parse(w.leaseUntil ?? '') <= Date.now());
+    if ((await this.read(d => due(d).length)) === 0) return [];
+    return this.write(d => {
+      const ids: string[] = [];
+      for (const w of due(d)) { w.state = 'QUEUED'; w.attemptId = null; w.leaseUntil = null; ids.push(w.id); }
+      if (ids.length) { this.notify(d, host); this.notify(d, leaderHost()); }
+      return ids;
+    });
+  }
   async releaseUnsentClaim(caller: Host, id: string, attemptId: string, generation: number) {
     check(caller!==leaderHost(),'Only workers may release delegated work');
     return this.write(d => {

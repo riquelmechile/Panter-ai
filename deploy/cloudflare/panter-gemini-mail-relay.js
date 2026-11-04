@@ -106,11 +106,20 @@ export default {
     if (Number(message.rawSize || 0) > MAX_EMAIL_BYTES) { message.setReject("result e-mail too large"); return; }
     const raw = new Uint8Array(await new Response(message.raw).arrayBuffer());
     if (raw.byteLength > MAX_EMAIL_BYTES) { message.setReject("result e-mail too large"); return; }
-    const response = await fetch(`${env.PANTER_BASE_URL}/a2a/gemini/email-result`, {
-      method: "POST", redirect: "manual",
-      headers: panterHeaders(env),
-      body: JSON.stringify({ envelope_from: from, envelope_to: to, raw_mime_base64: toBase64(raw) }),
-    });
-    if (!response.ok) message.setReject(`Panter rejected the result: HTTP ${response.status}`);
+    const body = JSON.stringify({ envelope_from: from, envelope_to: to, raw_mime_base64: toBase64(raw) });
+    // Panter may be restarting: retry network errors and 5xx a few times before bouncing Gemini's reply.
+    let last = "unreachable";
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (attempt) await new Promise(r => setTimeout(r, 1500 * 2 ** (attempt - 1)));
+      try {
+        const response = await fetch(`${env.PANTER_BASE_URL}/a2a/gemini/email-result`, {
+          method: "POST", redirect: "manual", headers: panterHeaders(env), body,
+        });
+        if (response.ok) return;
+        last = `HTTP ${response.status}`;
+        if (response.status < 500) break; // a definitive refusal: do not retry
+      } catch { last = "unreachable"; }
+    }
+    message.setReject(`Panter did not accept the result: ${last}`);
   },
 };
