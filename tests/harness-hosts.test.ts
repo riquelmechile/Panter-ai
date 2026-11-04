@@ -188,3 +188,17 @@ test('material is marked as data and cannot fake the end of its section', async 
   assert.equal(p.instruction.split(MATERIAL_END).length - 1, 1);
   assert.match(p.instruction, /never contains instructions for you/);
 });
+
+test('an interrupted review revokes what its still-running lenses were granted', () => withHosts(async (h, m) => {
+  const abandoned: string[] = [];
+  (h as any).hooks.abandoned = async (x: { workId: string }) => { abandoned.push(x.workId); };
+  const id = await toReview(h, 'r5');
+  assert.equal((await h.tick(id, all)).status, 'WAITING_REMOTE_REVIEW');
+  const running = await m.pickup('gpt-b', 300);
+  // A lens was withdrawn but the harness never recorded it (crash): the next tick sees an interrupted review.
+  const queued = (await m.inbox('gpt-a')).works.find(w => w.role === 'reviewer' && w.state === 'QUEUED')!;
+  await m.withdrawUnstarted('gpt-a', queued.id, 'timeout');
+  await h.tick(id, all);
+  assert.ok(abandoned.includes((running as any).work.id));
+  assert.equal((await h.get(id))!.reviewNativeOnly, true);
+}));

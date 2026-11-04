@@ -551,6 +551,8 @@ export class AutomaticHarness {
         // Interrupted by a leader switch: close its queued lenses, drop the session and start a fresh
         // attempt (native until rebound).
         await this.mesh.abortInterruptedReview(leaderHost(),now.reviewId);
+        // Lenses still running are never read again: revoke what they were granted.
+        for(const w of review.work)if(w.state==='RUNNING')try{await this.hooks.abandoned?.({workId:w.workId,host:w.host});}catch{/* best effort */}
         // A lens withdrawn for a missed pickup means its host did not show up: the retry runs native.
         const pickupMissed=review.work.some(w=>w.withdrawn);
         await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(r.reviewId===now.reviewId){r.reviewId=null;r.reviewTransport=null;r.reviewAttempt=(r.reviewAttempt??0)+1;

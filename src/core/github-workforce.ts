@@ -17,7 +17,7 @@ import {SqliteLedger} from './sqlite-ledger.js';
 export const GITHUB_WRITE_OPS=['commit','pr','comment','issue'] as const;
 export type GitHubWriteOp=typeof GITHUB_WRITE_OPS[number];
 export type GitHubGrant={workId:string;host:string;repository:string;ops:GitHubWriteOp[];branch:string|null;
-  base:string|null;numbers:number[];paths?:string[];own?:number[];branchCreated:boolean;createdBranch?:{repository:string;branch:string;lastSha?:string};createdAt:string;revokedAt:string|null;writes:number;reads:number};
+  base:string|null;numbers:number[];paths?:string[];auto?:boolean;own?:number[];branchCreated:boolean;createdBranch?:{repository:string;branch:string;lastSha?:string};createdAt:string;revokedAt:string|null;writes:number;reads:number};
 type Audit={at:string;workId:string;host:string;repository:string;op:string;ref:string;outcome:string};
 type Data={version:1;grants:GitHubGrant[];audit:Audit[]};
 const seed:Data={version:1,grants:[],audit:[]};
@@ -29,7 +29,8 @@ export type WorkforceMesh={
 };
 export type FileChange={path:string;content?:string;delete?:boolean};
 export type GrantInput={repository:string;ops:GitHubWriteOp[];branch?:string;base?:string;numbers?:number[];
-  /** When set, commits may only touch these files or folders (the run's approved edit surfaces). */paths?:string[]};
+  /** When set, commits may only touch these files or folders (the run's approved edit surfaces). */paths?:string[];
+  /** Issued by the harness on its own; never overrides a grant the leader set by hand. */auto?:boolean};
 export class GitHubWorkforceError extends Error{}
 
 const API='https://api.github.com';
@@ -189,17 +190,22 @@ export class GitHubWorkforce{
     this.db!.mutate('github_workforce',seed,d=>{
       const existing=d.grants.find(x=>x.workId===work.id);
       check(!existing?.revokedAt,'This work\'s GitHub grant was revoked; delegate a new work');
+      // A grant the leader set by hand is never widened back by the harness's automatic re-issue.
+      if(existing&&input.auto===true&&!existing.auto){out=existing;return;}
+      // A path limit only narrows: a later grant without paths keeps it, and new paths must fit inside it.
+      if(existing?.paths&&paths)check(paths.every(p=>existing.paths!.some(q=>p===q||p.startsWith(q+'/'))),'Allowed paths can only narrow');
+      const effPaths=paths??existing?.paths;
       // An identical replay (e.g. an idempotent delegate retry) returns the grant untouched, even after completion.
       if(existing&&existing.repository===input.repository&&JSON.stringify(existing.ops)===JSON.stringify(ops)&&
         existing.branch===branch&&existing.base===base&&JSON.stringify(existing.numbers)===JSON.stringify(numbers)&&
-        JSON.stringify(existing.paths??null)===JSON.stringify(paths??null)){out=existing;return;}
+        JSON.stringify(existing.paths??null)===JSON.stringify(effPaths??null)&&Boolean(existing.auto)===(input.auto===true)){out=existing;return;}
       check(!TERMINAL.has(work.state),'Work is finished');
       check(!existing||existing.repository===input.repository,'A grant cannot move to another repository; delegate a new work');
       check(!existing?.createdBranch||existing.branch===branch,'The working branch cannot change after it was created');
       // One work per branch name in a repository (case-insensitive): two grants never share a working branch.
       if(branch)check(!d.grants.some(x=>x.workId!==work.id&&x.repository.toLowerCase()===input.repository.toLowerCase()&&
         (x.branch??'').toLowerCase()===branch.toLowerCase()),'Another work already uses that branch in this repository');
-      out={workId:work.id,host:work.target,repository:input.repository,ops,branch,base,numbers,...(paths?{paths}:{}),own:existing?.own??[],
+      out={workId:work.id,host:work.target,repository:input.repository,ops,branch,base,numbers,...(effPaths?{paths:effPaths}:{}),...(input.auto===true?{auto:true}:{}),own:existing?.own??[],
         branchCreated:existing?.branchCreated??false,...(existing?.createdBranch?{createdBranch:existing.createdBranch}:{}),
         createdAt:iso(),revokedAt:null,writes:existing?.writes??0,reads:existing?.reads??0};
       const i=d.grants.findIndex(x=>x.workId===out.workId);
@@ -361,6 +367,7 @@ export class GitHubWorkforce{
     return this.serial(`${g0.repository}#${branch}`,async()=>{
       const g=await this.authorize(caller,claim,'commit');
       check(g.branch===branch&&validRefName(branch)&&branch.startsWith('panter/'),'Grant branch changed');
+      for(const f of files)check(!g.paths||g.paths.some(q=>f.path===q||f.path.startsWith(q.replace(/\/+$/,'')+'/')),`Outside the approved edit surfaces: ${String(f.path).slice(0,100)}`);
       this.reserve(g,'writes');
       try{
         const repo=this.ok(await this.call(g,'GET',''),'repository lookup');

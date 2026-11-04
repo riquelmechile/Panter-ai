@@ -146,7 +146,7 @@ harness.setHostHooks({
     // Commits/PRs also need the run's own operator write approval (IMPLEMENT is never dispatched without it).
     if (phase === 'IMPLEMENT' && run.permission !== 'WRITE_APPROVED') return;
     const comment = (phase === 'VERIFY' || phase === 'REVIEW' || phase === 'JUDGMENT') && run.githubPrNumber ? ['comment' as const] : [];
-    await githubWorkforce.grant(leaderHost(), { workId, repository: run.githubRepository,
+    await githubWorkforce.grant(leaderHost(), { workId, repository: run.githubRepository, auto: true,
       ops: phase === 'IMPLEMENT' ? ['commit', 'pr'] : comment, numbers: comment.length ? [run.githubPrNumber!] : [],
       // The implementer commits only inside the run's approved edit surfaces.
       ...(phase === 'IMPLEMENT' ? { paths: run.paths } : {}),
@@ -411,7 +411,7 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_mesh_profiles',{description:'List configured host profiles.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.profiles()));
   const githubOps = z.array(z.enum(GITHUB_WRITE_OPS)).max(4);
   const githubGrantInput = z.object({repository:bounded(201),ops:githubOps.default([]),branch:bounded(200).optional(),base:bounded(200).optional(),
-    numbers:z.array(z.number().int().positive()).max(20).optional()}).strict();
+    numbers:z.array(z.number().int().positive()).max(20).optional(),paths:z.array(bounded(400)).min(1).max(100).optional()}).strict();
   server.registerTool('panter_mesh_delegate',{description:`${leaderLabel()} creates actor-bound A2A work for one configured host. Optional github attaches a work-scoped GitHub grant (see panter_github_grant).`,inputSchema:z.object({missionId:bounded(120),target:hostEnum,role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160),github:githubGrantInput.optional()})},async x=>execute(async()=>{
     const {github,...input}=x;
     if(github)githubWorkforce.validateGrant(github); // fail before creating the work

@@ -360,3 +360,14 @@ test('candidate material cannot break out of its fence or carry multi-line file 
   assert.match(text, /\n`````diff\n/);
   assert.match(text, /\n`````$/);
 }));
+
+test('a path limit survives later grants, only narrows, and an automatic re-issue never overrides a manual grant', () => fixture(commitRoutes(), async ({ gh, workId, claim }) => {
+  await gh.grant('claude', { workId, repository: 'acme/site', ops: ['commit', 'pr'], paths: ['docs'], auto: true });
+  const manual = await gh.grant('claude', { workId, repository: 'acme/site', ops: ['commit'] });
+  assert.deepEqual(manual.paths, ['docs']);
+  assert.equal(manual.auto, undefined);
+  await assert.rejects(gh.grant('claude', { workId, repository: 'acme/site', ops: ['commit'], paths: ['src'] }), /can only narrow/);
+  const again = await gh.grant('claude', { workId, repository: 'acme/site', ops: ['commit', 'pr'], paths: ['docs'], auto: true });
+  assert.deepEqual(again.ops, ['commit']);
+  await assert.rejects(gh.commit('gpt-a', claim, 'x', [{ path: 'package.json', content: '{}' }]), /Outside the approved edit surfaces/);
+}));
