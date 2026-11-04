@@ -46,3 +46,5 @@ GPT-B:
 Un ledger anterior puede tener `modelRequest` o `effortRequest` con texto libre. Al abrir, Panter los cambia a `host-default` y `max` en perfiles y bindings, así que ese texto nunca llega a las instrucciones de conexión ni a los paquetes congelados. Después de actualizar, revisa esos perfiles y vuelve a configurarlos.
 
 Las instrucciones de conexión se arman en cada request MCP, pero el ledger solo se vuelve a leer cuando cambia su revisión.
+
+`panter_mesh_profile_set` reemplaza el perfil completo: si la llamada no trae `executionRequest`, el que estaba guardado se borra. Agent Studio lo conserva solo; desde MCP hay que mandarlo de nuevo en cada cambio.

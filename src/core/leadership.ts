@@ -50,3 +50,20 @@ export function appEventHosts(): LeaderHost[] { const lead = leaderHost(); retur
 export function isAppEventHost(host: string | null | undefined): host is LeaderHost {
   return !!host && (appEventHosts() as string[]).includes(host);
 }
+
+/** Boot step: hand the former leaders' open native phases to the current leader. Runs on every boot
+ *  while the mesh ledger keeps its marker, and clears it only after every adoption resolved, so a crash
+ *  in between is finished on the next start. Structural types keep this module free of store imports. */
+export async function adoptPendingLeaderPhases(
+  mesh: { readonly pendingPhaseAdoption: string[]; clearPhaseAdoption(done: any[]): Promise<unknown> },
+  agents: { adoptLeaderPhases(from: string, to: string): Promise<number> },
+): Promise<string[]> {
+  const pending = mesh.pendingPhaseAdoption;
+  const lines: string[] = [];
+  for (const from of pending) {
+    const moved = await agents.adoptLeaderPhases(from, leaderHost());
+    lines.push(`Panter leader phases ${from} -> ${leaderHost()}: ${moved} open native phases adopted`);
+  }
+  if (pending.length) await mesh.clearPhaseAdoption(pending);
+  return lines;
+}
