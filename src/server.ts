@@ -142,9 +142,12 @@ harness.setHostHooks({
     if (!githubWorkforce.configured || !run.githubRepository || materialHosts.has(host)) return;
     const comment = (phase === 'VERIFY' || phase === 'REVIEW' || phase === 'JUDGMENT') && run.githubPrNumber ? ['comment' as const] : [];
     await githubWorkforce.grant(leaderHost(), { workId, repository: run.githubRepository,
-      ops: phase === 'IMPLEMENT' ? ['commit', 'pr'] : comment, numbers: comment.length ? [run.githubPrNumber!] : [] });
+      ops: phase === 'IMPLEMENT' ? ['commit', 'pr'] : comment, numbers: comment.length ? [run.githubPrNumber!] : [],
+      // The implementer commits only inside the run's approved edit surfaces.
+      ...(phase === 'IMPLEMENT' ? { paths: run.paths } : {}) });
   },
   pickupTimeoutMs: host => (materialHosts.has(host) ? pickupMailSeconds : pickupSeconds) * 1000,
+  abandoned: async ({ workId }) => { if (githubWorkforce.configured) await githubWorkforce.revoke(leaderHost(), workId); },
 });
 // Legacy/direct A2A writers cannot bypass the operator-issued harness grant.
 mesh.setWriteGuard((missionId,paths)=>harness.authorizeDelegatedWrite(missionId,paths));

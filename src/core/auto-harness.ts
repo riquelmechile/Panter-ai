@@ -51,6 +51,8 @@ export type HarnessTickResult={runId:string;mode:HarnessMode;risk:'LOW'|'HIGH';r
 export type HarnessHostHooks={
   /** Read-only material for hosts that cannot reach the repository (e.g. Gemini by e-mail). */
   materialFor?(run:HarnessRun,host:Host):Promise<string|undefined>;
+  /** Called for remote work whose result will never be read (e.g. a running lens of an abandoned review), to revoke its grants. */
+  abandoned?(input:{workId:string;host:Host}):Promise<void>;
   /** Called after a phase or review lens was dispatched to a host (e.g. to attach a work-scoped GitHub grant). */
   afterDispatch?(input:{run:HarnessRun;workId:string;phase:HarnessPhase;host:Host}):Promise<void>;
   /** How long a host may leave a dispatched phase unstarted before it runs native instead. */
@@ -415,6 +417,8 @@ export class AutomaticHarness {
           return {...next,fallback:{phaseId:phase.id,from:stale.host,reason:'PICKUP_TIMEOUT',afterSeconds:Math.round(stale.limit/1000)}};
         }
       }
+      // Grants are re-issued while waiting (an identical grant is a no-op), so a lost or failed first grant heals.
+      if(work&&(work.state==='QUEUED'||work.state==='RUNNING'))await this.dispatched(record,work.id,phase.phase,work.target);
       return {...common,status:'WAITING_REMOTE_PEER',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
     }
     if(phase.phase==='IMPLEMENT'&&(!record.paths.length||record.permission!=='WRITE_APPROVED'))
@@ -553,16 +557,30 @@ export class AutomaticHarness {
           if(pickupMissed)r.reviewNativeOnly=true;r.revision++;}});
         return this.tick(runId,runtime);
       }
+      if(review.stage==='AWAITING_REPORTS')
+        for(const w of review.work)if(w.state==='QUEUED'||w.state==='RUNNING')await this.dispatched(now,w.workId,'REVIEW',w.host);
       if(review.stage==='AWAITING_REPORTS'&&this.hooks.pickupTimeoutMs){
         const stale=(await Promise.all(review.review.workIds.map(async id=>({id,stale:await this.unstartedTooLong(id)})))).filter(x=>x.stale);
-        if(stale.length){
+        // Only a stale lens that was really withdrawn drops the session: a lens its host claimed in the meantime
+        // keeps the remote review alive (and its result is read).
+        const withdrawn=[];
+        for(const s of stale){
+          const r=await this.mesh.withdrawUnstarted(leaderHost(),s.id,'review lens host did not start in time; review runs native').catch(()=>null);
+          if(r?.withdrawn||r?.state==='ABORTED_NO_EFFECTS')withdrawn.push(s);
+        }
+        if(withdrawn.length){
           // A lens host did not show up in time: drop this remote session and run the whole review native.
-          for(const w of review.work)if(w.state==='QUEUED'||stale.some(s=>s.id===w.workId))
-            await this.mesh.withdrawUnstarted(leaderHost(),w.workId,'review lens host did not start in time; review runs native').catch(()=>null);
+          for(const w of review.work){
+            if(withdrawn.some(s=>s.id===w.workId))continue;
+            const r=w.state==='QUEUED'?await this.mesh.withdrawUnstarted(leaderHost(),w.workId,'review lens host did not start in time; review runs native').catch(()=>null):null;
+            // A lens already running keeps running, but its result is never read: revoke what it was granted.
+            if(!r?.withdrawn&&(w.state==='RUNNING'||w.state==='QUEUED'))
+              try{await this.hooks.abandoned?.({workId:w.workId,host:w.host});}catch{/* best effort */}
+          }
           await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(r.reviewId===now.reviewId){r.reviewId=null;r.reviewTransport=null;
             r.reviewAttempt=(r.reviewAttempt??0)+1;r.reviewNativeOnly=true;r.revision++;}});
           const next=await this.tick(runId,runtime);
-          return {...next,fallback:{phaseId:phase.id,from:[...new Set(stale.map(s=>s.stale!.host))],reason:'REVIEW_PICKUP_TIMEOUT'}};
+          return {...next,fallback:{phaseId:phase.id,from:[...new Set(withdrawn.map(s=>s.stale!.host))],reason:'REVIEW_PICKUP_TIMEOUT'}};
         }
       }
       const evidence=assessMeshReview({kind:review.review.kind,candidateSha:review.review.candidateSha,work:review.work});
