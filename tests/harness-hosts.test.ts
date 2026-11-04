@@ -437,6 +437,9 @@ test('no retry while any lens says something severe: accepted CRITICAL, failed l
     ['bare BLOCKER prose', a => a === 'review-risk' ? 'BLOCKER: migration drops the users table' : lensReport(a)],
     ['bracketed prose', a => a === 'review-risk' ? '[critical] token in logs' : lensReport(a)],
     ['failed lens carrying a CRITICAL', a => critical(a), 'review-risk'],
+    ['plural in prose', a => a === 'review-risk' ? 'Found 2 blockers in auth; cannot sign off.' : lensReport(a)],
+    ['compound key in unbound JSON', a => a === 'review-risk' ? JSON.stringify({ agentId: a, candidateSha: 'b'.repeat(40), criticalCount: 2 }) : lensReport(a)],
+    ['escaped severity in unbound JSON', a => a === 'review-risk' ? '{"agentId":"review-risk","candidateSha":"' + 'b'.repeat(40) + '","findings":[{"severity":"\\u0043RITICAL"}]}' : lensReport(a)],
   ];
   for (const [name, report, failAgent] of cases) await withHosts(async (h, m) => {
     const id = await toReview(h, `sev-${name}`);

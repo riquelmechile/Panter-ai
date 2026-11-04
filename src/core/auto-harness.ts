@@ -10,7 +10,7 @@ import { specialistPacket, GENTLE_AGENTS, type GentleAgentId } from './gentle-ca
 import { hostRequest } from './policy.js';
 import { type Host, type MeshEngine } from './mesh.js';
 import { type NativeSubagentReview } from './native-review-workflow.js';
-import { assessMeshReview, lensEnvelope, type NativeReviewBridge } from './native-review.js';
+import { assessMeshReview, lensEnvelope, unacceptedSevere, type NativeReviewBridge } from './native-review.js';
 import { type GitHubDeliveryGate } from './github-delivery.js';
 import { type PanterRdd } from './panter-rdd.js';
 
@@ -649,6 +649,7 @@ export class AutomaticHarness {
       // any lens reports anything severe — in an accepted report, a failed lens or any text that is not a usable report — is
       // never retried away: that needs the leader.
       if(review.stage==='READY_FOR_CONTROLLER'&&evidence.status==='EVIDENCE_INCOMPLETE'&&
+        !evidence.reasons.some(x=>x.startsWith('Severe finding(s)'))&&
         !review.work.some(w=>mentionsSevere(w.result,w.agentId??'',review.review.candidateSha))){
         const retries=now.reviewEvidenceRetries??0;
         await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(r.reviewId===now.reviewId){r.reviewId=null;r.reviewTransport=null;
@@ -751,10 +752,11 @@ export class AutomaticHarness {
 
 /** Whether a lens result says anything severe. A report accepted for its lens and SHA is judged by its findings (an
  * accepted clean report carries no severe value anywhere); any other text — failed, prose, unbound — counts as severe
- * when the words appear at all, since nothing then tells a finding from a passing mention. */
+ * when the words appear at all, in any spelling, since nothing then tells a finding from a passing mention. */
 function mentionsSevere(result:string|null,agentId:string,candidateSha:string):boolean{
   if(!result)return false;
   const envelope=lensEnvelope(result,agentId,candidateSha);
   if(typeof envelope==='object')return envelope.findings.some(f=>/^(critical|blocker)$/i.test(String(f.severity).trim()));
-  return /\b(critical|blocker)\b/i.test(result);
+  // Any spelling: plurals, compound keys (criticalCount, critical_findings), JSON-escaped text.
+  return /critical|blocker/i.test(result)||!!unacceptedSevere(result);
 }
