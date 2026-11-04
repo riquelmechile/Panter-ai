@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { AutomaticHarness, type HarnessHostHooks } from '../src/core/auto-harness.js';
 import { MeshEngine } from '../src/core/mesh.js';
 import { NativeSubagentReview } from '../src/core/native-review-workflow.js';
+import { PanterRdd } from '../src/core/panter-rdd.js';
+import { GitHubDeliveryGate } from '../src/core/github-delivery.js';
 
 const sha = 'a'.repeat(40);
 const all = { nativeSubagents: true, maxParallelSubagents: 8, toolsAvailable: true,
@@ -30,6 +32,8 @@ async function withHosts<T>(fn: (h: AutomaticHarness, m: MeshEngine, ctx: { disp
       afterDispatch: async (x) => { dispatched.push({ phase: x.phase, host: x.host, workId: x.workId }); },
       pickupTimeoutMs: () => timeout.ms,
       abandoned: async (x) => { abandoned.push(x); },
+      writerHosts: () => [],
+      remoteAttestation: () => true,
     };
     h.setHostHooks(hooks);
     return await fn(h, m, { dispatched, timeout, abandoned });
@@ -548,4 +552,295 @@ test('a crash between ending the orphan and resetting the step still runs the ph
     assert.ok(abandoned.some(a => a.workId === workId), 'its grant is still released');
     assert.equal((await h.tick(s.id, all)).status, 'GPT_A_NATIVE', 'native, not re-sent to gpt-b');
   } finally { Date.now = original; }
+}));
+
+async function toJudgment(h: AutomaticHarness, m: MeshEngine, key: string, judges: ['grok' | 'gemini' | 'gpt-b', 'grok' | 'gemini' | 'gpt-b'] = ['grok', 'gemini']) {
+  await m.bindSpecialist('gpt-a', { agentId: 'jd-judge-a', host: judges[0], modelRequest: 'host-default', effortRequest: 'max', skillIds: ['judgment-day'] } as any, 0);
+  await m.bindSpecialist('gpt-a', { agentId: 'jd-judge-b', host: judges[1], modelRequest: 'host-default', effortRequest: 'max', skillIds: ['judgment-day'] } as any, 0);
+  const s = await h.start({ project: 'app', objective: 'Add a helper', idempotencyKey: key, writesAuthorized: true, changeSurfaces: ['src/util.ts'], judgmentDayRequested: true });
+  const t = await h.tick(s.id, all);
+  await h.report(s.id, t.phaseId!, { summary: 'Done', evidence: ['tests'], candidateSha: sha, runId: 'impl-run-jd' });
+  return s.id;
+}
+
+test('Judgment Day judges on connected, distinct hosts run remote and report back', () => withHosts(async (h, m, { dispatched }) => {
+  const id = await toJudgment(h, m, 'jd1');
+  const t = await h.tick(id, all);
+  assert.equal(t.status, 'WAITING_REMOTE_REVIEW');
+  const run = (await h.get(id))!;
+  assert.equal(run.judgmentTransport, 'REMOTE');
+  assert.ok(run.judgmentId);
+  const judges = [...new Map(dispatched.filter(d => d.phase === 'JUDGMENT').map(d => [d.workId, d])).values()];
+  assert.deepEqual(judges.map(d => d.host).sort(), ['gemini', 'grok']);
+  const grok = JSON.stringify(await m.pickup('grok', 300));
+  assert.match(grok, /\\"agentId\\": \\"jd-judge-a\\"/);
+  assert.match(grok, new RegExp(`\\\\"candidateSha\\\\": \\\\"${sha}\\\\"`));
+  const p: any = JSON.parse(grok);
+  await m.complete('grok', p.work.id, p.work.attemptId, p.work.leaseGeneration, lensReport('jd-judge-a'));
+  const g: any = await m.pickup('gemini', 300);
+  await m.complete('gemini', g.work.id, g.work.attemptId, g.work.leaseGeneration, lensReport('jd-judge-b'));
+  const done: any = await h.tick(id, all);
+  assert.equal(done.status, 'AWAITING_RDD_AUTHORITY', 'without Panter-RDD no report approves');
+  assert.equal(done.review.status, 'EVIDENCE_COLLECTED_UNVERIFIED');
+}));
+
+test('Judgment Day judges bound to one host run native: one host is never two blind judges', () => withHosts(async (h, m, { dispatched }) => {
+  const id = await toJudgment(h, m, 'jd2', ['grok', 'grok']);
+  const t = await h.tick(id, all);
+  assert.equal(t.status, 'READY_FOR_HOST_NATIVE_DISPATCH');
+  assert.equal((await h.get(id))!.judgmentTransport, 'NATIVE');
+  assert.equal(dispatched.filter(d => d.phase === 'JUDGMENT').length, 0);
+}));
+
+test('Judgment Day runs native when a judge host is not connected', () => withHosts(async (h, m) => {
+  const id = await toJudgment(h, m, 'jd3');
+  const t = await h.tick(id, { ...all, peerStates: { ...all.peerStates, gemini: 'UNAVAILABLE' as const } });
+  assert.equal(t.status, 'READY_FOR_HOST_NATIVE_DISPATCH');
+  assert.equal((await h.get(id))!.judgmentTransport, 'NATIVE');
+}));
+
+test('a judge host that does not show up in time sends Judgment Day native, never back remote', () => withHosts(async (h, m, { timeout }) => {
+  const id = await toJudgment(h, m, 'jd4');
+  assert.equal((await h.tick(id, all)).status, 'WAITING_REMOTE_REVIEW');
+  timeout.ms = 0;
+  await new Promise(r => setTimeout(r, 5));
+  const fb: any = await h.tick(id, all);
+  assert.equal(fb.fallback?.reason, 'REVIEW_PICKUP_TIMEOUT');
+  assert.equal(fb.status, 'READY_FOR_HOST_NATIVE_DISPATCH');
+  const run = (await h.get(id))!;
+  assert.equal(run.judgmentTransport, 'NATIVE');
+  assert.equal(run.judgmentNativeOnly, true);
+  assert.equal(run.reviewNativeOnly, undefined, 'the 4R fallback flag is untouched');
+  const judges = (await m.inbox('gpt-a')).works.filter(w => w.role === 'reviewer').map(w => w.state);
+  assert.ok(judges.length === 2 && judges.every(s => s === 'ABORTED_NO_EFFECTS'));
+}));
+
+test('unusable judge reports retry Judgment Day once remote, then native', () => withHosts(async (h, m) => {
+  const id = await toJudgment(h, m, 'jd5');
+  await h.tick(id, all);
+  const first = (await h.get(id))!.judgmentId;
+  await finishLenses(m, a => a === 'jd-judge-b' ? 'looks fine to me' : lensReport(a));
+  const retry: any = await h.tick(id, all);
+  assert.equal(retry.retry?.reason, 'REVIEW_EVIDENCE_INCOMPLETE');
+  assert.equal(retry.status, 'WAITING_REMOTE_REVIEW');
+  const second = (await h.get(id))!;
+  assert.ok(second.judgmentId && second.judgmentId !== first);
+  assert.equal(second.judgmentEvidenceRetries, 1);
+  assert.equal(second.reviewEvidenceRetries, undefined);
+  await finishLenses(m, a => a === 'jd-judge-b' ? 'still prose' : lensReport(a));
+  const native: any = await h.tick(id, all);
+  assert.equal(native.retry?.native, true);
+  assert.equal((await h.get(id))!.judgmentTransport, 'NATIVE');
+}));
+
+test('a correction drops the remote Judgment Day and judges the new candidate remotely', () => withHosts(async (h, m, { abandoned }) => {
+  const id = await toJudgment(h, m, 'jd6');
+  await h.tick(id, all);
+  const before = (await h.get(id))!;
+  const fresh = 'b'.repeat(40);
+  await h.recordCorrection(id, { candidateSha: fresh, runId: 'fix-run-jd6', evidence: ['fixed'] }, before.revision);
+  const reset = (await h.get(id))!;
+  assert.equal(reset.judgmentId, null);
+  assert.equal(reset.judgmentTransport, null);
+  assert.equal((await h.tick(id, all)).status, 'WAITING_REMOTE_REVIEW');
+  const after = (await h.get(id))!;
+  assert.equal(after.judgmentTransport, 'REMOTE');
+  assert.notEqual(after.judgmentId, before.judgmentId);
+  // The old session's judges are never read again: withdrawn, and what they were granted is revoked.
+  const old = (await m.reviewStatus('gpt-a', before.judgmentId!)).work;
+  assert.ok(old.length === 2 && old.every(w => w.state === 'ABORTED_NO_EFFECTS'));
+  assert.deepEqual(abandoned.map(a => a.workId).sort(), old.map(w => w.workId).sort());
+}));
+
+test('Judgment Day runs native when a judge host lacks the reviewer role, instead of failing every tick', () => withHosts(async (h, m) => {
+  const id = await toJudgment(h, m, 'jd7');
+  await m.setProfile('gpt-a', { host: 'gemini', actorId: 'actor-gemini', modelRequest: 'host-default', effortRequest: 'max', roles: ['explorer'] }, 1);
+  const t = await h.tick(id, all);
+  assert.equal(t.status, 'READY_FOR_HOST_NATIVE_DISPATCH');
+  assert.equal((await h.get(id))!.judgmentTransport, 'NATIVE');
+}));
+
+test('Judgment Day runs native when a judge host wrote code: Panter-RDD would never attest it', () => withHosts(async (h, m) => {
+  await m.setProfile('gpt-a', { host: 'grok', actorId: 'actor-grok', modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer', 'implementer'] }, 1);
+  await m.delegate('gpt-a', { missionId: 'other', target: 'grok', role: 'implementer', instruction: 'Implement y', idempotencyKey: 'impl-grok' });
+  const w: any = await m.pickup('grok', 300);
+  await m.complete('grok', w.work.id, w.work.attemptId, w.work.leaseGeneration, 'done');
+  const id = await toJudgment(h, m, 'jd8');
+  assert.equal((await h.tick(id, all)).status, 'READY_FOR_HOST_NATIVE_DISPATCH');
+  assert.equal((await h.get(id))!.judgmentTransport, 'NATIVE');
+}));
+
+test('Judgment Day runs native when a judge host was ever granted GitHub writes, or that history is unreadable', () => withHosts(async (h, m) => {
+  const writers: { list: string[] | null } = { list: ['gemini'] };
+  h.setHostHooks({ writerHosts: () => writers.list, remoteAttestation: () => true });
+  const id = await toJudgment(h, m, 'jd10');
+  assert.equal((await h.tick(id, all)).status, 'READY_FOR_HOST_NATIVE_DISPATCH');
+  assert.equal((await h.get(id))!.judgmentTransport, 'NATIVE');
+  // Unreadable writer history: Panter-RDD attests nothing, so the judges never go remote.
+  writers.list = null;
+  const other = await (async () => { const s = await h.start({ project: 'app', objective: 'Add another helper', idempotencyKey: 'jd11', writesAuthorized: true, changeSurfaces: ['src/util.ts'], judgmentDayRequested: true });
+    const t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Done', evidence: ['tests'], candidateSha: sha, runId: 'impl-run-jd11' }); return s.id; })();
+  assert.equal((await h.tick(other, all)).status, 'READY_FOR_HOST_NATIVE_DISPATCH');
+  // A writer history that names neither judge leaves Judgment Day remote.
+  writers.list = ['gpt-a'];
+  const third = await (async () => { const s = await h.start({ project: 'app', objective: 'Add a third helper', idempotencyKey: 'jd12', writesAuthorized: true, changeSurfaces: ['src/util.ts'], judgmentDayRequested: true });
+    const t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Done', evidence: ['tests'], candidateSha: sha, runId: 'impl-run-jd12' }); return s.id; })();
+  assert.equal((await h.tick(third, all)).status, 'WAITING_REMOTE_REVIEW');
+}));
+
+test('a Judgment Day prepared before remote judges existed stays native', () => withHosts(async (h, m) => {
+  const id = await toJudgment(h, m, 'jd9', ['grok', 'grok']);
+  await h.tick(id, all);
+  const native = (await h.get(id))!.judgmentId;
+  // A run stored by the previous release has a judgmentId and no transport.
+  await (h as any).write((s: any) => { delete s.runs.find((r: any) => r.id === id).judgmentTransport; });
+  await m.bindSpecialist('gpt-a', { agentId: 'jd-judge-b', host: 'gemini', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['judgment-day'] } as any, 1);
+  const t = await h.tick(id, all);
+  assert.equal(t.status, 'READY_FOR_HOST_NATIVE_DISPATCH');
+  assert.equal(t.reviewId, native);
+  assert.equal((await m.inbox('gpt-a')).works.filter(w => w.role === 'reviewer').length, 0, 'no judge was sent remote');
+}));
+
+const repo = 'example/project';
+function prGate() {
+  const pr = { state: 'open', draft: false, head: { sha, ref: 'feat/x', repo: { full_name: repo } }, base: { ref: 'main' },
+    body: 'Refs #22', labels: [{ name: 'type:feature' }], additions: 50, deletions: 20, commits: 1 };
+  const map: Record<string, unknown> = { '': { default_branch: 'main' }, 'pulls/12': pr, 'issues/22': { labels: [{ name: 'status:approved' }] },
+    'pulls/12/commits?per_page=100': [{ commit: { message: 'feat: add x' } }],
+    [`commits/${sha}/check-runs?per_page=100`]: { total_count: 1, check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', head_sha: sha }] } };
+  const fetcher = (async (u: string | URL | Request) => { const k = String(u).split('/repos/example/project/')[1] ?? '';
+    return { ok: map[k] !== undefined, status: map[k] !== undefined ? 200 : 404, text: async () => JSON.stringify(map[k]) } as Response; }) as typeof fetch;
+  return new GitHubDeliveryGate({ allowedRepositories: [repo], requiredChecks: ['test'] }, fetcher);
+}
+/** Hosts plus Panter-RDD (transport attestation on unless told otherwise), so remote reviews can approve. */
+async function withRdd<T>(fn: (h: AutomaticHarness, m: MeshEngine, ctx: { writers: string[]; abandoned: any[] }) => Promise<T>, attestation = true) {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-hosts-rdd-'));
+  try {
+    const m = await MeshEngine.open(dir), n = await NativeSubagentReview.open(dir), g = prGate();
+    const writers: string[] = [], abandoned: any[] = [];
+    const rdd = await PanterRdd.open(dir, n, m, g, {}, null, attestation, () => writers);
+    const h = await AutomaticHarness.open(dir, m, n, g, undefined, rdd);
+    h.setHostHooks({ writerHosts: () => writers, remoteAttestation: () => attestation, abandoned: async (x) => { abandoned.push(x); } });
+    for (const host of ['gpt-b', 'grok', 'gemini'] as const)
+      await m.setProfile('gpt-a', { host, actorId: `actor-${host}`, modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer'] }, 0);
+    for (const [agentId, host] of [['review-risk', 'grok'], ['review-readability', 'gemini'], ['review-reliability', 'gpt-b'], ['review-resilience', 'grok'],
+      ['jd-judge-a', 'grok'], ['jd-judge-b', 'gemini']] as const)
+      await m.bindSpecialist('gpt-a', { agentId, host, modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] } as any, 0);
+    return await fn(h, m, { writers, abandoned });
+  } finally { await rm(dir, { recursive: true, force: true }); }
+}
+async function answerAll(m: MeshEngine, report: (agentId: string, digest: string) => unknown) {
+  for (const host of ['grok', 'grok', 'gemini', 'gpt-b'] as const) {
+    const p: any = await m.pickup(host, 300);
+    if (p.status !== 'CLAIMED') continue;
+    await m.complete(host, p.work.id, p.work.attemptId, p.work.leaseGeneration, JSON.stringify(report(p.work.specialist.agentId, p.work.specialist.packetDigest)));
+  }
+}
+const signed = (findings: unknown[] = []) => (agentId: string, packetDigest: string) =>
+  ({ agentId, candidateSha: sha, packetDigest, subagentRunId: `run-${agentId}`, findings, evidence: ['read the diff'] });
+
+test('remote 4R then remote Judgment Day: each approves through Panter-RDD with its own fields', () => withRdd(async (h, m) => {
+  const s = await h.start({ project: repo, githubRepository: repo, githubPrNumber: 12, githubExpectedBase: 'main', objective: 'Fix login security',
+    idempotencyKey: 'rj1', writesAuthorized: true, changeSurfaces: ['src/auth.ts'], judgmentDayRequested: true });
+  let t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Plan', evidence: ['plan'] });
+  t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Done', evidence: ['tests'], candidateSha: sha, runId: 'impl-run-1' });
+  t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Verified', evidence: ['checks'], candidateSha: sha, runId: 'verify-run-1' });
+  assert.equal((await h.tick(s.id, all)).status, 'WAITING_REMOTE_REVIEW');
+  await answerAll(m, signed());
+  const jd = await h.tick(s.id, all);
+  assert.equal(jd.status, 'WAITING_REMOTE_REVIEW', '4R approved; Judgment Day judges dispatched');
+  const mid = (await h.get(s.id))!;
+  assert.equal(mid.reviewTransport, 'REMOTE'); assert.equal(mid.judgmentTransport, 'REMOTE');
+  assert.ok(mid.judgmentId && mid.judgmentId !== mid.reviewId);
+  assert.equal(mid.steps.find(x => x.phase === 'REVIEW')?.status, 'COMPLETE');
+  await answerAll(m, signed());
+  const done = await h.tick(s.id, all);
+  assert.equal(done.status, 'PANTER_RDD_REVIEWED_NO_DELIVERY_AUTHORITY');
+  const end = (await h.get(s.id))!;
+  assert.equal(end.steps.find(x => x.phase === 'JUDGMENT')?.status, 'COMPLETE');
+  assert.equal(end.judgmentAttempt, undefined); assert.equal(end.reviewAttempt, undefined);
+}));
+
+test('a severe finding from a remote judge asks for a correction', () => withRdd(async (h, m) => {
+  const s = await h.start({ project: repo, githubRepository: repo, githubPrNumber: 12, githubExpectedBase: 'main', objective: 'Add a helper',
+    idempotencyKey: 'rj2', writesAuthorized: true, changeSurfaces: ['src/util.ts'], judgmentDayRequested: true });
+  const t = await h.tick(s.id, all);
+  await h.report(s.id, t.phaseId!, { summary: 'Done', evidence: ['tests'], candidateSha: sha, runId: 'impl-run-2' });
+  assert.equal((await h.tick(s.id, all)).status, 'WAITING_REMOTE_REVIEW');
+  await answerAll(m, (agentId, digest) => signed(agentId === 'jd-judge-a' ?
+    [{ id: 'J1', location: 'src/util.ts:3', severity: 'CRITICAL', claim: 'Throws on valid input', proofRefs: ['src/util.ts:3'] }] : [])(agentId, digest));
+  const verdict = await h.tick(s.id, all);
+  assert.equal(verdict.status, 'NEEDS_CORRECTION');
+  const fix = await h.tick(s.id, all);
+  assert.equal(fix.status, 'CORRECTION_PACKET_READY');
+}));
+
+async function lowRiskJudgment(h: AutomaticHarness, key: string) {
+  const s = await h.start({ project: repo, githubRepository: repo, githubPrNumber: 12, githubExpectedBase: 'main', objective: 'Add a helper',
+    idempotencyKey: key, writesAuthorized: true, changeSurfaces: ['src/util.ts'], judgmentDayRequested: true });
+  const t = await h.tick(s.id, all);
+  await h.report(s.id, t.phaseId!, { summary: 'Done', evidence: ['tests'], candidateSha: sha, runId: `impl-${key}` });
+  return s.id;
+}
+
+test('without transport attestation Judgment Day runs native: remote judges could never be attested', () => withRdd(async (h) => {
+  const id = await lowRiskJudgment(h, 'na1');
+  assert.equal((await h.tick(id, all)).status, 'READY_FOR_HOST_NATIVE_DISPATCH');
+  assert.equal((await h.get(id))!.judgmentTransport, 'NATIVE');
+}, false));
+
+test('a remote Judgment Day Panter-RDD will not attest (a judge became a writer meanwhile) is judged native', () => withRdd(async (h, m, { writers }) => {
+  const id = await lowRiskJudgment(h, 'na2');
+  assert.equal((await h.tick(id, all)).status, 'WAITING_REMOTE_REVIEW');
+  const remote = (await h.get(id))!.judgmentId;
+  writers.push('gemini');
+  await answerAll(m, signed());
+  const fb: any = await h.tick(id, all);
+  assert.equal(fb.fallback?.reason, 'REMOTE_JUDGMENT_NOT_ATTESTABLE');
+  assert.equal(fb.status, 'READY_FOR_HOST_NATIVE_DISPATCH');
+  const run = (await h.get(id))!;
+  assert.equal(run.judgmentTransport, 'NATIVE'); assert.equal(run.judgmentNativeOnly, true);
+  assert.notEqual(run.judgmentId, remote);
+}));
+
+test('a 4R lens host without the reviewer role sends the 4R native instead of failing every tick', () => withHosts(async (h, m) => {
+  await m.setProfile('gpt-a', { host: 'gemini', actorId: 'actor-gemini', modelRequest: 'host-default', effortRequest: 'max', roles: ['explorer'] }, 1);
+  const id = await toReview(h, 'rr1');
+  assert.equal((await h.tick(id, all)).status, 'READY_FOR_HOST_NATIVE_DISPATCH');
+  assert.equal((await h.get(id))!.reviewTransport, 'NATIVE');
+}));
+
+test('a correction retires the remote 4R session: unstarted lenses withdrawn, a started lens loses its grants', () => withHosts(async (h, m, { abandoned }) => {
+  const id = await toReview(h, 'rr2');
+  await h.tick(id, all);
+  const before = (await h.get(id))!;
+  const started: any = await m.pickup('gpt-b', 300);
+  assert.equal(started.status, 'CLAIMED');
+  await h.recordCorrection(id, { candidateSha: 'c'.repeat(40), runId: 'fix-run-rr2', evidence: ['fixed'] }, before.revision);
+  const old = (await m.reviewStatus('gpt-a', before.reviewId!)).work;
+  assert.equal(old.find(w => w.workId === started.work.id)?.state, 'RUNNING', 'a started lens is never withdrawn');
+  assert.ok(old.filter(w => w.workId !== started.work.id).every(w => w.state === 'ABORTED_NO_EFFECTS'));
+  assert.deepEqual(abandoned.map(a => a.workId).sort(), old.map(w => w.workId).sort());
+}));
+
+test('a review started for a candidate that a correction replaced meanwhile is retired, not recorded', () => withHosts(async (h, m, { abandoned }) => {
+  const id = await toJudgment(h, m, 'race1');
+  // The correction lands after this tick read the run but before it records the session it started.
+  const original = (h as any).startRemoteReview.bind(h);
+  (h as any).startRemoteReview = async (...args: any[]) => {
+    (h as any).startRemoteReview = original;
+    await h.recordCorrection(id, { candidateSha: 'd'.repeat(40), runId: 'fix-run-race1', evidence: ['fixed'] }, (await h.get(id))!.revision);
+    return original(...args);
+  };
+  const t = await h.tick(id, all);
+  (h as any).startRemoteReview = original;
+  const run = (await h.get(id))!;
+  assert.equal(t.status, 'WAITING_REMOTE_REVIEW');
+  assert.equal(run.candidateSha, 'd'.repeat(40));
+  const current = await m.reviewStatus('gpt-a', run.judgmentId!);
+  assert.equal(current.review.candidateSha, 'd'.repeat(40), 'only the new candidate is judged');
+  const ids = new Set(current.work.map(w => w.workId));
+  const orphans = (await m.inbox('gpt-a')).works.filter(w => w.role === 'reviewer' && !ids.has(w.id));
+  assert.ok(orphans.length === 2 && orphans.every(w => w.state === 'ABORTED_NO_EFFECTS'), 'the old-candidate judges were withdrawn');
+  assert.deepEqual(abandoned.map(a => a.workId).sort(), orphans.map(w => w.id).sort());
 }));

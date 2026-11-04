@@ -35,7 +35,8 @@ export type HarnessStep={id:string;phase:HarnessPhase;agentId:GentleAgentId|null
 export type HarnessRun={id:string;project:string;githubRepository?:string;githubPrNumber?:number;githubExpectedBase?:string;objective:string;key:string;inputDigest:string;permission:'READ_ONLY'|'WRITE_APPROVED';
   mode:HarnessMode; paths:string[]; risk:'LOW'|'HIGH'; reviewTier?:'passive'|'medium'|'high'; reason:string[]; candidateSha:string|null;
   reviewKind:'4r'|null; reviewId:string|null; reviewTransport:'NATIVE'|'REMOTE'|null;
-  judgmentRequested?:boolean; judgmentId?:string|null; writeGrantId?:string;
+  judgmentRequested?:boolean; judgmentId?:string|null; judgmentTransport?:'NATIVE'|'REMOTE'|null;
+  judgmentAttempt?:number; judgmentNativeOnly?:boolean; judgmentEvidenceRetries?:number; writeGrantId?:string;
   correctionAttempts?:number; correctionRunId?:string; correctionRunIds?:string[]; previousReviewId?:string|null; reviewAttempt?:number; reviewNativeOnly?:boolean; reviewEvidenceRetries?:number; deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main';
   units?:Array<{id:string;objective:string;paths:string[];state:'PENDING'|'REPORTED';runId?:string;summary?:string;evidence?:string[]}>;
   steps:HarnessStep[]; createdAt:string;revision:number;};
@@ -60,6 +61,10 @@ export type HarnessHostHooks={
   afterDispatch?(input:{run:HarnessRun;workId:string;phase:HarnessPhase;host:Host}):Promise<void>;
   /** How long a host may leave a dispatched phase unstarted before it runs native instead. */
   pickupTimeoutMs?(host:Host):number;
+  /** Hosts that were ever allowed to write to a repository (Panter-RDD's writer history), or null if it cannot be read. */
+  writerHosts?():string[]|null;
+  /** Whether Panter-RDD attests remote reviews by their transport (remote hosts produce no runner signatures). */
+  remoteAttestation?():boolean;
   /** When a work's pickup clock starts (ISO), or null while it is legitimately waiting to be signalled; default createdAt. */
   pickupClockStart?(work:{id:string;target:Host;createdAt:string},limitMs:number):Promise<string|null>;
 };
@@ -109,6 +114,14 @@ function phaseNotes(phase:HarnessPhase,access?:string){return [access,completion
 function reviewCompletionFormat(agentId:string,candidateSha:string){
   return `This completion format overrides any output format above (including "rows" or "review_result" shapes). Complete this review with exactly one JSON object and nothing else: {"agentId": "${agentId}", "candidateSha": "${candidateSha}", "packetDigest": "<work.specialist.packetDigest from your claim>", "subagentRunId": "<a unique id for this review run of yours>", "findings": [{"id": "<stable id>", "location": "<path:line>", "severity": "BLOCKER | CRITICAL | WARNING | SUGGESTION", "claim": "<concrete user-impact claim>", "proofRefs": ["<changed-hunk or file:line you read>"]}], "evidence": ["<what you read or ran>"]}. Use an empty findings array when you find nothing. Never claim evidence you did not observe.`;
 }
+/** The run fields each review phase keeps: 4R (REVIEW) and the additional, explicitly requested Judgment Day (JUDGMENT). */
+const reviewSlots={
+  REVIEW:{id:'reviewId',transport:'reviewTransport',attempt:'reviewAttempt',nativeOnly:'reviewNativeOnly',retries:'reviewEvidenceRetries'},
+  JUDGMENT:{id:'judgmentId',transport:'judgmentTransport',attempt:'judgmentAttempt',nativeOnly:'judgmentNativeOnly',retries:'judgmentEvidenceRetries'},
+} as const;
+type ReviewPhase=keyof typeof reviewSlots;
+type ReviewKind='4r'|'judgment-day';
+const reviewRoles=(kind:ReviewKind)=>kind==='4r'?['review-risk','review-readability','review-reliability','review-resilience']:['jd-judge-a','jd-judge-b'];
 type PhaseResult={summary:string;evidence:string[];runId?:string;candidateSha?:string;discoveredPaths?:string[]};
 const MAX_RESULT_TEXT=100_000;
 /** A copied completion-format placeholder such as "<what you did>". */
@@ -170,6 +183,139 @@ export class AutomaticHarness {
     if(!w||w.state!=='RUNNING'||w.transportHeld||!w.leaseUntil)return null;
     const limit=this.hooks.pickupTimeoutMs?.(w.target)??300_000;
     return Date.now()-Date.parse(w.leaseUntil)>limit?{host:w.target,limit}:null;
+  }
+  /** A review phase runs remote only if every lens is bound to an explicitly connected host. Judgment Day's two blind
+   * judges must also be on distinct hosts: Panter-RDD never attests two judges on one host, so that session could not pass. */
+  private async remoteReviewReady(record:HarnessRun,phase:ReviewPhase,kind:ReviewKind,mode:HarnessMode,runtime:HarnessRuntime){
+    if(mode!=='AUTO'||record[reviewSlots[phase].nativeOnly])return false;
+    const assigned=await this.mesh.specialistBindings();
+    const hosts=reviewRoles(kind).map(id=>assigned.find(x=>x.agentId===id)?.host);
+    if(!hosts.every(h=>!!h&&runtime.peerStates?.[h]==='CONNECTED'))return false;
+    // The mesh refuses a lens on a host without the reviewer role; that review must run native, not fail every tick.
+    const profiles=await this.mesh.profiles();
+    if(!hosts.every(h=>profiles.some(p=>p.host===h&&p.roles.includes('reviewer'))))return false;
+    if(kind==='4r')return true;
+    // Judgment Day goes remote only where Panter-RDD can attest it: transport attestation on, blind judges on distinct
+    // hosts, none of which wrote code. Otherwise its native review, which the runner can sign, is the one that can pass.
+    if(this.hooks.remoteAttestation?.()!==true)return false;
+    if(new Set(hosts).size!==hosts.length)return false;
+    // Same author history Panter-RDD checks: implementer work in the mesh, former leaders, and any host ever granted
+    // GitHub commit/PR (even for work it never picked up). Missing or unreadable history: the judges run native.
+    const writers=this.hooks.writerHosts?this.hooks.writerHosts():null;
+    if(writers===null)return false;
+    const authors=[...await this.mesh.authorHosts(),...writers];
+    return !hosts.some(h=>authors.includes(h!));
+  }
+  /** Stop a remote review that will never be read (its candidate was corrected, or it lost the race to be recorded):
+   * withdraw its lenses that have not really started (queued, or only held by a transport) and revoke what its lenses
+   * were granted. */
+  private async retireRemoteReview(reviewId:string){
+    const review=await this.mesh.reviewStatus(leaderHost(),reviewId).catch(()=>null);
+    for(const w of review?.work??[]){
+      if(w.state!=='QUEUED'&&w.state!=='RUNNING')continue;
+      // Refused for a lens its host really started; that one keeps running unread, without its grants.
+      await this.mesh.withdrawUnstarted(leaderHost(),w.workId,'this review is no longer read').catch(()=>null);
+      try{await this.hooks.abandoned?.({workId:w.workId,host:w.host});}catch{/* best effort */}
+    }
+  }
+  private async startRemoteReview(record:HarnessRun,phase:ReviewPhase,kind:ReviewKind){
+    const slot=reviewSlots[phase];
+    const key=phase==='REVIEW'?`harness:${record.id}:review:${record.candidateSha}:${record.reviewAttempt??0}`:
+      `harness:${record.id}:judgment-day:${record.candidateSha}:${record.judgmentAttempt??0}`;
+    const remote=await this.mesh.startReview(leaderHost(),{missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:key,
+      materialFor:this.hooks.materialFor?host=>this.hooks.materialFor!(record,host):undefined,
+      notesFor:(host,agentId)=>[this.hooks.accessFor?.(record,host,phase),reviewCompletionFormat(agentId,record.candidateSha!)].filter(Boolean).join('\n\n')});
+    // Recorded only for the candidate it reviews: a correction may have landed since this tick read the run.
+    const current=await this.write(s=>{const r=s.runs.find(x=>x.id===record.id)!;if(r.candidateSha!==record.candidateSha)return false;
+      if(!r[slot.id]){r[slot.id]=remote.id;r[slot.transport]='REMOTE';r.revision++;}return r[slot.id]===remote.id;});
+    // A session nobody will read is stopped instead of dispatched (and granted).
+    if(!current)return this.retireRemoteReview(remote.id);
+    for(const workId of remote.workIds){const t=await this.mesh.workTarget(leaderHost(),workId).catch(()=>null);if(t)await this.dispatched(record,workId,phase,t.target);}
+  }
+  /** Advance a remote review session (4R or Judgment Day): pickup fallback, evidence retry, then Panter-RDD. */
+  private async remoteReviewTick(runId:string,runtime:HarnessRuntime,phase:HarnessStep,reviewPhase:ReviewPhase,kind:ReviewKind,now:HarnessRun,
+    common:{runId:string;mode:HarnessMode;risk:'LOW'|'HIGH';reason:string[];[key:string]:unknown}):Promise<HarnessTickResult>{
+    const slot=reviewSlots[reviewPhase];const reviewId=now[slot.id]!;
+    // Drop this session (only if it is still the current one) so the next tick starts a fresh attempt.
+    const drop=(nativeOnly:boolean,retries?:number)=>this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(r[slot.id]!==reviewId)return;
+      r[slot.id]=null;r[slot.transport]=null;r[slot.attempt]=(r[slot.attempt]??0)+1;
+      if(retries!==undefined)r[slot.retries]=retries;if(nativeOnly)r[slot.nativeOnly]=true;r.revision++;});
+    const review=await this.mesh.reviewStatus(leaderHost(),reviewId);
+    if(review.stage==='INTERRUPTED'){
+      // Interrupted by a leader switch: close its queued lenses, drop the session and start a fresh
+      // attempt (native until rebound).
+      await this.mesh.abortInterruptedReview(leaderHost(),reviewId);
+      // Lenses still running are never read again: revoke what they were granted.
+      for(const w of review.work)if(w.state==='RUNNING')try{await this.hooks.abandoned?.({workId:w.workId,host:w.host});}catch{/* best effort */}
+      // A lens withdrawn for a missed pickup means its host did not show up: the retry runs native.
+      await drop(review.work.some(w=>w.withdrawn));
+      return this.tick(runId,runtime);
+    }
+    if(review.stage==='AWAITING_REPORTS')
+      for(const w of review.work)if(w.state==='QUEUED'||w.state==='RUNNING')await this.dispatched(now,w.workId,reviewPhase,w.host);
+    if(review.stage==='AWAITING_REPORTS'&&this.hooks.pickupTimeoutMs){
+      const stale=(await Promise.all(review.review.workIds.map(async id=>({id,stale:await this.unstartedTooLong(id)})))).filter(x=>x.stale);
+      // Only a stale lens that was really withdrawn drops the session: a lens its host claimed in the meantime
+      // keeps the remote review alive (and its result is read).
+      const withdrawn=[];
+      for(const s of stale){
+        const r=await this.mesh.withdrawUnstarted(leaderHost(),s.id,'review lens host did not start in time; review runs native').catch(()=>null);
+        if(r?.withdrawn||r?.state==='ABORTED_NO_EFFECTS')withdrawn.push(s);
+      }
+      if(withdrawn.length){
+        // A lens host did not show up in time: drop this remote session and run the whole review native.
+        for(const w of review.work){
+          if(withdrawn.some(s=>s.id===w.workId))continue;
+          const r=w.state==='QUEUED'?await this.mesh.withdrawUnstarted(leaderHost(),w.workId,'review lens host did not start in time; review runs native').catch(()=>null):null;
+          // A lens already running keeps running, but its result is never read: revoke what it was granted.
+          if(!r?.withdrawn&&(w.state==='RUNNING'||w.state==='QUEUED'))
+            try{await this.hooks.abandoned?.({workId:w.workId,host:w.host});}catch{/* best effort */}
+        }
+        await drop(true);
+        const next=await this.tick(runId,runtime);
+        return {...next,fallback:{phaseId:phase.id,from:[...new Set(withdrawn.map(s=>s.stale!.host))],reason:'REVIEW_PICKUP_TIMEOUT'}};
+      }
+    }
+    const evidence=assessMeshReview({kind:review.review.kind,candidateSha:review.review.candidateSha,work:review.work});
+    // Every lens finished but some report cannot be used (failed, unstructured or not bound to this lens and SHA):
+    // the session can never complete, so review the same candidate again — once remote, then native. A session where
+    // any lens reports anything severe — in an accepted report, a failed lens or any text that is not a usable report — is
+    // never retried away: that needs the leader.
+    if(review.stage==='READY_FOR_CONTROLLER'&&evidence.status==='EVIDENCE_INCOMPLETE'&&
+      !evidence.reasons.some(x=>x.startsWith('Severe finding(s)'))&&
+      !review.work.some(w=>mentionsSevere(w.result,w.state,w.agentId??'',review.review.candidateSha))){
+      const retries=now[slot.retries]??0;
+      await drop(retries>=1,retries+1);
+      const next=await this.tick(runId,runtime);
+      return {...next,retry:{phaseId:phase.id,previousReviewId:reviewId,reason:'REVIEW_EVIDENCE_INCOMPLETE',
+        reasons:evidence.reasons,native:retries>=1}};
+    }
+    if(this.rdd&&review.stage==='READY_FOR_CONTROLLER'){
+      const tx=await this.rdd.begin({missionId:now.id,reviewId,source:'REMOTE',
+        candidateSha:now.candidateSha!,kind,localProject:now.project,repository:now.githubRepository??(githubProject.test(now.project)?now.project:undefined),
+        prNumber:now.githubPrNumber,expectedBase:now.githubExpectedBase,deliveryStrategy:now.deliveryStrategy,
+        implementerRunId:now.correctionRunId??now.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId,
+        implementerRunIds:this.authorRunIds(now)});
+      const verdict=await this.rdd.assess(tx.id);
+      if(verdict.record.state==='APPROVED_PENDING_ACK')await this.rdd.acknowledge(tx.id,verdict.record.revision);
+      if(['APPROVED_PENDING_ACK','ACKNOWLEDGED'].includes(verdict.record.state)){
+        // Only the session still current for the run completes its phase (a correction may have dropped it meanwhile).
+        await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const item=r.steps.find(x=>x.id===phase.id)!;
+          if(r[slot.id]===reviewId&&item.status!=='COMPLETE'){item.status='COMPLETE';r.revision++;}});
+        return this.tick(runId,runtime);
+      }
+      // Panter-RDD will not attest this remote Judgment Day (e.g. a judge host became a writer after dispatch): judge
+      // the same candidate native instead of waiting forever.
+      if(reviewPhase==='JUDGMENT'&&verdict.record.state==='NEEDS_RUNNER_ATTESTATION'){
+        await drop(true);
+        const next=await this.tick(runId,runtime);
+        return {...next,fallback:{phaseId:phase.id,previousReviewId:reviewId,reason:'REMOTE_JUDGMENT_NOT_ATTESTABLE'}};
+      }
+      return {...common,status:verdict.record.state,phaseId:phase.id,reviewId,review:evidence,panterRdd:verdict,next:[]};
+    }
+    return {...common,status:review.stage==='AWAITING_REPORTS'?'WAITING_REMOTE_REVIEW':
+      evidence.status==='EVIDENCE_INCOMPLETE'?'REVIEW_EVIDENCE_INCOMPLETE':'AWAITING_RDD_AUTHORITY',
+      phaseId:phase.id,reviewId,review:evidence,next:[]};
   }
   private constructor(private readonly sqlite:SqliteLedger,private readonly mesh:MeshEngine,private readonly native:NativeSubagentReview,private readonly github?:GitHubDeliveryGate,private readonly officialRdd?:NativeReviewBridge,private readonly rdd?:PanterRdd,private readonly requireWriteGrant=false){}
   static async open(dir:string,mesh:MeshEngine,native:NativeSubagentReview,github?:GitHubDeliveryGate,officialRdd?:NativeReviewBridge,rdd?:PanterRdd,requireWriteGrant=false){
@@ -280,7 +426,9 @@ export class AutomaticHarness {
     ensure(Array.isArray(payload.evidence)&&payload.evidence.length>0&&payload.evidence.length<=30&&
       payload.evidence.every(x=>typeof x==='string'&&x.trim()&&x.length<=1000),'Correction evidence required');
     if(!(await this.activeWriteGrant(runId,(await this.get(runId))?.paths??[])))throw new Error('Active operator grant required for correction');
-    return this.write(s=>{const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');
+    // Remote review sessions this correction drops: their lenses are stopped once the write succeeded.
+    let retired:string[]=[];
+    const corrected=await this.write(s=>{const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');
       ensure(r.revision===expectedRevision,'Stale correction revision');
       ensure(r.permission==='WRITE_APPROVED'&&r.paths.length>0,'Correction is not authorized within a scoped writable run');
       ensure((r.correctionAttempts??0)<2,'Correction attempt budget exhausted');
@@ -288,14 +436,17 @@ export class AutomaticHarness {
       const review=r.steps.find(st=>st.phase==='REVIEW');const judgment=r.steps.find(st=>st.phase==='JUDGMENT');
       ensure(review||judgment,'No review requiring correction');
       ensure(!review||review.status!=='COMPLETE'||(!!judgment&&judgment.status!=='COMPLETE'&&!!r.judgmentId),'Closed review cannot be silently rewritten');
+      retired=[r.reviewTransport==='REMOTE'?r.reviewId:null,r.judgmentTransport==='REMOTE'?r.judgmentId:null].filter((x):x is string=>!!x);
       r.previousReviewId=r.reviewId;
-      r.candidateSha=payload.candidateSha;r.reviewId=null;r.reviewTransport=null;r.judgmentId=null;
-      r.correctionAttempts=(r.correctionAttempts??0)+1;r.correctionRunId=payload.runId;r.reviewEvidenceRetries=0;
+      r.candidateSha=payload.candidateSha;r.reviewId=null;r.reviewTransport=null;r.judgmentId=null;r.judgmentTransport=null;
+      r.correctionAttempts=(r.correctionAttempts??0)+1;r.correctionRunId=payload.runId;r.reviewEvidenceRetries=0;r.judgmentEvidenceRetries=0;
       r.correctionRunIds=[...new Set([...(r.correctionRunIds??[]),payload.runId])];
       for(const step of r.steps)if(['VERIFY','REVIEW','JUDGMENT'].includes(step.phase)){
         step.status='PENDING';step.execution=undefined;step.remoteWorkId=undefined;step.result=undefined;
       }
       r.revision++;return r;});
+    for(const id of retired)await this.retireRemoteReview(id);
+    return corrected;
   }
 
   /** GPT-A derives independent work units from the design; the user never picks agents.
@@ -516,8 +667,10 @@ export class AutomaticHarness {
     if(phase.phase==='REVIEW'||phase.phase==='JUDGMENT'){
       const previous=phase.phase==='REVIEW'?record.reviewId:record.judgmentId;
       if(previous){
-        const nativeStatus=(phase.phase==='JUDGMENT'||record.reviewTransport==='NATIVE')?await this.native.status(previous):null;
-        const rddRecord=phase.phase==='REVIEW'&&this.rdd?await this.rdd.getForReview(previous):null;
+        // A Judgment Day prepared before remote judges existed has no transport: it is native.
+        const transport=phase.phase==='REVIEW'?record.reviewTransport:(record.judgmentTransport??'NATIVE');
+        const nativeStatus=transport==='NATIVE'?await this.native.status(previous):null;
+        const rddRecord=(phase.phase==='REVIEW'||transport==='REMOTE')&&this.rdd?await this.rdd.getForReview(previous):null;
         // Finish the four solo lenses before triaging their aggregate findings.
         const partialSolo4R=nativeStatus?.kind==='4r'&&!nativeStatus.soloEvidenceComplete&&nativeStatus.slots.some(s=>s.state==='REPORTED_SOLO');
         const severe=partialSolo4R?[]:nativeStatus?.severeFindings??[];
@@ -537,12 +690,21 @@ export class AutomaticHarness {
     if(phase.phase==='JUDGMENT'){
       // Judgment Day is an additional, explicitly requested audit, never a substitute for 4R.
       if(!record.judgmentId){
-        const jd=await this.native.create({missionId:record.id,kind:'judgment-day',objective:record.objective,
-          candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:judgment-day:${record.candidateSha}`});
-        await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;
-          if(!r.judgmentId){r.judgmentId=jd.reviewId;r.revision++;}});
+        // The two blind judges run remote when both are bound to connected, distinct hosts; otherwise native.
+        if(await this.remoteReviewReady(record,'JUDGMENT','judgment-day',effectiveMode,runtime))
+          await this.startRemoteReview(record,'JUDGMENT','judgment-day');
+        else{
+          const jd=await this.native.create({missionId:record.id,kind:'judgment-day',objective:record.objective,
+            candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:judgment-day:${record.candidateSha}`});
+          await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;
+            if(!r.judgmentId&&r.candidateSha===record.candidateSha){r.judgmentId=jd.reviewId;r.judgmentTransport='NATIVE';r.revision++;}});
+        }
       }
-      const latest=await this.get(runId);ensure(latest?.judgmentId,'Judgment Day not prepared');
+      const latest=await this.get(runId);
+      // A correction landed while this tick prepared the session: start over on the new candidate.
+      if(latest&&!latest.judgmentId&&latest.candidateSha!==record.candidateSha)return this.tick(runId,runtime);
+      ensure(latest?.judgmentId,'Judgment Day not prepared');
+      if(latest.judgmentTransport==='REMOTE')return this.remoteReviewTick(runId,runtime,phase,'JUDGMENT','judgment-day',latest,common);
       const status=await this.native.status(latest.judgmentId);
       if(!status.evidenceComplete){
         const batch=await this.native.batch(latest.judgmentId,runtime.nativeSubagents?runtime.maxParallelSubagents:0);
@@ -572,24 +734,15 @@ export class AutomaticHarness {
       // Remote 4R is only eligible if every configured review host is explicitly connected.
       // No remote worker is needed for a complete native GPT-A-only review.
       if(!record.reviewId){
-        const assigned=await this.mesh.specialistBindings();
-        const roles=kind==='4r'?['review-risk','review-readability','review-reliability','review-resilience']:['jd-judge-a','jd-judge-b'];
-        const remoteReady=effectiveMode==='AUTO'&&!record.reviewNativeOnly&&roles.every(id=>{
-          const a=assigned.find(x=>x.agentId===id);
-          return a&&runtime.peerStates?.[a.host]==='CONNECTED';
-        });
-        if(remoteReady){
-          const remote=await this.mesh.startReview(leaderHost(),{missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:review:${record.candidateSha}:${record.reviewAttempt??0}`,
-            materialFor:this.hooks.materialFor?host=>this.hooks.materialFor!(record,host):undefined,
-            notesFor:(host,agentId)=>[this.hooks.accessFor?.(record,host,'REVIEW'),reviewCompletionFormat(agentId,record.candidateSha!)].filter(Boolean).join('\n\n')});
-          await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(!r.reviewId){r.reviewId=remote.id;r.reviewTransport='REMOTE';r.revision++;}});
-          for(const workId of remote.workIds){const t=await this.mesh.workTarget(leaderHost(),workId).catch(()=>null);if(t)await this.dispatched(record,workId,'REVIEW',t.target);}
-        }else{
+        if(await this.remoteReviewReady(record,'REVIEW',kind,effectiveMode,runtime))await this.startRemoteReview(record,'REVIEW',kind);
+        else{
           const native=await this.native.create({missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:review:${record.candidateSha}:${record.reviewAttempt??0}`});
-          await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(!r.reviewId){r.reviewId=native.reviewId;r.reviewTransport='NATIVE';r.revision++;}});
+          await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(!r.reviewId&&r.candidateSha===record.candidateSha){r.reviewId=native.reviewId;r.reviewTransport='NATIVE';r.revision++;}});
         }
       }
-      const now=await this.get(runId);ensure(now?.reviewId&&now.reviewTransport,'Review session not initialized');
+      const now=await this.get(runId);
+      if(now&&!now.reviewId&&now.candidateSha!==record.candidateSha)return this.tick(runId,runtime);
+      ensure(now?.reviewId&&now.reviewTransport,'Review session not initialized');
       if(now.reviewTransport==='NATIVE'){
         const review=await this.native.status(now.reviewId);
         if(review.soloEvidenceComplete){
@@ -633,78 +786,7 @@ export class AutomaticHarness {
           phaseId:phase.id,reviewId:now.reviewId,review,officialRdd,next:[],
           instruction:'Panter-RDD not configured; no model report grants approval.'};
       }
-      const review=await this.mesh.reviewStatus(leaderHost(),now.reviewId);
-      if(review.stage==='INTERRUPTED'){
-        // Interrupted by a leader switch: close its queued lenses, drop the session and start a fresh
-        // attempt (native until rebound).
-        await this.mesh.abortInterruptedReview(leaderHost(),now.reviewId);
-        // Lenses still running are never read again: revoke what they were granted.
-        for(const w of review.work)if(w.state==='RUNNING')try{await this.hooks.abandoned?.({workId:w.workId,host:w.host});}catch{/* best effort */}
-        // A lens withdrawn for a missed pickup means its host did not show up: the retry runs native.
-        const pickupMissed=review.work.some(w=>w.withdrawn);
-        await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(r.reviewId===now.reviewId){r.reviewId=null;r.reviewTransport=null;r.reviewAttempt=(r.reviewAttempt??0)+1;
-          if(pickupMissed)r.reviewNativeOnly=true;r.revision++;}});
-        return this.tick(runId,runtime);
-      }
-      if(review.stage==='AWAITING_REPORTS')
-        for(const w of review.work)if(w.state==='QUEUED'||w.state==='RUNNING')await this.dispatched(now,w.workId,'REVIEW',w.host);
-      if(review.stage==='AWAITING_REPORTS'&&this.hooks.pickupTimeoutMs){
-        const stale=(await Promise.all(review.review.workIds.map(async id=>({id,stale:await this.unstartedTooLong(id)})))).filter(x=>x.stale);
-        // Only a stale lens that was really withdrawn drops the session: a lens its host claimed in the meantime
-        // keeps the remote review alive (and its result is read).
-        const withdrawn=[];
-        for(const s of stale){
-          const r=await this.mesh.withdrawUnstarted(leaderHost(),s.id,'review lens host did not start in time; review runs native').catch(()=>null);
-          if(r?.withdrawn||r?.state==='ABORTED_NO_EFFECTS')withdrawn.push(s);
-        }
-        if(withdrawn.length){
-          // A lens host did not show up in time: drop this remote session and run the whole review native.
-          for(const w of review.work){
-            if(withdrawn.some(s=>s.id===w.workId))continue;
-            const r=w.state==='QUEUED'?await this.mesh.withdrawUnstarted(leaderHost(),w.workId,'review lens host did not start in time; review runs native').catch(()=>null):null;
-            // A lens already running keeps running, but its result is never read: revoke what it was granted.
-            if(!r?.withdrawn&&(w.state==='RUNNING'||w.state==='QUEUED'))
-              try{await this.hooks.abandoned?.({workId:w.workId,host:w.host});}catch{/* best effort */}
-          }
-          await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(r.reviewId===now.reviewId){r.reviewId=null;r.reviewTransport=null;
-            r.reviewAttempt=(r.reviewAttempt??0)+1;r.reviewNativeOnly=true;r.revision++;}});
-          const next=await this.tick(runId,runtime);
-          return {...next,fallback:{phaseId:phase.id,from:[...new Set(withdrawn.map(s=>s.stale!.host))],reason:'REVIEW_PICKUP_TIMEOUT'}};
-        }
-      }
-      const evidence=assessMeshReview({kind:review.review.kind,candidateSha:review.review.candidateSha,work:review.work});
-      // Every lens finished but some report cannot be used (failed, unstructured or not bound to this lens and SHA):
-      // the session can never complete, so review the same candidate again — once remote, then native. A session where
-      // any lens reports anything severe — in an accepted report, a failed lens or any text that is not a usable report — is
-      // never retried away: that needs the leader.
-      if(review.stage==='READY_FOR_CONTROLLER'&&evidence.status==='EVIDENCE_INCOMPLETE'&&
-        !evidence.reasons.some(x=>x.startsWith('Severe finding(s)'))&&
-        !review.work.some(w=>mentionsSevere(w.result,w.state,w.agentId??'',review.review.candidateSha))){
-        const retries=now.reviewEvidenceRetries??0;
-        await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(r.reviewId===now.reviewId){r.reviewId=null;r.reviewTransport=null;
-          r.reviewAttempt=(r.reviewAttempt??0)+1;r.reviewEvidenceRetries=retries+1;if(retries>=1)r.reviewNativeOnly=true;r.revision++;}});
-        const next=await this.tick(runId,runtime);
-        return {...next,retry:{phaseId:phase.id,previousReviewId:now.reviewId,reason:'REVIEW_EVIDENCE_INCOMPLETE',
-          reasons:evidence.reasons,native:retries>=1}};
-      }
-      if(this.rdd&&review.stage==='READY_FOR_CONTROLLER'){
-        const tx=await this.rdd.begin({missionId:now.id,reviewId:now.reviewId,source:'REMOTE',
-          candidateSha:now.candidateSha!,kind,localProject:now.project,repository:now.githubRepository??(githubProject.test(now.project)?now.project:undefined),
-          prNumber:now.githubPrNumber,expectedBase:now.githubExpectedBase,deliveryStrategy:now.deliveryStrategy,
-          implementerRunId:now.correctionRunId??now.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId,
-          implementerRunIds:this.authorRunIds(now)});
-        const verdict=await this.rdd.assess(tx.id);
-        if(verdict.record.state==='APPROVED_PENDING_ACK')await this.rdd.acknowledge(tx.id,verdict.record.revision);
-        if(['APPROVED_PENDING_ACK','ACKNOWLEDGED'].includes(verdict.record.state)){
-          await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const item=r.steps.find(x=>x.id===phase.id)!;
-            if(item.status!=='COMPLETE'){item.status='COMPLETE';r.revision++;}});
-          return this.tick(runId,runtime);
-        }
-        return {...common,status:verdict.record.state,phaseId:phase.id,reviewId:now.reviewId,review:evidence,panterRdd:verdict,next:[]};
-      }
-      return {...common,status:review.stage==='AWAITING_REPORTS'?'WAITING_REMOTE_REVIEW':
-        evidence.status==='EVIDENCE_INCOMPLETE'?'REVIEW_EVIDENCE_INCOMPLETE':'AWAITING_RDD_AUTHORITY',
-        phaseId:phase.id,reviewId:now.reviewId,review:evidence,next:[]};
+      return this.remoteReviewTick(runId,runtime,phase,'REVIEW',kind,now,common);
     }
     if(phase.phase==='IMPLEMENT'&&record.units?.length){
       const unreported=record.units.filter(x=>x.state==='PENDING');

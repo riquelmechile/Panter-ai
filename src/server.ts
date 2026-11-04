@@ -181,6 +181,8 @@ harness.setHostHooks({
     const comment = (phase === 'VERIFY' || phase === 'REVIEW' || phase === 'JUDGMENT') && run.githubPrNumber ? ` You may comment on PR #${run.githubPrNumber} with panter_github_comment.` : '';
     return `${target} ${claim} This phase is read-only on GitHub.${comment}`;
   },
+  writerHosts: () => githubWorkforce.writerHosts(),
+  remoteAttestation: () => rddTransportAttestation,
   pickupClockStart: (work, limitMs) => pickupClockStart(mesh, grokRoutineWake, work, limitMs),
   pickupTimeoutMs: host => (pickupPerHost.get(host) ?? (materialHosts.has(host) ? pickupMailSeconds : pickupSeconds)) * 1000,
   abandoned: async ({ workId }) => { if (githubWorkforce.configured) await githubWorkforce.revoke(leaderHost(), workId); },
