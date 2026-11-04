@@ -51,6 +51,8 @@ export type HarnessTickResult={runId:string;mode:HarnessMode;risk:'LOW'|'HIGH';r
 export type HarnessHostHooks={
   /** Read-only material for hosts that cannot reach the repository (e.g. Gemini by e-mail). */
   materialFor?(run:HarnessRun,host:Host):Promise<string|undefined>;
+  /** Trusted note telling the host how to reach the run's repository for this phase (tools, grant, branch). */
+  accessFor?(run:HarnessRun,host:Host,phase:HarnessPhase):string|undefined;
   /** Called for remote work whose result will never be read (e.g. a running lens of an abandoned review), to revoke its grants. */
   abandoned?(input:{workId:string;host:Host}):Promise<void>;
   /** Called after a phase or review lens was dispatched to a host (e.g. to attach a work-scoped GitHub grant). */
@@ -94,6 +96,77 @@ export function chooseHarness(input:HarnessInput){
   return {paths,risk,tier,reasons,phases,reviewKind,mode:input.coordinationMode??'AUTO'};
 }
 
+/** How a remote phase reports back, so the harness can record it without the leader re-typing it. */
+function completionFormat(phase:HarnessPhase){
+  const discover=phase==='DISCOVER'?', "discoveredPaths": ["<each repository-relative file the change must edit, at most 16; this becomes the edit scope>"]':'';
+  return `This completion format overrides any output format above. Complete this work with exactly one JSON object and nothing else: {"summary": "<what you did and found>", "evidence": ["<one observed fact per item: commands run and their results, files read, commits made>"], "candidateSha": "<the exact 40-hex commit you produced or verified, if any>", "runId": "<a unique id for this run of yours>"${discover}}. Never claim evidence you did not observe.`;
+}
+function phaseNotes(phase:HarnessPhase,access?:string){return [access,completionFormat(phase)].filter(Boolean).join('\n\n');}
+type PhaseResult={summary:string;evidence:string[];runId?:string;candidateSha?:string;discoveredPaths?:string[]};
+const MAX_RESULT_TEXT=100_000;
+/** Top-level balanced {...} spans of a text, string-aware. An unclosed '{' or '"' in prose does not hide what follows:
+ * the scan restarts after it (a bounded number of times). */
+function objectSpans(text:string){
+  const out:string[]=[];
+  let from=0;
+  for(let restarts=0;restarts<32&&from<text.length;restarts++){
+    let depth=0,start=-1,inString=false,escaped=false,i=from;
+    for(;i<text.length;i++){
+      const c=text[i];
+      if(inString){if(escaped)escaped=false;else if(c==='\\')escaped=true;else if(c==='"')inString=false;continue;}
+      if(c==='"'&&depth>0){inString=true;continue;}
+      if(c==='{'){if(depth===0)start=i;depth++;}
+      else if(c==='}'&&depth>0){depth--;if(depth===0)out.push(text.slice(start,i+1));}
+    }
+    if(depth===0)break;
+    from=start+1;
+  }
+  return out;
+}
+/** Bodies of fenced code blocks, found line by line (linear time). */
+function fencedBlocks(text:string){
+  const out:string[]=[];const lines=text.split('\n');let open=-1;
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i]!.trim();
+    if(open<0){if(/^```[a-zA-Z0-9_-]*$/.test(line))open=i;}
+    else if(line==='```'){out.push(lines.slice(open+1,i).join('\n').trim());open=-1;}
+  }
+  return out;
+}
+/** A copied completion-format placeholder such as "<what you did>". */
+const placeholder=(x:unknown)=>typeof x==='string'&&/^<[^<>]*>$/.test(x.trim());
+/** null or "" means "not given". */
+function given<T>(v:T):T|undefined{return v===null||v===''?undefined:v;}
+/** A remote phase result: one JSON object, bare, fenced or surrounded by prose. Every candidate in the text is
+ * considered; if they disagree (e.g. a result-shaped object quoted from a diff), nothing is accepted. A copy of the
+ * completion-format template (a field that is just an <angle-bracket placeholder>) is ignored. */
+export function structuredResult(text:string|null|undefined):PhaseResult|null{
+  if(!text||text.length>MAX_RESULT_TEXT)return null;
+  const candidates=[text.trim(),...fencedBlocks(text),...objectSpans(text)];
+  const valid=new Map<string,PhaseResult>();
+  for(const c of candidates){
+    let v:any;
+    try{v=JSON.parse(c);}catch{continue;}
+    if(!v||typeof v!=='object'||Array.isArray(v)||typeof v.summary!=='string'||[v.summary,v.runId,v.candidateSha].some(placeholder)||
+      !Array.isArray(v.evidence)||!v.evidence.every((e:unknown)=>typeof e==='string'))continue;
+    const r:PhaseResult={summary:v.summary,evidence:v.evidence};
+    const candidateSha=given(v.candidateSha),runId=given(v.runId),discoveredPaths=given(v.discoveredPaths);
+    if(candidateSha!==undefined)r.candidateSha=candidateSha;
+    if(runId!==undefined)r.runId=runId;
+    if(discoveredPaths!==undefined)r.discoveredPaths=discoveredPaths;
+    valid.set(JSON.stringify(r),r);
+  }
+  return valid.size===1?[...valid.values()][0]!:null;
+}
+/** The shape panter_harness_report validates up front (phase rules inside the write are handled by the caller). */
+function reportable(r:PhaseResult){
+  const pathOk=(p:unknown)=>{if(typeof p!=='string')return false;try{safePath(p);return true;}catch{return false;}};
+  return r.summary.trim().length>0&&r.summary.length<=6000&&r.evidence.length>0&&r.evidence.length<=40&&
+    r.evidence.every(x=>!!x.trim()&&x.length<=1000)&&
+    (r.candidateSha===undefined||(typeof r.candidateSha==='string'&&/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(r.candidateSha)))&&
+    (r.runId===undefined||(typeof r.runId==='string'&&r.runId.length<=160))&&
+    (r.discoveredPaths===undefined||(Array.isArray(r.discoveredPaths)&&r.discoveredPaths.length<=16&&r.discoveredPaths.every(pathOk)));
+}
 export class AutomaticHarness {
   private state:State={version:1,runs:[]};
   private pending:Promise<unknown>=Promise.resolve();
@@ -398,11 +471,15 @@ export class AutomaticHarness {
       if(work?.state==='COMPLETED'){
         // Result is persisted in the Mesh ledger and never echoed via inbox.
         const persisted=await this.mesh.resultGet(leaderHost(),phase.remoteWorkId);
-        let result:unknown;
-        try{result=JSON.parse(persisted.result??'');}catch{result=null;}
+        const result=structuredResult(persisted.result);
         if(!result||typeof result!=='object'||!('summary' in result)||!('evidence' in result))
           return {...common,status:'REMOTE_RESULT_NEEDS_STRUCTURED_EVIDENCE',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
-        await this.report(runId,phase.id,result as {summary:string;evidence:string[];runId?:string;candidateSha?:string;discoveredPaths?:string[]});
+        if(!reportable(result))return {...common,status:'REMOTE_RESULT_NEEDS_STRUCTURED_EVIDENCE',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
+        // Host-controlled content can still fail a phase rule checked inside the write (scope, SHA, verifier
+        // independence): surface the reason instead of throwing from every tick; the leader can report by hand.
+        try{await this.report(runId,phase.id,result);}
+        catch(error){return {...common,status:'REMOTE_RESULT_REJECTED',phaseId:phase.id,workId:phase.remoteWorkId,next:[],
+          detail:error instanceof Error?error.message.slice(0,300):'rejected'};}
         return this.tick(runId,runtime);
       }
       const stale=await this.unstartedTooLong(phase.remoteWorkId);
@@ -494,7 +571,8 @@ export class AutomaticHarness {
         });
         if(remoteReady){
           const remote=await this.mesh.startReview(leaderHost(),{missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:review:${record.candidateSha}:${record.reviewAttempt??0}`,
-            materialFor:this.hooks.materialFor?host=>this.hooks.materialFor!(record,host):undefined});
+            materialFor:this.hooks.materialFor?host=>this.hooks.materialFor!(record,host):undefined,
+            notesFor:host=>this.hooks.accessFor?.(record,host,'REVIEW')});
           await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(!r.reviewId){r.reviewId=remote.id;r.reviewTransport='REMOTE';r.revision++;}});
           for(const workId of remote.workIds){const t=await this.mesh.workTarget(leaderHost(),workId).catch(()=>null);if(t)await this.dispatched(record,workId,'REVIEW',t.target);}
         }else{
@@ -657,7 +735,8 @@ export class AutomaticHarness {
       const work=await this.mesh.delegateBoundSpecialist(leaderHost(),{missionId:record.id,agentId:phase.agentId,objective:packetObjective,
         candidateSha:record.candidateSha??undefined,allowedEditSurfaces:phase.phase==='IMPLEMENT'?record.paths:undefined,
         idempotencyKey:`harness:${record.id}:${phase.id}:${record.candidateSha??'none'}:${record.correctionAttempts??0}:${phase.redispatchGeneration??0}`,
-        material:this.hooks.materialFor?await this.hooks.materialFor(record,binding.host):undefined});
+        material:this.hooks.materialFor?await this.hooks.materialFor(record,binding.host):undefined,
+        leaderNotes:phaseNotes(phase.phase,this.hooks.accessFor?.(record,binding.host,phase.phase))});
       await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;
         if(st.status==='PENDING'){st.status='ISSUED';st.execution='REMOTE_A2A';st.remoteWorkId=work.id;r.revision++;}});
       await this.dispatched(record,work.id,phase.phase,binding.host);

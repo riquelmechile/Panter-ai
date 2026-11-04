@@ -371,3 +371,10 @@ test('a path limit survives later grants, only narrows, and an automatic re-issu
   assert.deepEqual(again.ops, ['commit']);
   await assert.rejects(gh.commit('gpt-a', claim, 'x', [{ path: 'package.json', content: '{}' }]), /Outside the approved edit surfaces/);
 }));
+
+test('narrowing accepts the same folder with or without a trailing slash', () => fixture(commitRoutes(), async ({ gh, workId }) => {
+  await gh.grant('claude', { workId, repository: 'acme/site', ops: ['commit'], paths: ['docs/'] });
+  const g = await gh.grant('claude', { workId, repository: 'acme/site', ops: ['commit'], paths: ['docs', 'docs/sub'] });
+  assert.deepEqual(g.paths, ['docs', 'docs/sub']);
+  await assert.rejects(gh.grant('claude', { workId, repository: 'acme/site', ops: ['commit'], paths: ['docs-evil'] }), /can only narrow/);
+}));
