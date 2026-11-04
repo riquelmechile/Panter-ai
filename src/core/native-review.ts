@@ -23,7 +23,8 @@ export class NativeReviewBridge {
     try{
       const {stdout}=await run(this.cfg.binary,['review',...args],{
         cwd:this.root,timeout:12000,maxBuffer,windowsHide:true,
-        env:{...process.env,NO_COLOR:'1'},
+        // Never hand Panter's own credentials (e.g. the workforce GitHub token) to the external binary.
+        env:{...Object.fromEntries(Object.entries(process.env).filter(([k])=>!/^PANTER_.*(TOKEN|SECRET|KEY|PASSWORD)/.test(k))),NO_COLOR:'1'},
       });
       if(stdout.length>maxBuffer)throw new Error('Response too large');
       let data:unknown;try{data=JSON.parse(stdout)}catch{data={raw:stdout.slice(0,12000)}}
