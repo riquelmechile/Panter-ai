@@ -22,6 +22,11 @@ test('matches Gentle Shell branch and Conventional Commit formats',()=>{
   assert.equal(inspectBranchName('feat/alpha-v2'),true);
   assert.equal(inspectBranchName('main'),false);
   assert.equal(inspectBranchName('Feat/new'),false);
+  // Branches the Panter workforce creates for workers.
+  assert.equal(inspectBranchName('panter/gpt-a-dee64fd2'),true);
+  assert.equal(inspectBranchName('panter/../main'),false);
+  assert.equal(inspectBranchName('panter/'),false);
+  assert.equal(inspectBranchName('panter/Gpt-A'),false);
   assert.equal(inspectCommitMessage('feat(review): add review tests'),true);
   assert.equal(inspectCommitMessage('Update everything'),false);
 });

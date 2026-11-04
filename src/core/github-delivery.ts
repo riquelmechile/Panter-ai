@@ -32,10 +32,13 @@ const loginPattern = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
 const MAX_REVIEW_PAGES = 10;
 const repoPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const branchPattern = /^(feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert)\/[a-z0-9._-]+$/;
+/** Branches the Panter GitHub workforce creates for a worker's work (panter/<host>-<work8> by default, or a leader-chosen
+ * name under panter/). Workers can only push there, so the gate must accept them. */
+const panterBranchPattern = /^panter\/[a-z0-9._-]+$/;
 const conventional = /^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9._-]+\))?!?: .+$/;
 const acceptedTypes = new Set(['type:bug','type:feature','type:docs','type:refactor','type:chore','type:breaking-change']);
 export function inspectCommitMessage(message:string){return conventional.test(message.split('\n')[0]??'');}
-export function inspectBranchName(branch:string){return branchPattern.test(branch) && !branch.includes('..');}
+export function inspectBranchName(branch:string){return (branchPattern.test(branch)||panterBranchPattern.test(branch)) && !branch.includes('..');}
 function check(value:unknown,why:string):asserts value{if(!value)throw new Error(why);}
 function labelNames(list:unknown):string[]{return Array.isArray(list)?list.map(x=>typeof x==='string'?x:(x && typeof x==='object' && 'name' in x ? String(x.name):'')).filter(Boolean):[];}
 function linkedIssue(body:string, targetRepository:string):number|null {
@@ -102,7 +105,7 @@ export class GitHubDeliveryGate {
       result.headSha=head;result.baseBranch=base;result.draft=prData.draft===true;
        if(result.draft)blocked.push('Pull request is still draft; mark ready before review');
       const branch=String(prData.head?.ref??'');
-      if(!inspectBranchName(branch))blocked.push('Branch violates Gentle Shell type/description naming');else ok.push('branch');
+      if(!inspectBranchName(branch))blocked.push('Branch violates Gentle Shell type/description naming (or Panter workforce panter/...)');else ok.push('branch');
       if(head!==input.expectedSha)blocked.push('Pull request HEAD differs from frozen candidate SHA');else ok.push('exact_sha');
       if(input.expectedBase&&base!==input.expectedBase)blocked.push('PR base differs from operator-authorized base');
       else if(!input.expectedBase&&base!==defaultBranch)result.warnings.push('PR targets a non-default base; verify intended stacked-PR dependency');
