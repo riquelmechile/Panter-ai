@@ -375,6 +375,29 @@ test('messages the new leader sent as a worker are not re-addressed to itself', 
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test('a review whose lens was already completed by the new leader is INTERRUPTED and replaced, not stuck', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-switch12-'));
+  try {
+    process.env.PANTER_LEAD_HOST = 'gpt-a';
+    const a = await MeshEngine.open(dir);
+    await a.setProfile('gpt-a', { host: 'claude', actorId: 'actor-claude', modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer'] }, 0);
+    await a.setProfile('gpt-a', worker('gpt-b'), 0);
+    await a.bindSpecialist('gpt-a', { agentId: 'review-risk', host: 'claude', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] }, 0);
+    for (const agentId of ['review-readability', 'review-reliability', 'review-resilience'])
+      await a.bindSpecialist('gpt-a', { agentId, host: 'gpt-b', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] }, 0);
+    const review = await a.startReview('gpt-a', { missionId: 'm', kind: '4r', objective: 'Review', candidateSha: 'f'.repeat(40), idempotencyKey: 'r-12' });
+    const lens = (await a.pending('claude'))[0]!;
+    const claim = await a.claim('claude', lens.workId);
+    await a.complete('claude', lens.workId, claim.attemptId!, claim.leaseGeneration, JSON.stringify({ findings: [] }), true);
+    process.env.PANTER_LEAD_HOST = 'claude';
+    const m = await MeshEngine.open(dir);
+    const status = await m.reviewStatus('claude', review.id);
+    assert.equal(status.work.find(w => w.workId === lens.workId)?.state, 'COMPLETED');
+    assert.equal(status.stage, 'INTERRUPTED');
+    assert.equal(await m.abortInterruptedReview('claude', review.id), 3);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 // Keep last: freezing is process-wide by design.
 test('freezeLeaderHost pins the leader for the process', async () => {
   const mod = await import('../src/core/leadership.js');

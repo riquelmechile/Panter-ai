@@ -28,6 +28,11 @@ export function isHost(x: string): x is Host { return hosts.has(x); }
 function check(condition: unknown, reason: string): asserts condition { if (!condition) throw new Error(reason); }
 function sha(value: string) { return createHash('sha256').update(value).digest('hex'); }
 function iso() { return new Date().toISOString(); }
+/** A review session can never yield valid evidence once a lens was aborted by a leader switch or ran on
+ *  the host that is now the leader (the leader's own lens is not independent review). */
+function reviewInterrupted(works: Array<Pick<MeshWork, 'state' | 'target'>>) {
+  return works.some(w => w.state === 'ABORTED_NO_EFFECTS' || w.target === leaderHost());
+}
 function activeBindings(d: MeshData) { return (d.specialistBindings ?? []).filter(b => b.host !== leaderHost()); }
 
 export class MeshEngine {
@@ -159,7 +164,7 @@ export class MeshEngine {
       const review = (d.reviews ?? []).find(r => r.id === reviewId);
       check(review, 'Review not found');
       const works = review.workIds.map(id => d.works.find(w => w.id === id)).filter((w): w is MeshWork => !!w);
-      check(works.some(w => w.state === 'ABORTED_NO_EFFECTS'), 'Review is not interrupted');
+      check(reviewInterrupted(works), 'Review is not interrupted');
       let aborted = 0;
       for (const w of works) if (w.state === 'QUEUED') {
         w.state = 'ABORTED_NO_EFFECTS'; w.completedAt = iso(); w.result = 'Review interrupted by leader switch: sibling lens aborted without effects';
@@ -732,8 +737,9 @@ export class MeshEngine {
       const work=review.workIds.map(id=>d.works.find(w=>w.id===id));
       check(work.every(Boolean),'Review ledger inconsistent');
       const terminal=work.every(w=>w!.state==='COMPLETED'||w!.state==='FAILED');
-      // A leader switch aborts review work addressed to the new leader; that session can never complete.
-      const interrupted=work.some(w=>w!.state==='ABORTED_NO_EFFECTS');
+      // A leader switch aborts review work addressed to the new leader, and a lens already completed by
+      // the new leader no longer counts as independent: either way that session can never complete.
+      const interrupted=reviewInterrupted(work as MeshWork[]);
       return {review,stage:interrupted?'INTERRUPTED' as const:terminal?'READY_FOR_CONTROLLER' as const:'AWAITING_REPORTS' as const,
         nativeReviewAuthority:false,
         work:work.map(w=>({workId:w!.id,agentId:w!.specialist?.agentId,packetDigest:w!.specialist?.packetDigest,host:w!.target,state:w!.state,receiptDigest:w!.receiptDigest,result:w!.result}))};
