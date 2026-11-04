@@ -390,3 +390,72 @@ test('a report accepted as clean carries no severe value anywhere, in any shape;
   const deep = '{"agentId":"review-risk","candidateSha":"' + sha + '","findings":[],"x":' + '['.repeat(5000) + ']'.repeat(5000) + '}';
   assert.doesNotThrow(() => lensEnvelope(deep, 'review-risk', sha));
 });
+
+async function finishLenses(m: MeshEngine, report: (agentId: string) => string) {
+  for (const host of ['grok', 'grok', 'gemini', 'gpt-b'] as const) {
+    const p: any = await m.pickup(host, 300);
+    if (p.status !== 'CLAIMED') continue;
+    await m.complete(host, p.work.id, p.work.attemptId, p.work.leaseGeneration, report(p.work.specialist.agentId));
+  }
+}
+const lensReport = (agentId: string, findings: unknown[] = []) =>
+  JSON.stringify({ agentId, candidateSha: sha, packetDigest: 'x', subagentRunId: `run-${agentId}`, findings, evidence: ['read the diff'] });
+
+test('lens reports that cannot be used start the review again: once remote, then native', () => withHosts(async (h, m) => {
+  const id = await toReview(h, 'rt1');
+  assert.equal((await h.tick(id, all)).status, 'WAITING_REMOTE_REVIEW');
+  const first = (await h.get(id))!.reviewId;
+  // One lens answers in prose: every lens finished, but the session can never complete.
+  await finishLenses(m, a => a === 'review-readability' ? '[via relay] looks fine' : lensReport(a));
+  const retry: any = await h.tick(id, all);
+  assert.equal(retry.retry?.reason, 'REVIEW_EVIDENCE_INCOMPLETE');
+  assert.equal(retry.retry?.native, false);
+  assert.equal(retry.status, 'WAITING_REMOTE_REVIEW', 'the same candidate is reviewed remotely again');
+  const second = (await h.get(id))!.reviewId;
+  assert.ok(second && second !== first);
+  await finishLenses(m, a => a === 'review-readability' ? 'still prose' : lensReport(a));
+  const native: any = await h.tick(id, all);
+  assert.equal(native.retry?.native, true);
+  assert.equal((await h.get(id))!.reviewTransport, 'NATIVE');
+}));
+
+test('a severe finding inside an unusable lens report is never retried away', () => withHosts(async (h, m) => {
+  const id = await toReview(h, 'rt2');
+  await h.tick(id, all);
+  const first = (await h.get(id))!.reviewId;
+  await finishLenses(m, a => a === 'review-risk' ? 'Severity: CRITICAL, token leaks to logs' : lensReport(a));
+  const t: any = await h.tick(id, all);
+  assert.equal(t.retry, undefined);
+  assert.equal((await h.get(id))!.reviewId, first);
+  assert.ok(t.review.reasons.some((x: string) => x.startsWith('Severe finding(s) reported in an unaccepted report')));
+}));
+
+test('no retry while any lens says something severe: accepted CRITICAL, failed lens, or severe words in prose', async () => {
+  const critical = (a: string) => lensReport(a, [{ id: 'R1', location: 'src/auth.ts:1', severity: 'CRITICAL', claim: 'token leaks', proofRefs: ['changed-hunk:src/auth.ts:1'] }]);
+  const cases: Array<[string, (a: string) => string, string?]> = [
+    ['accepted CRITICAL next to a prose lens', a => a === 'review-risk' ? critical(a) : a === 'review-readability' ? 'looks fine' : lensReport(a)],
+    ['bare BLOCKER prose', a => a === 'review-risk' ? 'BLOCKER: migration drops the users table' : lensReport(a)],
+    ['bracketed prose', a => a === 'review-risk' ? '[critical] token in logs' : lensReport(a)],
+    ['failed lens carrying a CRITICAL', a => critical(a), 'review-risk'],
+    ['plural in prose', a => a === 'review-risk' ? 'Found 2 blockers in auth; cannot sign off.' : lensReport(a)],
+    ['compound key in unbound JSON', a => a === 'review-risk' ? JSON.stringify({ agentId: a, candidateSha: 'b'.repeat(40), criticalCount: 2 }) : lensReport(a)],
+    ['failed lens with a clean envelope that mentions a BLOCKER', a => a === 'review-risk' ? JSON.stringify({ agentId: a, candidateSha: sha, packetDigest: 'x', subagentRunId: 'r', findings: [], evidence: ['BLOCKER: migration drops users table; lens aborted'] }) : lensReport(a), 'review-risk'],
+    ['escaped word in prose plus JSON', a => a === 'review-risk' ? 'Result:\n{"findings":[{"severity":"\\u0043RITICAL","claim":"token leak"}]}' : lensReport(a)],
+    ['escaped word under a non-severity key', a => a === 'review-risk' ? '{"agentId":"review-risk","candidateSha":"' + 'b'.repeat(40) + '","summary":"\\u0043RITICAL token leak"}' : lensReport(a)],
+    ['escaped severity in unbound JSON', a => a === 'review-risk' ? '{"agentId":"review-risk","candidateSha":"' + 'b'.repeat(40) + '","findings":[{"severity":"\\u0043RITICAL"}]}' : lensReport(a)],
+  ];
+  for (const [name, report, failAgent] of cases) await withHosts(async (h, m) => {
+    const id = await toReview(h, `sev-${name}`);
+    await h.tick(id, all);
+    const first = (await h.get(id))!.reviewId;
+    for (const host of ['grok', 'grok', 'gemini', 'gpt-b'] as const) {
+      const p: any = await m.pickup(host, 300);
+      if (p.status !== 'CLAIMED') continue;
+      const agent = p.work.specialist.agentId;
+      await m.complete(host, p.work.id, p.work.attemptId, p.work.leaseGeneration, failAgent && agent !== failAgent ? 'prose' : report(agent), agent !== failAgent);
+    }
+    const t: any = await h.tick(id, all);
+    assert.equal(t.retry, undefined, name);
+    assert.equal((await h.get(id))!.reviewId, first, name);
+  });
+});

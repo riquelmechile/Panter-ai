@@ -10,7 +10,7 @@ import { specialistPacket, GENTLE_AGENTS, type GentleAgentId } from './gentle-ca
 import { hostRequest } from './policy.js';
 import { type Host, type MeshEngine } from './mesh.js';
 import { type NativeSubagentReview } from './native-review-workflow.js';
-import { assessMeshReview, type NativeReviewBridge } from './native-review.js';
+import { assessMeshReview, lensEnvelope, unacceptedSevere, type NativeReviewBridge } from './native-review.js';
 import { type GitHubDeliveryGate } from './github-delivery.js';
 import { type PanterRdd } from './panter-rdd.js';
 
@@ -36,7 +36,7 @@ export type HarnessRun={id:string;project:string;githubRepository?:string;github
   mode:HarnessMode; paths:string[]; risk:'LOW'|'HIGH'; reviewTier?:'passive'|'medium'|'high'; reason:string[]; candidateSha:string|null;
   reviewKind:'4r'|null; reviewId:string|null; reviewTransport:'NATIVE'|'REMOTE'|null;
   judgmentRequested?:boolean; judgmentId?:string|null; writeGrantId?:string;
-  correctionAttempts?:number; correctionRunId?:string; correctionRunIds?:string[]; previousReviewId?:string|null; reviewAttempt?:number; reviewNativeOnly?:boolean; deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main';
+  correctionAttempts?:number; correctionRunId?:string; correctionRunIds?:string[]; previousReviewId?:string|null; reviewAttempt?:number; reviewNativeOnly?:boolean; reviewEvidenceRetries?:number; deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main';
   units?:Array<{id:string;objective:string;paths:string[];state:'PENDING'|'REPORTED';runId?:string;summary?:string;evidence?:string[]}>;
   steps:HarnessStep[]; createdAt:string;revision:number;};
 type WriteGrant={id:string;project:string;objectiveDigest:string;allowedPaths:string[];expiresAt:number;boundRunId:string|null};
@@ -282,7 +282,7 @@ export class AutomaticHarness {
       ensure(!review||review.status!=='COMPLETE'||(!!judgment&&judgment.status!=='COMPLETE'&&!!r.judgmentId),'Closed review cannot be silently rewritten');
       r.previousReviewId=r.reviewId;
       r.candidateSha=payload.candidateSha;r.reviewId=null;r.reviewTransport=null;r.judgmentId=null;
-      r.correctionAttempts=(r.correctionAttempts??0)+1;r.correctionRunId=payload.runId;
+      r.correctionAttempts=(r.correctionAttempts??0)+1;r.correctionRunId=payload.runId;r.reviewEvidenceRetries=0;
       r.correctionRunIds=[...new Set([...(r.correctionRunIds??[]),payload.runId])];
       for(const step of r.steps)if(['VERIFY','REVIEW','JUDGMENT'].includes(step.phase)){
         step.status='PENDING';step.execution=undefined;step.remoteWorkId=undefined;step.result=undefined;
@@ -644,6 +644,20 @@ export class AutomaticHarness {
         }
       }
       const evidence=assessMeshReview({kind:review.review.kind,candidateSha:review.review.candidateSha,work:review.work});
+      // Every lens finished but some report cannot be used (failed, unstructured or not bound to this lens and SHA):
+      // the session can never complete, so review the same candidate again — once remote, then native. A session where
+      // any lens reports anything severe — in an accepted report, a failed lens or any text that is not a usable report — is
+      // never retried away: that needs the leader.
+      if(review.stage==='READY_FOR_CONTROLLER'&&evidence.status==='EVIDENCE_INCOMPLETE'&&
+        !evidence.reasons.some(x=>x.startsWith('Severe finding(s)'))&&
+        !review.work.some(w=>mentionsSevere(w.result,w.state,w.agentId??'',review.review.candidateSha))){
+        const retries=now.reviewEvidenceRetries??0;
+        await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(r.reviewId===now.reviewId){r.reviewId=null;r.reviewTransport=null;
+          r.reviewAttempt=(r.reviewAttempt??0)+1;r.reviewEvidenceRetries=retries+1;if(retries>=1)r.reviewNativeOnly=true;r.revision++;}});
+        const next=await this.tick(runId,runtime);
+        return {...next,retry:{phaseId:phase.id,previousReviewId:now.reviewId,reason:'REVIEW_EVIDENCE_INCOMPLETE',
+          reasons:evidence.reasons,native:retries>=1}};
+      }
       if(this.rdd&&review.stage==='READY_FOR_CONTROLLER'){
         const tx=await this.rdd.begin({missionId:now.id,reviewId:now.reviewId,source:'REMOTE',
           candidateSha:now.candidateSha!,kind,localProject:now.project,repository:now.githubRepository??(githubProject.test(now.project)?now.project:undefined),
@@ -734,4 +748,17 @@ export class AutomaticHarness {
       instruction:packet.instruction,requestedWorkerProcessing:policy.worker.preferredProcessing,
       notice:'Host must invoke its actual tool/subagent and return evidence; MCP has not started model inference.'}]};
   }
+}
+
+/** Whether a lens result says anything severe. A report accepted for its lens and SHA is judged by its findings (an
+ * accepted clean report carries no severe value anywhere); any other text — failed, prose, unbound — counts as severe
+ * when the words appear at all, in any spelling, since nothing then tells a finding from a passing mention. */
+function mentionsSevere(result:string|null,state:string,agentId:string,candidateSha:string):boolean{
+  if(!result)return false;
+  // Only a finished lens can be accepted; a failed one is judged by its text like any other unusable report.
+  const envelope=state==='COMPLETED'?lensEnvelope(result,agentId,candidateSha):'UNSTRUCTURED';
+  if(typeof envelope==='object')return envelope.findings.some(f=>/^(critical|blocker)$/i.test(String(f.severity).trim()));
+  // Any spelling: plurals, compound keys (criticalCount, critical_findings), and letters written as JSON \u escapes.
+  const decoded=result.replace(/\\u([0-9a-fA-F]{4})/g,(_,h:string)=>String.fromCharCode(parseInt(h,16)));
+  return /critical|blocker/i.test(decoded)||!!unacceptedSevere(result);
 }
