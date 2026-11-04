@@ -60,7 +60,7 @@ export type HarnessHostHooks={
   /** How long a host may leave a dispatched phase unstarted before it runs native instead. */
   pickupTimeoutMs?(host:Host):number;
   /** When a work's pickup clock starts (ISO), or null while it is legitimately waiting to be signalled; default createdAt. */
-  pickupClockStart?(work:{id:string;target:Host;createdAt:string}):Promise<string|null>;
+  pickupClockStart?(work:{id:string;target:Host;createdAt:string},limitMs:number):Promise<string|null>;
 };
 export type HarnessRuntime={nativeSubagents:boolean;maxParallelSubagents:number;toolsAvailable:boolean;
   peerStates?:Partial<Record<Host,'CONNECTED'|'UNAVAILABLE'|'UNKNOWN'>>};
@@ -183,7 +183,7 @@ export class AutomaticHarness {
     const w=await this.mesh.workTarget(leaderHost(),workId).catch(()=>null);
     if(!w||!(w.state==='QUEUED'||w.transportHeld))return null;
     const limit=this.hooks.pickupTimeoutMs(w.target);
-    const start=this.hooks.pickupClockStart?await this.hooks.pickupClockStart({id:workId,target:w.target,createdAt:w.createdAt}).catch(()=>w.createdAt):w.createdAt;
+    const start=this.hooks.pickupClockStart?await this.hooks.pickupClockStart({id:workId,target:w.target,createdAt:w.createdAt},limit).catch(()=>w.createdAt):w.createdAt;
     if(start===null)return null;
     return Date.now()-Date.parse(start)>limit?{host:w.target,limit}:null;
   }

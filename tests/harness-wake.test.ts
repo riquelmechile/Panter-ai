@@ -44,8 +44,11 @@ test('concurrent rings never ring two Grok works; the pickup clock starts at the
     const { pickupClockStart } = await import('../src/core/harness-wake.js');
     const first = rung[0]!, second = first === a.id ? b : a;
     const w1 = await m.workTarget('gpt-a', first);
-    assert.equal(await pickupClockStart(m, bell, { id: first, target: 'grok', createdAt: w1.createdAt }), (await m.grokWakeStatus('gpt-a', first)).reservedAt);
-    assert.equal(await pickupClockStart(m, bell, { id: second.id, target: 'grok', createdAt: second.createdAt }), null, 'waiting behind the rung work');
-    assert.equal(await pickupClockStart(m, { configured: false, dispatch: bell.dispatch }, { id: second.id, target: 'grok', createdAt: second.createdAt }), second.createdAt);
+    assert.equal(await pickupClockStart(m, bell, { id: first, target: 'grok', createdAt: w1.createdAt }, 180_000), (await m.grokWakeStatus('gpt-a', first)).reservedAt);
+    assert.equal(await pickupClockStart(m, bell, { id: second.id, target: 'grok', createdAt: second.createdAt }, 180_000), null, 'not rung yet: does not age');
+    // A stuck blocker never stalls it forever: past the wait cap it ages from creation.
+    const old = new Date(Date.now() - 5 * 60_000).toISOString();
+    assert.equal(await pickupClockStart(m, bell, { id: second.id, target: 'grok', createdAt: old }, 60_000), old);
+    assert.equal(await pickupClockStart(m, { configured: false, dispatch: bell.dispatch }, { id: second.id, target: 'grok', createdAt: second.createdAt }, 180_000), second.createdAt);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

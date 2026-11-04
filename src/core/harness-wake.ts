@@ -23,17 +23,16 @@ export async function ringGrokForWork(mesh:MeshEngine,grok:RoutineDoorbell,workI
   return {rung:true,reason:'RUNG',accepted:response.accepted};
 }
 
-/** When the pickup clock of a harness work starts: for Grok (rung one work at a time) at its ring, and not at
- * all while it waits for Grok to be free; for everyone else at creation. */
-export async function pickupClockStart(mesh:MeshEngine,grok:RoutineDoorbell,work:{id:string;target:string;createdAt:string}):Promise<string|null>{
+/** How many pickup limits a Grok work may wait, unrung, behind other Grok work before it ages anyway (so a stuck
+ * blocker, e.g. a work left RUNNING or OUTCOME_UNKNOWN, can never stall a harness phase forever). */
+export const GROK_MAX_WAIT_LIMITS=4;
+/** When the pickup clock of a harness work starts. Grok (rung one work at a time): at its ring; while not yet rung
+ * it does not age (it is rung on a later tick once Grok is free), up to GROK_MAX_WAIT_LIMITS limits since creation.
+ * Everyone else: at creation. */
+export async function pickupClockStart(mesh:MeshEngine,grok:RoutineDoorbell,work:{id:string;target:string;createdAt:string},limitMs:number):Promise<string|null>{
   if(work.target!=='grok'||!grok.configured)return work.createdAt;
-  const leader=leaderHost();
-  const status=await mesh.grokWakeStatus(leader,work.id).catch(()=>null);
+  const status=await mesh.grokWakeStatus(leaderHost(),work.id).catch(()=>null);
   if(status?.reservedAt)return status.reservedAt;
-  // Same rule as the exclusive ring: waiting behind another Grok work in progress or rung-and-unclaimed.
-  const others=(await mesh.inbox(leader)).works.filter(w=>w.target==='grok'&&w.id!==work.id);
-  if(others.some(w=>w.state==='RUNNING'||w.state==='OUTCOME_UNKNOWN'))return null;
-  for(const w of others.filter(w=>w.state==='QUEUED'))
-    if((await mesh.grokWakeStatus(leader,w.id).catch(()=>null))?.reservedAt)return null;
-  return work.createdAt;
+  if(Date.now()-Date.parse(work.createdAt)>GROK_MAX_WAIT_LIMITS*limitMs)return work.createdAt;
+  return null;
 }
