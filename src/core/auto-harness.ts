@@ -446,8 +446,20 @@ export class AutomaticHarness {
         return {...common,status:'REMOTE_NO_EFFECTS_RECONCILED',phaseId:phase.id,workId:work.id,
           next:[],instruction:'The trusted operator confirmed no effects. A NEW fenced attempt may be dispatched on the next tick if authorization is still valid.'};
       }
-      if(work?.state==='FAILED'||work?.state==='OUTCOME_UNKNOWN')
+      if(work?.state==='FAILED'||work?.state==='OUTCOME_UNKNOWN'){
+        // A read-only phase (discovery, verification) has no effects to reconcile: its host had a read-only grant.
+        // Revoke that grant and run the phase native instead of waiting for an operator. A writer still waits.
+        if(phase.phase==='DISCOVER'||phase.phase==='VERIFY'){
+          const reset=await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;
+            if(!(st.execution==='REMOTE_A2A'&&st.remoteWorkId===work.id&&st.status==='ISSUED'))return false;
+            st.execution=undefined;st.remoteWorkId=undefined;st.status='PENDING';st.nativeOnly=true;st.fallbackFrom=work.target;
+            st.redispatchGeneration=(st.redispatchGeneration??0)+1;r.revision++;return true;});
+          if(reset)try{await this.hooks.abandoned?.({workId:work.id,host:work.target});}catch{/* best effort */}
+          const next=await this.tick(runId,runtime);
+          return reset?{...next,fallback:{phaseId:phase.id,from:work.target,reason:work.state==='FAILED'?'REMOTE_FAILED':'REMOTE_OUTCOME_UNKNOWN'}}:next;
+        }
         return {...common,status:'REMOTE_OUTCOME_NEEDS_RECONCILIATION',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
+      }
       if(work?.state==='COMPLETED'){
         // Result is persisted in the Mesh ledger and never echoed via inbox.
         const persisted=await this.mesh.resultGet(leaderHost(),phase.remoteWorkId);
