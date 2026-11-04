@@ -439,6 +439,9 @@ test('no retry while any lens says something severe: accepted CRITICAL, failed l
     ['failed lens carrying a CRITICAL', a => critical(a), 'review-risk'],
     ['plural in prose', a => a === 'review-risk' ? 'Found 2 blockers in auth; cannot sign off.' : lensReport(a)],
     ['compound key in unbound JSON', a => a === 'review-risk' ? JSON.stringify({ agentId: a, candidateSha: 'b'.repeat(40), criticalCount: 2 }) : lensReport(a)],
+    ['failed lens with a clean envelope that mentions a BLOCKER', a => a === 'review-risk' ? JSON.stringify({ agentId: a, candidateSha: sha, packetDigest: 'x', subagentRunId: 'r', findings: [], evidence: ['BLOCKER: migration drops users table; lens aborted'] }) : lensReport(a), 'review-risk'],
+    ['escaped word in prose plus JSON', a => a === 'review-risk' ? 'Result:\n{"findings":[{"severity":"\\u0043RITICAL","claim":"token leak"}]}' : lensReport(a)],
+    ['escaped word under a non-severity key', a => a === 'review-risk' ? '{"agentId":"review-risk","candidateSha":"' + 'b'.repeat(40) + '","summary":"\\u0043RITICAL token leak"}' : lensReport(a)],
     ['escaped severity in unbound JSON', a => a === 'review-risk' ? '{"agentId":"review-risk","candidateSha":"' + 'b'.repeat(40) + '","findings":[{"severity":"\\u0043RITICAL"}]}' : lensReport(a)],
   ];
   for (const [name, report, failAgent] of cases) await withHosts(async (h, m) => {

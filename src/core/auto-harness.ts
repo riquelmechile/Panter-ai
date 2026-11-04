@@ -650,7 +650,7 @@ export class AutomaticHarness {
       // never retried away: that needs the leader.
       if(review.stage==='READY_FOR_CONTROLLER'&&evidence.status==='EVIDENCE_INCOMPLETE'&&
         !evidence.reasons.some(x=>x.startsWith('Severe finding(s)'))&&
-        !review.work.some(w=>mentionsSevere(w.result,w.agentId??'',review.review.candidateSha))){
+        !review.work.some(w=>mentionsSevere(w.result,w.state,w.agentId??'',review.review.candidateSha))){
         const retries=now.reviewEvidenceRetries??0;
         await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(r.reviewId===now.reviewId){r.reviewId=null;r.reviewTransport=null;
           r.reviewAttempt=(r.reviewAttempt??0)+1;r.reviewEvidenceRetries=retries+1;if(retries>=1)r.reviewNativeOnly=true;r.revision++;}});
@@ -753,10 +753,12 @@ export class AutomaticHarness {
 /** Whether a lens result says anything severe. A report accepted for its lens and SHA is judged by its findings (an
  * accepted clean report carries no severe value anywhere); any other text — failed, prose, unbound — counts as severe
  * when the words appear at all, in any spelling, since nothing then tells a finding from a passing mention. */
-function mentionsSevere(result:string|null,agentId:string,candidateSha:string):boolean{
+function mentionsSevere(result:string|null,state:string,agentId:string,candidateSha:string):boolean{
   if(!result)return false;
-  const envelope=lensEnvelope(result,agentId,candidateSha);
+  // Only a finished lens can be accepted; a failed one is judged by its text like any other unusable report.
+  const envelope=state==='COMPLETED'?lensEnvelope(result,agentId,candidateSha):'UNSTRUCTURED';
   if(typeof envelope==='object')return envelope.findings.some(f=>/^(critical|blocker)$/i.test(String(f.severity).trim()));
-  // Any spelling: plurals, compound keys (criticalCount, critical_findings), JSON-escaped text.
-  return /critical|blocker/i.test(result)||!!unacceptedSevere(result);
+  // Any spelling: plurals, compound keys (criticalCount, critical_findings), and letters written as JSON \u escapes.
+  const decoded=result.replace(/\\u([0-9a-fA-F]{4})/g,(_,h:string)=>String.fromCharCode(parseInt(h,16)));
+  return /critical|blocker/i.test(decoded)||!!unacceptedSevere(result);
 }
