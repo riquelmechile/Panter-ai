@@ -60,6 +60,8 @@ export type HarnessHostHooks={
   afterDispatch?(input:{run:HarnessRun;workId:string;phase:HarnessPhase;host:Host}):Promise<void>;
   /** How long a host may leave a dispatched phase unstarted before it runs native instead. */
   pickupTimeoutMs?(host:Host):number;
+  /** When a work's pickup clock starts (ISO), or null while it is legitimately waiting to be signalled; default createdAt. */
+  pickupClockStart?(work:{id:string;target:Host;createdAt:string},limitMs:number):Promise<string|null>;
 };
 export type HarnessRuntime={nativeSubagents:boolean;maxParallelSubagents:number;toolsAvailable:boolean;
   peerStates?:Partial<Record<Host,'CONNECTED'|'UNAVAILABLE'|'UNKNOWN'>>};
@@ -157,7 +159,9 @@ export class AutomaticHarness {
     const w=await this.mesh.workTarget(leaderHost(),workId).catch(()=>null);
     if(!w||!(w.state==='QUEUED'||w.transportHeld))return null;
     const limit=this.hooks.pickupTimeoutMs(w.target);
-    return Date.now()-Date.parse(w.createdAt)>limit?{host:w.target,limit}:null;
+    const start=this.hooks.pickupClockStart?await this.hooks.pickupClockStart({id:workId,target:w.target,createdAt:w.createdAt},limit).catch(()=>w.createdAt):w.createdAt;
+    if(start===null)return null;
+    return Date.now()-Date.parse(start)>limit?{host:w.target,limit}:null;
   }
   private constructor(private readonly sqlite:SqliteLedger,private readonly mesh:MeshEngine,private readonly native:NativeSubagentReview,private readonly github?:GitHubDeliveryGate,private readonly officialRdd?:NativeReviewBridge,private readonly rdd?:PanterRdd,private readonly requireWriteGrant=false){}
   static async open(dir:string,mesh:MeshEngine,native:NativeSubagentReview,github?:GitHubDeliveryGate,officialRdd?:NativeReviewBridge,rdd?:PanterRdd,requireWriteGrant=false){

@@ -16,6 +16,7 @@ import { GitHubWorkforce, GITHUB_WRITE_OPS } from './core/github-workforce.js';
 import { registerTaskWire } from './core/workforce-task-wire.js';
 import { WorkforceLongPoll, withListenHint } from './core/workforce-long-poll.js';
 import { GrokRoutineWake } from './core/grok-routine-wake.js';
+import { ringGrokForWork, pickupClockStart } from './core/harness-wake.js';
 import { GeminiMailWake, MailError } from './core/gemini-mail-wake.js';
 import { WorkforceEvents, reconcileWorkforceEventOutbox } from './core/workforce-events.js';
 import { registerWorkforceEventWire } from './core/workforce-event-wire.js';
@@ -135,23 +136,33 @@ const autoGithubGrants = process.env.PANTER_HARNESS_AUTO_GITHUB_GRANTS === '1';
 const materialHosts = new Set((process.env.PANTER_MATERIAL_HOSTS ?? 'gemini').split(',').map(x => x.trim()).filter(Boolean));
 const pickupSeconds = Number(process.env.PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS ?? '180');
 const pickupMailSeconds = Number(process.env.PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS_MAIL ?? '1200');
-if (![pickupSeconds, pickupMailSeconds].every(n => Number.isInteger(n) && n >= 30 && n <= 86_400)) throw new Error('Invalid remote pickup timeout (30-86400 seconds)');
+// Optional per-host override, e.g. PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS_GROK for a host whose routine runs one work at a time.
+const pickupPerHost = new Map(HOSTS.map(h => [h, process.env[`PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS_${h.toUpperCase().replace(/-/g, '_')}`]] as const)
+  .filter((e): e is readonly [typeof HOSTS[number], string] => e[1] !== undefined && e[1] !== '').map(([h, v]) => [h, Number(v)]));
+if (![pickupSeconds, pickupMailSeconds, ...pickupPerHost.values()].every(n => Number.isInteger(n) && n >= 30 && n <= 86_400)) throw new Error('Invalid remote pickup timeout (30-86400 seconds)');
 harness.setHostHooks({
   materialFor: async (run, host) => {
     if (!materialHosts.has(host) || !githubWorkforce.configured || !run.githubRepository || !/^[a-f0-9]{40}$/.test(run.candidateSha ?? '')) return undefined;
     try { return await githubWorkforce.candidateMaterial(run.githubRepository, run.githubExpectedBase ?? null, run.candidateSha!); } catch { return undefined; }
   },
   afterDispatch: async ({ run, workId, phase, host }) => {
-    if (!autoGithubGrants || !githubWorkforce.configured || !run.githubRepository || materialHosts.has(host)) return;
-    // Commits/PRs also need the run's own operator write approval (IMPLEMENT is never dispatched without it).
-    if (phase === 'IMPLEMENT' && run.permission !== 'WRITE_APPROVED') return;
-    const comment = (phase === 'VERIFY' || phase === 'REVIEW' || phase === 'JUDGMENT') && run.githubPrNumber ? ['comment' as const] : [];
-    await githubWorkforce.grant(leaderHost(), { workId, repository: run.githubRepository, auto: true,
-      ops: phase === 'IMPLEMENT' ? ['commit', 'pr'] : comment, numbers: comment.length ? [run.githubPrNumber!] : [],
-      // The implementer commits only inside the run's approved edit surfaces.
-      ...(phase === 'IMPLEMENT' ? { paths: run.paths } : {}),
-      // The worker branches from, and opens its PR against, the run's target base.
-      ...(phase === 'IMPLEMENT' && run.githubExpectedBase ? { base: run.githubExpectedBase } : {}) });
+    const grantFor = async () => {
+      if (!autoGithubGrants || !githubWorkforce.configured || !run.githubRepository || materialHosts.has(host)) return;
+      // Commits/PRs also need the run's own operator write approval (IMPLEMENT is never dispatched without it).
+      if (phase === 'IMPLEMENT' && run.permission !== 'WRITE_APPROVED') return;
+      const comment = (phase === 'VERIFY' || phase === 'REVIEW' || phase === 'JUDGMENT') && run.githubPrNumber ? ['comment' as const] : [];
+      await githubWorkforce.grant(leaderHost(), { workId, repository: run.githubRepository, auto: true,
+        ops: phase === 'IMPLEMENT' ? ['commit', 'pr'] : comment, numbers: comment.length ? [run.githubPrNumber!] : [],
+        // The implementer commits only inside the run's approved edit surfaces.
+        ...(phase === 'IMPLEMENT' ? { paths: run.paths } : {}),
+        // The worker branches from, and opens its PR against, the run's target base.
+        ...(phase === 'IMPLEMENT' && run.githubExpectedBase ? { base: run.githubExpectedBase } : {}) });
+    };
+    // The grant exists before any doorbell rings, so a fast worker never finds itself without access.
+    try { await grantFor(); } finally {
+      // Grok is woken only by its routine webhook: ring it for harness work too (even if the grant failed).
+      if (host === 'grok') await ringGrokForWork(mesh, grokRoutineWake, workId).catch(() => undefined);
+    }
   },
   accessFor: (run, host, phase) => {
     if (!run.githubRepository) return undefined;
@@ -166,7 +177,8 @@ harness.setHostHooks({
     const comment = (phase === 'VERIFY' || phase === 'REVIEW' || phase === 'JUDGMENT') && run.githubPrNumber ? ` You may comment on PR #${run.githubPrNumber} with panter_github_comment.` : '';
     return `${target} ${claim} This phase is read-only on GitHub.${comment}`;
   },
-  pickupTimeoutMs: host => (materialHosts.has(host) ? pickupMailSeconds : pickupSeconds) * 1000,
+  pickupClockStart: (work, limitMs) => pickupClockStart(mesh, grokRoutineWake, work, limitMs),
+  pickupTimeoutMs: host => (pickupPerHost.get(host) ?? (materialHosts.has(host) ? pickupMailSeconds : pickupSeconds)) * 1000,
   abandoned: async ({ workId }) => { if (githubWorkforce.configured) await githubWorkforce.revoke(leaderHost(), workId); },
 });
 // Legacy/direct A2A writers cannot bypass the operator-issued harness grant.

@@ -27,11 +27,14 @@ Quien verifica o revisa nunca es el host que implementó (el harness lo comprueb
 - **Formato de las lentes 4R / Judgment Day**: cada lente recibe en la nota el sobre exacto que acepta el evaluador: `{"agentId", "candidateSha", "packetDigest", "subagentRunId", "findings": [{"id", "location", "severity", "claim", "proofRefs"}], "evidence"}`. La respuesta completa debe ser ese único objeto JSON (se admite un solo bloque de código alrededor); con texto fuera no cuenta. Se acepta anidado como `review_result.lens_results[]` y `proof_refs`, pero sin `agentId` y `candidateSha` exactos el informe queda sin contar. Un informe limpio no puede llevar ningún valor de severidad CRITICAL/BLOCKER en otra parte del objeto; los hallazgos graves de un informe no aceptado se muestran en el estado.
 - **Plazo para empezar**: si el host no toma la fase a tiempo (sigue en cola, o solo la tiene el transporte de correo sin respuesta), Panter la retira sin efectos y la fase pasa a ejecución nativa del líder; no se vuelve a mandar a ese host en esa corrida. Una fase que el host ya empezó nunca se retira. En la revisión 4R, si una lente se retira por no aparecer a tiempo, toda la revisión pasa a nativa y se revocan los permisos de las lentes que ya estaban corriendo; si el host alcanzó a tomarla, la revisión remota sigue.
 
+- **Timbre de Grok**: Grok solo despierta con su webhook de rutina (`PANTER_WAKE_GROK_URL` / `PANTER_WAKE_GROK_KEY`). El harness lo toca para cada fase o lente que le despacha, un trabajo a la vez: si Grok ya tiene uno en curso o uno tocado sin tomar, el siguiente se toca en el primer tick después de que quede libre. Cada trabajo se toca una sola vez (el estado queda en `panter_workforce_grok_wake_status`). El plazo para empezar de un trabajo de Grok corre desde su timbre, y no corre mientras espera que Grok quede libre (hasta 4 plazos desde su creación, para que un trabajo trabado delante no lo deje esperando para siempre). Con todo, conviene darle un plazo propio con `PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS_GROK`. El timbre suena en los ticks del líder: si nadie hace tick, el siguiente trabajo no se toca. Un timbre fallido no se reintenta; el plazo lo pasa a nativo.
+
 ```
 PANTER_HARNESS_AUTO_GITHUB_GRANTS=1             # autorización del operador para permisos por fase
 PANTER_MATERIAL_HOSTS=gemini
 PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS=180          # GPT-A, GPT-B, Grok
 PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS_MAIL=1200    # hosts por correo (Gemini)
+PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS_GROK=600     # opcional, plazo propio por host (GPT_A, GPT_B, GROK, GEMINI)
 ```
 
 Para que el harness despache a un host, el líder lo informa como `CONNECTED` en `peerStates` del tick (los hosts con suscripción a eventos, webhook o correo se despiertan solos).
