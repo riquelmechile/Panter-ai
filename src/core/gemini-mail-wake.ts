@@ -18,9 +18,12 @@ export const GEMINI_MAIL_RESULT_MARKER='PANTER_GEMINI_RESULT_V1';
 const LEASE_SECONDS=3600;
 const MAX_ATTEMPTS=3;
 const MAX_RESULT=48_000;
+const MAX_RAW_B64=420_000; // ~300 KB of MIME: a real reply fits in far less
+const MAX_MARKERS=8;
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type Ticket={workId:string;attemptId:string;leaseGeneration:number;tokenHash:string;instructionDigest:string;
+  envelopeDigest?:string;validatedAt?:string|null;
   expiresAt:string;createdAt:string;sentAt:string|null;usedAt:string|null;attempt:number};
 type Backoff={workId:string;attempts:number;nextAt:number};
 type MailData={version:1;tickets:Ticket[];backoff:Backoff[]};
@@ -81,9 +84,14 @@ export class GeminiMailWake{
     if(!this.configured||this.running)return out;
     this.running=true;
     try{
-      // An open Gemini chat that is already waiting takes the work directly; mail only wakes an idle Gemini.
-      if(this.isListening())return out;
       const data=this.db!.read('gemini_mail',seed);
+      // An open Gemini chat that is already waiting takes the work directly; mail only wakes an idle Gemini.
+      // Mailed work whose lease expired goes back to the queue so that chat can pick it up.
+      if(this.isListening()){
+        for(const t of data.tickets.filter(t=>!t.usedAt&&t.sentAt&&Date.parse(t.expiresAt)<=now))
+          await this.requeueExpired(t.workId).catch(()=>{});
+        return out;
+      }
       const blocked=(id:string)=>(data.backoff??[]).some(b=>b.workId===id&&b.nextAt>now);
       const queued=(await this.mesh.pending('gemini'))
         .filter(w=>w.role!=='implementer'&&now-Date.parse(w.createdAt)>=this.minAgeMs&&!blocked(w.workId))
@@ -97,6 +105,15 @@ export class GeminiMailWake{
       }
       return out;
     }finally{this.running=false;}
+  }
+
+  private async requeueExpired(workId:string){
+    try{
+      const w=await this.mesh.claim('gemini',workId,30,false,true);
+      if(w.state==='RUNNING'&&w.attemptId)await this.mesh.releaseUnsentClaim('gemini',workId,w.attemptId,w.leaseGeneration);
+    }finally{
+      this.db!.mutate('gemini_mail',seed,d=>{for(const t of d.tickets)if(t.workId===workId&&!t.usedAt)t.usedAt=iso();});
+    }
   }
 
   private async mailOne(workId:string,now:number):Promise<boolean>{
@@ -117,17 +134,27 @@ export class GeminiMailWake{
       return false;
     }
     const token=randomBytes(32).toString('base64url');
-    const ticket:Ticket={workId,attemptId:work.attemptId,leaseGeneration:work.leaseGeneration,tokenHash:sha(token),
-      instructionDigest:sha(work.instruction),expiresAt:work.leaseUntil,createdAt:iso(now),sentAt:null,usedAt:null,attempt};
-    this.db!.mutate('gemini_mail',seed,d=>{d.tickets.push(ticket);d.tickets=d.tickets.slice(-500);});
     const envelope={work_id:workId,mission_id:work.missionId,role:work.role,lease_generation:work.leaseGeneration,
       expires_at:work.leaseUntil,attempt,instruction:work.instruction,result_marker:GEMINI_MAIL_RESULT_MARKER,
       result_template:{work_id:workId,token,success:'<true|false>',result:'<your complete result>'}};
+    const ticket:Ticket={workId,attemptId:work.attemptId,leaseGeneration:work.leaseGeneration,tokenHash:sha(token),
+      instructionDigest:sha(work.instruction),envelopeDigest:sha(canonical(envelope)),validatedAt:null,
+      expiresAt:work.leaseUntil,createdAt:iso(now),sentAt:null,usedAt:null,attempt};
+    this.db!.mutate('gemini_mail',seed,d=>{d.tickets.push(ticket);d.tickets=d.tickets.slice(-5000);});
     let status=0;
     try{
       status=await this.sender(this.relayUrl,JSON.stringify({version:GEMINI_MAIL_ENVELOPE_VERSION,
         recipient:this.recipient,envelope}),{'content-type':'application/json','user-agent':'Panter-Gemini-Mail/1'});
     }catch{status=0;}
+    // Timeout, network error or 5xx: the e-mail may already have left. Keep the ticket and lease as an
+    // unknown outcome; lease expiry drives any retry, so Gemini never gets two live copies of one task.
+    const definitiveRefusal=status>=400&&status<500;
+    if(!definitiveRefusal&&!(status>=200&&status<300)){
+      this.db!.mutate('gemini_mail',seed,d=>{
+        const t=d.tickets.find(x=>x.workId===workId&&x.attempt===attempt);if(t)t.sentAt=iso();
+      });
+      return false;
+    }
     if(status>=200&&status<300){
       this.db!.mutate('gemini_mail',seed,d=>{
         const t=d.tickets.find(x=>x.workId===workId&&x.attempt===attempt);if(t)t.sentAt=iso();
@@ -135,7 +162,7 @@ export class GeminiMailWake{
       });
       return true;
     }
-    // Nothing reached Gemini: return the work to the queue and back off before retrying.
+    // The relay refused before sending: return the work to the queue and back off before retrying.
     await this.mesh.releaseUnsentClaim('gemini',workId,work.attemptId,work.leaseGeneration).catch(()=>{});
     this.db!.mutate('gemini_mail',seed,d=>{
       d.tickets=d.tickets.filter(x=>!(x.workId===workId&&x.attempt===attempt));
@@ -155,8 +182,11 @@ export class GeminiMailWake{
       throw new MailError(400,'Invalid envelope');
     const t=this.db!.read('gemini_mail',seed).tickets.find(x=>x.workId===e.work_id&&!x.usedAt&&
       sameHash(x.tokenHash,sha(token)));
-    if(!t||Date.parse(t.expiresAt)<=Date.now()||!sameHash(t.instructionDigest,sha(e.instruction as string))||
-      e.lease_generation!==t.leaseGeneration)throw new MailError(403,'Envelope is not an outstanding Panter ticket');
+    if(!t||t.validatedAt||Date.parse(t.expiresAt)<=Date.now()||!sameHash(t.instructionDigest,sha(e.instruction as string))||
+      e.lease_generation!==t.leaseGeneration||(t.envelopeDigest&&!sameHash(t.envelopeDigest,sha(canonical(e)))))
+      throw new MailError(403,'Envelope is not an outstanding Panter ticket');
+    // One relay send per ticket: a copied envelope cannot be replayed through /wake.
+    this.db!.mutate('gemini_mail',seed,d=>{const x=d.tickets.find(y=>y.workId===t.workId&&y.attempt===t.attempt);if(x)x.validatedAt=iso();});
     return {ok:true,work_id:t.workId,lease_generation:t.leaseGeneration};
   }
 
@@ -164,7 +194,7 @@ export class GeminiMailWake{
   async acceptResult(payload:unknown){
     if(!this.configured)throw new MailError(404,'Gemini mail relay disabled');
     const p=payload as Record<string,unknown>;
-    if(typeof p?.raw_mime_base64!=='string'||p.raw_mime_base64.length>800_000)throw new MailError(400,'Invalid payload');
+    if(typeof p?.raw_mime_base64!=='string'||p.raw_mime_base64.length>MAX_RAW_B64)throw new MailError(400,'Invalid payload');
     const texts=mimeTexts(Buffer.from(p.raw_mime_base64,'base64').toString('latin1'));
     const data=this.db!.read('gemini_mail',seed);
     for(const text of texts){
@@ -184,6 +214,13 @@ export class GeminiMailWake{
     }
     throw new MailError(422,`No valid ${GEMINI_MAIL_RESULT_MARKER} result with a current token`);
   }
+}
+/** Stable key order, so the relay's re-serialised envelope hashes the same as Panter's. */
+function canonical(v:unknown):string{
+  if(Array.isArray(v))return '['+v.map(canonical).join(',')+']';
+  if(v&&typeof v==='object')return '{'+Object.keys(v as object).sort()
+    .map(k=>JSON.stringify(k)+':'+canonical((v as Record<string,unknown>)[k])).join(',')+'}';
+  return JSON.stringify(v);
 }
 export class MailError extends Error{constructor(readonly status:number,message:string){super(message);}}
 
@@ -216,7 +253,9 @@ export function mimeTexts(raw:string):string[]{
     const text=bytes.toString('utf8');
     if(type.startsWith('text/html'))html.push(text.replace(/<br\s*\/?>/gi,'\n').replace(/<\/(p|div)>/gi,'\n')
       .replace(/<[^>]+>/g,'').replace(/&quot;/g,'"').replace(/&#39;|&#x27;/g,"'").replace(/&lt;/g,'<')
-      .replace(/&gt;/g,'>').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&'));
+      .replace(/&gt;/g,'>').replace(/&nbsp;/g,' ')
+      .replace(/&#(\d{1,7});/g,(_,n)=>String.fromCodePoint(Math.min(Number(n),0x10ffff)))
+      .replace(/&#x([0-9a-f]{1,6});/gi,(_,h)=>String.fromCodePoint(Math.min(parseInt(h,16),0x10ffff))).replace(/&amp;/g,'&'));
     else plain.push(text);
   };
   walk(raw,0);
@@ -227,19 +266,27 @@ export function mimeTexts(raw:string):string[]{
 export function markedJson(text:string):unknown[]{
   const out:unknown[]=[];
   let from=0;
-  for(;;){
+  // Bounded work: at most MAX_MARKERS markers, and each scan stops at the next marker, so the total
+  // cost stays linear in the text however many markers an unauthenticated sender puts in it.
+  for(let seen=0;seen<MAX_MARKERS;seen++){
     const at=text.indexOf(GEMINI_MAIL_RESULT_MARKER,from);
     if(at<0)return out;
     from=at+GEMINI_MAIL_RESULT_MARKER.length;
     const start=text.indexOf('{',from);
     if(start<0)return out;
+    const next=text.indexOf(GEMINI_MAIL_RESULT_MARKER,from);
+    const limit=Math.min(text.length,start+MAX_RESULT*2,next<0?text.length:next);
     let depth=0,inStr=false,esc=false,end=-1;
-    for(let i=start;i<text.length&&i<start+MAX_RESULT*2;i++){
+    for(let i=start;i<limit;i++){
       const c=text[i];
       if(inStr){if(esc)esc=false;else if(c==='\\')esc=true;else if(c==='"')inStr=false;continue;}
       if(c==='"')inStr=true;else if(c==='{')depth++;else if(c==='}'&&--depth===0){end=i;break;}
     }
     if(end<0)continue;
-    try{out.push(JSON.parse(text.slice(start,end+1)));}catch{/* quoted or wrapped copy; try the next marker */}
+    const block=text.slice(start,end+1);
+    try{out.push(JSON.parse(block));continue;}catch{/* maybe hard-wrapped */}
+    // Plain-text mailers may hard-wrap long lines at ~76 columns, even inside strings.
+    try{out.push(JSON.parse(block.replace(/\r?\n/g,'')));}catch{/* quoted copy; try the next marker */}
   }
+  return out;
 }

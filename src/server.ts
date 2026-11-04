@@ -911,6 +911,16 @@ mesh.events.on('changed', () => {
   } catch { console.error('MCP notification publication failed'); }
 });
 const nodeHandler = toNodeHandler(handler);
+// Unauthenticated relay endpoints: a small per-client budget (the real relay sends a few per task).
+const mailRelayHits = new Map<string, number[]>();
+function mailRelayRate(client: string): boolean {
+  const now = Date.now();
+  const recent = (mailRelayHits.get(client) ?? []).filter(t => now - t < 60_000);
+  if (recent.length >= 30) { mailRelayHits.set(client, recent); return false; }
+  recent.push(now); mailRelayHits.set(client, recent);
+  if (mailRelayHits.size > 10_000) mailRelayHits.clear();
+  return true;
+}
 const http = createServer(async (req, res) => {
   if (req.url === '/health' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
@@ -926,8 +936,9 @@ const http = createServer(async (req, res) => {
     const reply = (status: number, body: unknown) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
     if (!host || !(allowedHosts.length ? allowedHosts.includes(host) : ['localhost','127.0.0.1','::1'].includes(host))) { reply(403, { ok: false }); return; }
     if (!geminiMailWake.configured) { reply(404, { ok: false, error: 'disabled' }); return; }
+    if (!mailRelayRate(clientAddresses.identify(req))) { reply(429, { ok: false, error: 'rate_limited' }); return; }
     const chunks: Buffer[] = []; let size = 0;
-    for await (const chunk of req) { size += (chunk as Buffer).length; if (size > 900_000) { reply(413, { ok: false }); return; } chunks.push(chunk as Buffer); }
+    for await (const chunk of req) { size += (chunk as Buffer).length; if (size > 450_000) { reply(413, { ok: false }); return; } chunks.push(chunk as Buffer); }
     let payload: unknown;
     try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { reply(400, { ok: false, error: 'invalid_json' }); return; }
     try {

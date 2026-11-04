@@ -34,7 +34,7 @@ function taskText(e) {
     e.instruction,
     "",
     "HOW TO DELIVER THE RESULT:",
-    "Reply to this same e-mail (reply, do not forward). Put this marker line and then one JSON object on the next line,",
+    "Reply to this same e-mail (reply, do not forward). Put this marker line and then one JSON object on ONE single line,",
     "copying work_id and token exactly, with success true or false and your complete result as a string:",
     e.result_marker,
     JSON.stringify(e.result_template),
@@ -49,7 +49,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health")
-      return json({ ok: true, service: "panter-gemini-mail-relay", recipient: env.RECIPIENT, reply_address: env.RELAY_ADDRESS });
+      return json({ ok: true, service: "panter-gemini-mail-relay" });
     if (request.method !== "POST" || url.pathname !== "/wake") return json({ ok: false, error: "not_found" }, 404);
     const text = await request.text();
     if (new TextEncoder().encode(text).byteLength > MAX_WAKE_BYTES) return json({ ok: false, error: "body_too_large" }, 413);
@@ -65,7 +65,10 @@ export default {
       headers: { "content-type": "application/json", accept: "application/json", "user-agent": "Panter-Gemini-Mail-Relay/1" },
       body: JSON.stringify({ envelope: e }),
     });
-    if (!check.ok) return json({ ok: false, error: "envelope_rejected", status: check.status }, 403);
+    let verdict = null;
+    try { verdict = await check.json(); } catch { verdict = null; }
+    if (!check.ok || verdict?.ok !== true || verdict?.work_id !== e.work_id)
+      return json({ ok: false, error: "envelope_rejected", status: check.status }, 403);
     const sent = await env.EMAIL.send({
       from: env.RELAY_ADDRESS, to: env.RECIPIENT, replyTo: env.RELAY_ADDRESS,
       subject: `[PANTER_GEMINI] ${e.work_id}`,
@@ -78,8 +81,8 @@ export default {
   async email(message, env) {
     const from = String(message.from || "").trim().toLowerCase();
     const to = String(message.to || "").trim().toLowerCase();
-    if (to !== env.RELAY_ADDRESS) { message.setReject("unexpected recipient"); return; }
-    if (from !== env.RECIPIENT) { message.setReject("unexpected sender"); return; }
+    if (to !== String(env.RELAY_ADDRESS).toLowerCase()) { message.setReject("unexpected recipient"); return; }
+    if (from !== String(env.RECIPIENT).toLowerCase()) { message.setReject("unexpected sender"); return; }
     if (Number(message.rawSize || 0) > MAX_EMAIL_BYTES) { message.setReject("result e-mail too large"); return; }
     const raw = new Uint8Array(await new Response(message.raw).arrayBuffer());
     if (raw.byteLength > MAX_EMAIL_BYTES) { message.setReject("result e-mail too large"); return; }

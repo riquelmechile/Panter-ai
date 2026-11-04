@@ -11,7 +11,10 @@ Gemini no envía `events/subscribe` y no tiene webhooks. Su único disparador po
 Reglas:
 - **Nunca** se manda por correo trabajo de implementador.
 - Si un chat de Gemini está esperando con `panter_workforce_wait`, toma la tarea él y no se manda correo.
-- Si el relay falla antes de enviar, la tarea vuelve a la cola con espera exponencial (hasta 30 min).
+- Si el relay rechaza el envío (4xx), la tarea vuelve a la cola con espera exponencial (hasta 30 min). Si la respuesta es ambigua (timeout, 5xx), el correo pudo haber salido: Panter conserva el lease y espera a que venza antes de reintentar, para que Gemini nunca tenga dos copias vivas de la misma tarea.
+- Cada sobre se valida una sola vez y por su contenido completo, así que nadie puede reenviarlo por el relay ni cambiarle campos.
+- Las dos rutas públicas tienen límite de tamaño (~300 KB de correo) y de frecuencia por cliente, y la lectura del correo es lineal.
+- Si un chat de Gemini está escuchando y una tarea enviada por correo venció, vuelve a la cola para que la tome ese chat.
 - Si Gemini no responde antes de que venza el lease, Panter reenvía con un lease y token nuevos (máximo 3 intentos) y después cierra la tarea como fallida.
 - El Worker no guarda secretos: no puede enviar nada que Panter no reconozca.
 
