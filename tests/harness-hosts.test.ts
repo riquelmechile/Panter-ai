@@ -390,3 +390,42 @@ test('a report accepted as clean carries no severe value anywhere, in any shape;
   const deep = '{"agentId":"review-risk","candidateSha":"' + sha + '","findings":[],"x":' + '['.repeat(5000) + ']'.repeat(5000) + '}';
   assert.doesNotThrow(() => lensEnvelope(deep, 'review-risk', sha));
 });
+
+async function finishLenses(m: MeshEngine, report: (agentId: string) => string) {
+  for (const host of ['grok', 'grok', 'gemini', 'gpt-b'] as const) {
+    const p: any = await m.pickup(host, 300);
+    if (p.status !== 'CLAIMED') continue;
+    await m.complete(host, p.work.id, p.work.attemptId, p.work.leaseGeneration, report(p.work.specialist.agentId));
+  }
+}
+const lensReport = (agentId: string, findings: unknown[] = []) =>
+  JSON.stringify({ agentId, candidateSha: sha, packetDigest: 'x', subagentRunId: `run-${agentId}`, findings, evidence: ['read the diff'] });
+
+test('lens reports that cannot be used start the review again: once remote, then native', () => withHosts(async (h, m) => {
+  const id = await toReview(h, 'rt1');
+  assert.equal((await h.tick(id, all)).status, 'WAITING_REMOTE_REVIEW');
+  const first = (await h.get(id))!.reviewId;
+  // One lens answers in prose: every lens finished, but the session can never complete.
+  await finishLenses(m, a => a === 'review-readability' ? '[via relay] looks fine' : lensReport(a));
+  const retry: any = await h.tick(id, all);
+  assert.equal(retry.retry?.reason, 'REVIEW_EVIDENCE_INCOMPLETE');
+  assert.equal(retry.retry?.native, false);
+  assert.equal(retry.status, 'WAITING_REMOTE_REVIEW', 'the same candidate is reviewed remotely again');
+  const second = (await h.get(id))!.reviewId;
+  assert.ok(second && second !== first);
+  await finishLenses(m, a => a === 'review-readability' ? 'still prose' : lensReport(a));
+  const native: any = await h.tick(id, all);
+  assert.equal(native.retry?.native, true);
+  assert.equal((await h.get(id))!.reviewTransport, 'NATIVE');
+}));
+
+test('a severe finding inside an unusable lens report is never retried away', () => withHosts(async (h, m) => {
+  const id = await toReview(h, 'rt2');
+  await h.tick(id, all);
+  const first = (await h.get(id))!.reviewId;
+  await finishLenses(m, a => a === 'review-risk' ? 'Severity: CRITICAL, token leaks to logs' : lensReport(a));
+  const t: any = await h.tick(id, all);
+  assert.equal(t.retry, undefined);
+  assert.equal((await h.get(id))!.reviewId, first);
+  assert.ok(t.review.reasons.some((x: string) => x.startsWith('Severe finding(s) reported in an unaccepted report')));
+}));

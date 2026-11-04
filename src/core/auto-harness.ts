@@ -36,7 +36,7 @@ export type HarnessRun={id:string;project:string;githubRepository?:string;github
   mode:HarnessMode; paths:string[]; risk:'LOW'|'HIGH'; reviewTier?:'passive'|'medium'|'high'; reason:string[]; candidateSha:string|null;
   reviewKind:'4r'|null; reviewId:string|null; reviewTransport:'NATIVE'|'REMOTE'|null;
   judgmentRequested?:boolean; judgmentId?:string|null; writeGrantId?:string;
-  correctionAttempts?:number; correctionRunId?:string; correctionRunIds?:string[]; previousReviewId?:string|null; reviewAttempt?:number; reviewNativeOnly?:boolean; deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main';
+  correctionAttempts?:number; correctionRunId?:string; correctionRunIds?:string[]; previousReviewId?:string|null; reviewAttempt?:number; reviewNativeOnly?:boolean; reviewEvidenceRetries?:number; deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main';
   units?:Array<{id:string;objective:string;paths:string[];state:'PENDING'|'REPORTED';runId?:string;summary?:string;evidence?:string[]}>;
   steps:HarnessStep[]; createdAt:string;revision:number;};
 type WriteGrant={id:string;project:string;objectiveDigest:string;allowedPaths:string[];expiresAt:number;boundRunId:string|null};
@@ -644,6 +644,18 @@ export class AutomaticHarness {
         }
       }
       const evidence=assessMeshReview({kind:review.review.kind,candidateSha:review.review.candidateSha,work:review.work});
+      // Every lens finished but some report cannot be used (failed, unstructured or not bound to this lens and SHA):
+      // the session can never complete, so review the same candidate again — once remote, then native. A lens that
+      // reported a severe finding in an unusable report is never retried away: that needs the leader.
+      if(review.stage==='READY_FOR_CONTROLLER'&&evidence.status==='EVIDENCE_INCOMPLETE'&&
+        !evidence.reasons.some(x=>x.startsWith('Severe finding(s) reported in an unaccepted report'))){
+        const retries=now.reviewEvidenceRetries??0;
+        await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(r.reviewId===now.reviewId){r.reviewId=null;r.reviewTransport=null;
+          r.reviewAttempt=(r.reviewAttempt??0)+1;r.reviewEvidenceRetries=retries+1;if(retries>=1)r.reviewNativeOnly=true;r.revision++;}});
+        const next=await this.tick(runId,runtime);
+        return {...next,retry:{phaseId:phase.id,previousReviewId:now.reviewId,reason:'REVIEW_EVIDENCE_INCOMPLETE',
+          reasons:evidence.reasons,native:retries>=1}};
+      }
       if(this.rdd&&review.stage==='READY_FOR_CONTROLLER'){
         const tx=await this.rdd.begin({missionId:now.id,reviewId:now.reviewId,source:'REMOTE',
           candidateSha:now.candidateSha!,kind,localProject:now.project,repository:now.githubRepository??(githubProject.test(now.project)?now.project:undefined),
