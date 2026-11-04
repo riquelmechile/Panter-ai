@@ -30,7 +30,7 @@ export type MailClaim={id:string;state:string;attemptId:string|null;leaseGenerat
   instruction:string;role:string;missionId:string};
 export type MailMesh={
   pending(host:'gemini'):Promise<Array<{workId:string;role:string;createdAt:string}>>;
-  claim(host:'gemini',workId:string,leaseSeconds:number,requireQueued:boolean):Promise<MailClaim>;
+  claim(host:'gemini',workId:string,leaseSeconds:number,requireQueued:boolean,requireFree:boolean):Promise<MailClaim>;
   complete(host:'gemini',id:string,attemptId:string,generation:number,result:string,success:boolean):Promise<unknown>;
   releaseUnsentClaim(host:'gemini',id:string,attemptId:string,generation:number):Promise<unknown>;
 };
@@ -89,7 +89,7 @@ export class GeminiMailWake{
         .filter(w=>w.role!=='implementer'&&now-Date.parse(w.createdAt)>=this.minAgeMs&&!blocked(w.workId))
         .map(w=>w.workId);
       // Unanswered tickets whose lease expired: re-mail with a fresh lease, up to MAX_ATTEMPTS.
-      const retry=data.tickets.filter(t=>!t.usedAt&&t.sentAt&&Date.parse(t.expiresAt)<=now&&
+      const retry=data.tickets.filter(t=>!t.usedAt&&t.sentAt&&Date.parse(t.expiresAt)<=now&&!blocked(t.workId)&&
         !data.tickets.some(n=>n.workId===t.workId&&n.attempt>t.attempt)).map(t=>t.workId);
       for(const workId of [...new Set([...queued,...retry])].slice(0,5)){
         const sent=await this.mailOne(workId,now).catch(()=>false);
@@ -103,7 +103,8 @@ export class GeminiMailWake{
     const previous=this.db!.read('gemini_mail',seed).tickets.filter(t=>t.workId===workId);
     const attempt=previous.length+1;
     let work:MailClaim;
-    try{work=await this.mesh.claim('gemini',workId,LEASE_SECONDS,previous.length===0);}
+    // requireFree: a live claim (e.g. an open Gemini chat that picked the work up) is never adopted.
+    try{work=await this.mesh.claim('gemini',workId,LEASE_SECONDS,previous.length===0,true);}
     catch{
       // Completed, taken by a live Gemini chat, or no longer claimable: stop retrying its old tickets.
       if(previous.length)this.db!.mutate('gemini_mail',seed,d=>{for(const t of d.tickets)if(t.workId===workId&&!t.usedAt)t.usedAt=iso();});

@@ -784,7 +784,8 @@ export class MeshEngine {
   }
 
   pending(caller: Host) { return this.read(d => d.works.filter(w => w.target === caller && w.state === 'QUEUED').map(w => ({ workId: w.id, missionId: w.missionId, role: w.role, createdAt: w.createdAt }))); }
-  async claim(caller: Host, workId: string, leaseSeconds = 300, requireQueued = false) {
+  /** requireFree: never hand back another attempt's live lease (a transport retry must own a new claim). */
+  async claim(caller: Host, workId: string, leaseSeconds = 300, requireQueued = false, requireFree = false) {
     check(caller!==leaderHost(),'Only workers may claim delegated work');
     check(leaseSeconds >= 30 && leaseSeconds <= 3600, 'Invalid lease');
     const offered=await this.read(d=>d.works.find(w=>w.id===workId&&w.target===caller)??null);
@@ -796,7 +797,7 @@ export class MeshEngine {
       if(requireQueued)check(w.state==='QUEUED','Work is not claimable');
       const expired = w.state === 'RUNNING' && Date.parse(w.leaseUntil ?? '') <= Date.now();
       check(w.state === 'QUEUED' || w.state === 'RUNNING', 'Work is not claimable');
-      if (w.state === 'RUNNING' && !expired) return w;
+      if (w.state === 'RUNNING' && !expired) { check(!requireFree, 'Work is not claimable'); return w; }
       // A lost ACK after an uncertain write cannot authorize an automatic replay.
       if (expired && w.role === 'implementer') {
         w.state = 'OUTCOME_UNKNOWN';

@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MeshEngine } from '../src/core/mesh.js';
+import { SqliteLedger } from '../src/core/sqlite-ledger.js';
 import { GeminiMailWake, GEMINI_MAIL_RESULT_MARKER, mimeTexts, markedJson } from '../src/core/gemini-mail-wake.js';
 
 before(() => { process.env.PANTER_LEAD_HOST = 'claude'; });
@@ -93,3 +94,37 @@ test('disabled without a relay URL; rejects a non-public relay', async () => {
     assert.throws(() => new GeminiMailWake(dir, mesh, () => false, { ...env, PANTER_GEMINI_MAIL_RECIPIENT: 'nope' }), /Gmail address/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+function expire(dir: string, workId: string) {
+  const db = SqliteLedger.open(dir);
+  const past = new Date(Date.now() - 1000).toISOString();
+  db.mutate('mesh', {} as any, (d: any) => { const w = d.works.find((x: any) => x.id === workId); w.leaseUntil = past; });
+  db.mutate('gemini_mail', {} as any, (d: any) => { for (const t of d.tickets) if (t.workId === workId) t.expiresAt = past; });
+  db.close();
+}
+
+test('a retry never adopts a live claim taken by an open Gemini chat after the mailed lease expired', () => fixture(async ({ dir, mesh, sent, status, wake }) => {
+  const work = await delegate(mesh, 'k5');
+  await wake.dispatchDue();
+  expire(dir, work.id);
+  const chat = await mesh.claim('gemini', work.id, 300);
+  status.code = 500;
+  const r = await wake.dispatchDue();
+  assert.deepEqual(r.sent, []);
+  const now = (await mesh.inbox('claude')).works.find(w => w.id === work.id);
+  assert.equal(now?.state, 'RUNNING', 'the chat keeps its claim; nothing released it');
+  const again = await mesh.claim('gemini', work.id, 300);
+  assert.equal(again.attemptId, chat.attemptId);
+  assert.equal(sent.length, 1);
+}));
+
+test('expired-ticket retries respect the relay backoff', () => fixture(async ({ dir, mesh, sent, status, wake }) => {
+  const work = await delegate(mesh, 'k6');
+  await wake.dispatchDue();
+  expire(dir, work.id);
+  status.code = 500;
+  assert.deepEqual((await wake.dispatchDue()).failed, [work.id]);
+  const calls = sent.length;
+  assert.deepEqual(await wake.dispatchDue(), { sent: [], failed: [] });
+  assert.equal(sent.length, calls, 'no new relay call while backing off');
+}));
