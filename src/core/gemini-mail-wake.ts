@@ -38,7 +38,7 @@ export type MailMesh={
   pending(host:'gemini'):Promise<Array<{workId:string;role:string;createdAt:string}>>;
   claim(host:'gemini',workId:string,leaseSeconds:number,requireQueued:boolean,requireFree:boolean,transport:boolean):Promise<MailClaim>;
   requeueExpiredReadOnly(host:'gemini'):Promise<string[]>;
-  complete(host:'gemini',id:string,attemptId:string,generation:number,result:string,success:boolean,transport?:boolean):Promise<unknown>;
+  complete(host:'gemini',id:string,attemptId:string,generation:number,result:string,success:boolean,transport?:boolean,via?:'gmail-relay'):Promise<unknown>;
   releaseUnsentClaim(host:'gemini',id:string,attemptId:string,generation:number):Promise<unknown>;
 };
 export type RelaySender=(url:string,body:string,headers:Record<string,string>)=>Promise<number>;
@@ -215,8 +215,9 @@ export class GeminiMailWake{
         const t=data.tickets.find(x=>x.workId===r.work_id&&sameHash(x.tokenHash,sha(r.token as string)));
         if(!t)continue;
         if(t.usedAt)throw new MailError(409,'Result already accepted');
-        try{await this.mesh.complete('gemini',t.workId,t.attemptId,t.leaseGeneration,
-          `[via Gmail relay] ${r.result}`,r.success);}
+        // The text is stored exactly as Gemini wrote it (a review lens must be one bare JSON object); the
+        // transport is recorded beside it.
+        try{await this.mesh.complete('gemini',t.workId,t.attemptId,t.leaseGeneration,r.result,r.success,false,'gmail-relay');}
         catch(error){throw new MailError(409,error instanceof Error?error.message:'Stale lease');}
         this.db!.mutate('gemini_mail',seed,d=>{const x=d.tickets.find(y=>y.workId===t.workId&&y.attempt===t.attempt);if(x)x.usedAt=iso();});
         return {ok:true,work_id:t.workId,state:r.success?'COMPLETED':'FAILED'};

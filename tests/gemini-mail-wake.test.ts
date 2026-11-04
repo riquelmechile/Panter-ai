@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { MeshEngine } from '../src/core/mesh.js';
 import { SqliteLedger } from '../src/core/sqlite-ledger.js';
 import { GeminiMailWake, GEMINI_MAIL_RESULT_MARKER, mimeTexts, markedJson } from '../src/core/gemini-mail-wake.js';
+import { lensEnvelope } from '../src/core/native-review.js';
 
 before(() => { process.env.PANTER_LEAD_HOST = 'claude'; });
 const RELAY_KEY = 'r'.repeat(43);
@@ -60,9 +61,25 @@ test('a reply with the current token completes the work once; the quoted templat
   const ok = await wake.acceptResult({ raw_mime_base64: mime(`${GEMINI_MAIL_RESULT_MARKER}\n${answer}\n\n${quotedTemplate}`) });
   assert.equal(ok.state, 'COMPLETED');
   const result = await mesh.resultGet('claude', work.id);
-  assert.match(JSON.stringify(result), /via Gmail relay\] The file exports A, B and C\./);
+  assert.equal(result.result, 'The file exports A, B and C.', 'stored exactly as Gemini wrote it');
+  assert.equal(result.via, 'gmail-relay');
   await assert.rejects(wake.acceptResult({ raw_mime_base64: mime(`${GEMINI_MAIL_RESULT_MARKER}\n${answer}`) }), /already accepted/);
   await assert.rejects(wake.acceptResult({ raw_mime_base64: mime(`${GEMINI_MAIL_RESULT_MARKER}\n${answer.replace(token, 'x'.repeat(43))}`) }), /No valid/);
+}));
+
+test('a review lens e-mailed back is stored as its bare JSON, so the strict lens envelope accepts it', () => fixture(async ({ mesh, sent, wake }) => {
+  const work = await delegate(mesh, 'k-lens');
+  await wake.dispatchDue();
+  const { token } = sent[0].payload.envelope.result_template;
+  const sha = 'a'.repeat(40);
+  const lens = JSON.stringify({ agentId: 'review-readability', candidateSha: sha, packetDigest: 'not_provided_in_email_transport',
+    subagentRunId: 'gemini-r2-1', findings: [], evidence: ['Read src/subtract.js:1-6'] });
+  const answer = JSON.stringify({ work_id: work.id, token, success: true, result: lens });
+  await wake.acceptResult({ raw_mime_base64: mime(`${GEMINI_MAIL_RESULT_MARKER}\n${answer}`) });
+  const stored = (await mesh.resultGet('claude', work.id)).result!;
+  assert.equal(stored, lens);
+  const parsed = lensEnvelope(stored, 'review-readability', sha);
+  assert.equal(typeof parsed, 'object', 'a relay prefix would make this UNSTRUCTURED');
 }));
 
 test('a relay failure returns the work to the queue and backs off; writers and live chats are never mailed', () => fixture(async ({ mesh, sent, status, listening, wake }) => {

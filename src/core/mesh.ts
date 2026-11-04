@@ -21,7 +21,8 @@ export const EFFORT_REQUEST_PATTERN = /^[A-Za-z0-9._-]{1,32}$/;
 export type WorkerExecutionRequest = { serviceTier?: string; stream?: boolean; parallelToolCalls?: boolean; maxNativeSubagents?: number };
 export type WorkExecutionRequest = WorkerExecutionRequest & { status: 'REQUESTED_UNVERIFIED'; model: string; reasoningEffort: string };
 export type MeshMessage = { id: string; missionId: string; from: Host; to: Host; workId: string | null; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' | 'RESULT'; text: string; createdAt: string; inboxRevision: number };
-export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; transportClaim?: boolean; withdrawn?: boolean };
+export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; transportClaim?: boolean; withdrawn?: boolean;
+  /** How a result reached Panter when it was not a direct worker call (the text itself stays exactly as sent). */via?: 'gmail-relay' };
 export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
 export type WorkforceTaskBridge = {taskId:string;host:WorkerHost;protocolEra:'2025-11-25'|'2026-07-28';status:'ARMED'|'DELIVERED'|'CANCELLED'|'EXPIRED';createdAt:string;expiresAt:string;workId:string|null};
@@ -423,7 +424,7 @@ export class MeshEngine {
       const w=d.works.find(w=>w.id===workId);
       check(w&&['COMPLETED','FAILED'].includes(w.state),'Work result not found');
       return {workId:w.id,missionId:w.missionId,host:w.target,state:w.state,
-        result:w.result,receiptDigest:w.receiptDigest,completedAt:w.completedAt};
+        result:w.result,receiptDigest:w.receiptDigest,completedAt:w.completedAt,...(w.via?{via:w.via}:{})};
     });
   }
   /** Bindings to the current leader are inactive: after a leader switch they must not
@@ -794,7 +795,7 @@ export class MeshEngine {
       const interrupted=reviewInterrupted(work as MeshWork[]);
       return {review,stage:interrupted?'INTERRUPTED' as const:terminal?'READY_FOR_CONTROLLER' as const:'AWAITING_REPORTS' as const,
         nativeReviewAuthority:false,
-        work:work.map(w=>({workId:w!.id,agentId:w!.specialist?.agentId,packetDigest:w!.specialist?.packetDigest,host:w!.target,state:w!.state,receiptDigest:w!.receiptDigest,result:w!.result,withdrawn:w!.withdrawn===true}))};
+        work:work.map(w=>({workId:w!.id,agentId:w!.specialist?.agentId,packetDigest:w!.specialist?.packetDigest,host:w!.target,state:w!.state,receiptDigest:w!.receiptDigest,result:w!.result,withdrawn:w!.withdrawn===true,...(w!.via?{via:w!.via}:{})}))};
     });
   }
 
@@ -953,7 +954,7 @@ export class MeshEngine {
       return { workId: w.id, state: w.state, withdrawn: true };
     });
   }
-  async complete(caller: Host, id: string, attemptId: string, generation: number, result: string, success = true, transport = false) {
+  async complete(caller: Host, id: string, attemptId: string, generation: number, result: string, success = true, transport = false, via?: 'gmail-relay') {
     check(caller!==leaderHost(),'Only workers may complete delegated work');
     check(result.length <= 50000, 'Result too long');
     return this.write(d => {
@@ -968,7 +969,7 @@ export class MeshEngine {
       check(w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
       check(Date.parse(w.leaseUntil!) > Date.now(), 'Lease expired');
       w.state = success ? 'COMPLETED' : 'FAILED'; w.result = result; w.receiptDigest = digest;
-      w.completedAt = iso(); w.leaseUntil = null; delete w.transportClaim;
+      w.completedAt = iso(); w.leaseUntil = null; delete w.transportClaim; if (via) w.via = via;
       // A transport closing work it could not deliver is not a receipt from the worker.
       if (caller !== leaderHost() && !transport) {
         const presence = (d.workforce ??= {})[caller as WorkerHost] ??= {};
@@ -1054,7 +1055,7 @@ export class MeshEngine {
     return this.read(d => ({
       revision: d.inboxRevision[caller],
       messages: d.messages.filter(m => m.to === caller && m.inboxRevision > sinceRevision),
-      works: d.works.filter(w => w.target === caller || caller === leaderHost()).map(w => ({ id: w.id, missionId: w.missionId, target: w.target, role: w.role, state: w.state, receiptDigest: w.receiptDigest, completedAt: w.completedAt, withdrawn: w.withdrawn === true })),
+      works: d.works.filter(w => w.target === caller || caller === leaderHost()).map(w => ({ id: w.id, missionId: w.missionId, target: w.target, role: w.role, state: w.state, receiptDigest: w.receiptDigest, completedAt: w.completedAt, withdrawn: w.withdrawn === true, ...(w.via ? { via: w.via } : {}) })),
     }));
   }
   /** Safe to publish across the host mesh: never include actor-specific counts or secrets. */
