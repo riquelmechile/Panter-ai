@@ -321,3 +321,20 @@ test('mention filter: underscores and entities caught; TS directives and scoped 
   assert.equal(safeReadPath('compare/main...panter/x'), true);
   assert.equal(safeReadPath('compare/main...evil:main'), false);
 });
+
+test('leader-side candidate material: compare diff as text, size-capped, only allowed repos', () => fixture({
+  ...repo,
+  'GET acme/site/compare/main...': () => [200, { ahead_by: 1, files: [
+    { filename: 'src/a.ts', status: 'modified', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-old\n+new' },
+    { filename: 'big.txt', status: 'added', additions: 9999, deletions: 0, patch: 'x'.repeat(30_000) },
+  ] }],
+}, async ({ gh, calls }) => {
+  const text = await gh.candidateMaterial('acme/site', null, 'c'.repeat(40));
+  assert.match(text, /### src\/a\.ts \(modified, \+1 -1\)/);
+  assert.match(text, /\+new/);
+  assert.match(text, /1 file\(s\) omitted/);
+  assert.ok(text.length <= 26_100);
+  assert.ok(calls.every(c => c.url.startsWith('acme/site')));
+  await assert.rejects(gh.candidateMaterial('evil/site', null, 'c'.repeat(40)), /not in PANTER_GITHUB_WORKFORCE_REPOS/);
+  await assert.rejects(gh.candidateMaterial('acme/site', 'main/.', 'c'.repeat(40)), /Invalid base/);
+}));

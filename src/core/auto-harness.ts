@@ -28,12 +28,14 @@ export type HarnessMode='AUTO'|'GPT_A_ONLY';
 export type HarnessPhase='DISCOVER'|'DESIGN'|'IMPLEMENT'|'VERIFY'|'REVIEW'|'JUDGMENT';
 export type HarnessStep={id:string;phase:HarnessPhase;agentId:GentleAgentId|null;status:'PENDING'|'ISSUED'|'COMPLETE';
   execution?:'GPT_A_INLINE'|'GPT_A_NATIVE'|'REMOTE_A2A';remoteWorkId?:string;redispatchGeneration?:number;
+  /** Set when the bound host did not pick the phase up in time: the phase runs native from then on. */
+  nativeOnly?:boolean;fallbackFrom?:Host;
   result?:{summary:string;evidence:string[];runId?:string;digest:string;verificationMode?:'SELF_UNVERIFIED'|'HOST_REPORTED_UNVERIFIED'};};
 export type HarnessRun={id:string;project:string;githubRepository?:string;githubPrNumber?:number;githubExpectedBase?:string;objective:string;key:string;inputDigest:string;permission:'READ_ONLY'|'WRITE_APPROVED';
   mode:HarnessMode; paths:string[]; risk:'LOW'|'HIGH'; reviewTier?:'passive'|'medium'|'high'; reason:string[]; candidateSha:string|null;
   reviewKind:'4r'|null; reviewId:string|null; reviewTransport:'NATIVE'|'REMOTE'|null;
   judgmentRequested?:boolean; judgmentId?:string|null; writeGrantId?:string;
-  correctionAttempts?:number; correctionRunId?:string; correctionRunIds?:string[]; previousReviewId?:string|null; reviewAttempt?:number; deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main';
+  correctionAttempts?:number; correctionRunId?:string; correctionRunIds?:string[]; previousReviewId?:string|null; reviewAttempt?:number; reviewNativeOnly?:boolean; deliveryStrategy?:'single-pr'|'feature-branch-chain'|'stacked-to-main';
   units?:Array<{id:string;objective:string;paths:string[];state:'PENDING'|'REPORTED';runId?:string;summary?:string;evidence?:string[]}>;
   steps:HarnessStep[]; createdAt:string;revision:number;};
 type WriteGrant={id:string;project:string;objectiveDigest:string;allowedPaths:string[];expiresAt:number;boundRunId:string|null};
@@ -45,6 +47,15 @@ export type HarnessInput={project:string;githubRepository?:string;githubPrNumber
 export type HarnessTickResult={runId:string;mode:HarnessMode;risk:'LOW'|'HIGH';reason:string[];
   status:string;next:Array<{agentId?:string|null;workId?:string;phase?:HarnessPhase;[key:string]:unknown}>;
   phaseId?:string;workId?:string;reviewId?:string;concurrentSlots?:number;[key:string]:unknown};
+/** Server-side integration of the bound hosts: transport material, per-phase GitHub grants and pickup timeouts. */
+export type HarnessHostHooks={
+  /** Read-only material for hosts that cannot reach the repository (e.g. Gemini by e-mail). */
+  materialFor?(run:HarnessRun,host:Host):Promise<string|undefined>;
+  /** Called after a phase or review lens was dispatched to a host (e.g. to attach a work-scoped GitHub grant). */
+  afterDispatch?(input:{run:HarnessRun;workId:string;phase:HarnessPhase;host:Host}):Promise<void>;
+  /** How long a host may leave a dispatched phase unstarted before it runs native instead. */
+  pickupTimeoutMs?(host:Host):number;
+};
 export type HarnessRuntime={nativeSubagents:boolean;maxParallelSubagents:number;toolsAvailable:boolean;
   peerStates?:Partial<Record<Host,'CONNECTED'|'UNAVAILABLE'|'UNKNOWN'>>};
 
@@ -84,6 +95,19 @@ export function chooseHarness(input:HarnessInput){
 export class AutomaticHarness {
   private state:State={version:1,runs:[]};
   private pending:Promise<unknown>=Promise.resolve();
+  private hooks:HarnessHostHooks={};
+  setHostHooks(hooks:HarnessHostHooks){this.hooks=hooks;}
+  private async dispatched(run:HarnessRun,workId:string,phase:HarnessPhase,host:Host){
+    try{await this.hooks.afterDispatch?.({run,workId,phase,host});}catch{/* a failed grant leaves the phase read-only; never blocks */}
+  }
+  /** True when this host left the work unstarted (queued, or only held by its transport) past its pickup timeout. */
+  private async unstartedTooLong(workId:string){
+    if(!this.hooks.pickupTimeoutMs)return null;
+    const w=await this.mesh.workTarget(leaderHost(),workId).catch(()=>null);
+    if(!w||!(w.state==='QUEUED'||w.transportHeld))return null;
+    const limit=this.hooks.pickupTimeoutMs(w.target);
+    return Date.now()-Date.parse(w.createdAt)>limit?{host:w.target,limit}:null;
+  }
   private constructor(private readonly sqlite:SqliteLedger,private readonly mesh:MeshEngine,private readonly native:NativeSubagentReview,private readonly github?:GitHubDeliveryGate,private readonly officialRdd?:NativeReviewBridge,private readonly rdd?:PanterRdd,private readonly requireWriteGrant=false){}
   static async open(dir:string,mesh:MeshEngine,native:NativeSubagentReview,github?:GitHubDeliveryGate,officialRdd?:NativeReviewBridge,rdd?:PanterRdd,requireWriteGrant=false){
     const engine=new AutomaticHarness(SqliteLedger.open(dir),mesh,native,github,officialRdd,rdd,requireWriteGrant);
@@ -377,6 +401,18 @@ export class AutomaticHarness {
         await this.report(runId,phase.id,result as {summary:string;evidence:string[];runId?:string;candidateSha?:string;discoveredPaths?:string[]});
         return this.tick(runId,runtime);
       }
+      const stale=await this.unstartedTooLong(phase.remoteWorkId);
+      if(stale){
+        const withdrawn=await this.mesh.withdrawUnstarted(leaderHost(),phase.remoteWorkId,
+          `${stale.host} did not start this phase within ${Math.round(stale.limit/1000)}s`).catch(()=>null);
+        if(withdrawn?.withdrawn){
+          await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;
+            if(st.status==='ISSUED'&&st.remoteWorkId===phase.remoteWorkId){st.status='PENDING';st.execution=undefined;st.remoteWorkId=undefined;
+              st.redispatchGeneration=(st.redispatchGeneration??0)+1;st.nativeOnly=true;st.fallbackFrom=stale.host;r.revision++;}});
+          const next=await this.tick(runId,runtime);
+          return {...next,fallback:{phaseId:phase.id,from:stale.host,reason:'PICKUP_TIMEOUT',afterSeconds:Math.round(stale.limit/1000)}};
+        }
+      }
       return {...common,status:'WAITING_REMOTE_PEER',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
     }
     if(phase.phase==='IMPLEMENT'&&(!record.paths.length||record.permission!=='WRITE_APPROVED'))
@@ -446,13 +482,15 @@ export class AutomaticHarness {
       if(!record.reviewId){
         const assigned=await this.mesh.specialistBindings();
         const roles=kind==='4r'?['review-risk','review-readability','review-reliability','review-resilience']:['jd-judge-a','jd-judge-b'];
-        const remoteReady=effectiveMode==='AUTO'&&roles.every(id=>{
+        const remoteReady=effectiveMode==='AUTO'&&!record.reviewNativeOnly&&roles.every(id=>{
           const a=assigned.find(x=>x.agentId===id);
           return a&&runtime.peerStates?.[a.host]==='CONNECTED';
         });
         if(remoteReady){
-          const remote=await this.mesh.startReview(leaderHost(),{missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:review:${record.candidateSha}:${record.reviewAttempt??0}`});
+          const remote=await this.mesh.startReview(leaderHost(),{missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:review:${record.candidateSha}:${record.reviewAttempt??0}`,
+            materialFor:this.hooks.materialFor?host=>this.hooks.materialFor!(record,host):undefined});
           await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(!r.reviewId){r.reviewId=remote.id;r.reviewTransport='REMOTE';r.revision++;}});
+          for(const workId of remote.workIds){const t=await this.mesh.workTarget(leaderHost(),workId).catch(()=>null);if(t)await this.dispatched(record,workId,'REVIEW',t.target);}
         }else{
           const native=await this.native.create({missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:review:${record.candidateSha}:${record.reviewAttempt??0}`});
           await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(!r.reviewId){r.reviewId=native.reviewId;r.reviewTransport='NATIVE';r.revision++;}});
@@ -509,6 +547,18 @@ export class AutomaticHarness {
         await this.mesh.abortInterruptedReview(leaderHost(),now.reviewId);
         await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(r.reviewId===now.reviewId){r.reviewId=null;r.reviewTransport=null;r.reviewAttempt=(r.reviewAttempt??0)+1;r.revision++;}});
         return this.tick(runId,runtime);
+      }
+      if(review.stage==='AWAITING_REPORTS'&&this.hooks.pickupTimeoutMs){
+        const stale=(await Promise.all(review.review.workIds.map(async id=>({id,stale:await this.unstartedTooLong(id)})))).filter(x=>x.stale);
+        if(stale.length){
+          // A lens host did not show up in time: drop this remote session and run the whole review native.
+          for(const w of review.work)if(w.state==='QUEUED'||stale.some(s=>s.id===w.workId))
+            await this.mesh.withdrawUnstarted(leaderHost(),w.workId,'review lens host did not start in time; review runs native').catch(()=>null);
+          await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(r.reviewId===now.reviewId){r.reviewId=null;r.reviewTransport=null;
+            r.reviewAttempt=(r.reviewAttempt??0)+1;r.reviewNativeOnly=true;r.revision++;}});
+          const next=await this.tick(runId,runtime);
+          return {...next,fallback:{phaseId:phase.id,from:[...new Set(stale.map(s=>s.stale!.host))],reason:'REVIEW_PICKUP_TIMEOUT'}};
+        }
       }
       const evidence=assessMeshReview({kind:review.review.kind,candidateSha:review.review.candidateSha,work:review.work});
       if(this.rdd&&review.stage==='READY_FOR_CONTROLLER'){
@@ -576,14 +626,16 @@ export class AutomaticHarness {
     const candidateVerifierIsIndependent=phase.phase!=='VERIFY'||!implementer?.remoteWorkId||
       (await this.mesh.inbox(leaderHost())).works.find(w=>w.id===implementer.remoteWorkId)?.target!==binding?.host;
     const requestedRole=phase.phase==='IMPLEMENT'?'implementer':phase.phase==='VERIFY'?'verifier':'explorer';
-    const remoteEligible=effectiveMode==='AUTO'&&binding&&runtime.peerStates?.[binding.host]==='CONNECTED'&&candidateVerifierIsIndependent&&
+    const remoteEligible=effectiveMode==='AUTO'&&!phase.nativeOnly&&binding&&runtime.peerStates?.[binding.host]==='CONNECTED'&&candidateVerifierIsIndependent&&
       (await this.mesh.profiles()).some(p=>p.host===binding.host&&p.roles.includes(requestedRole));
     if(remoteEligible){
       const work=await this.mesh.delegateBoundSpecialist(leaderHost(),{missionId:record.id,agentId:phase.agentId,objective:packetObjective,
         candidateSha:record.candidateSha??undefined,allowedEditSurfaces:phase.phase==='IMPLEMENT'?record.paths:undefined,
-        idempotencyKey:`harness:${record.id}:${phase.id}:${record.candidateSha??'none'}:${record.correctionAttempts??0}:${phase.redispatchGeneration??0}`});
+        idempotencyKey:`harness:${record.id}:${phase.id}:${record.candidateSha??'none'}:${record.correctionAttempts??0}:${phase.redispatchGeneration??0}`,
+        material:this.hooks.materialFor?await this.hooks.materialFor(record,binding.host):undefined});
       await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;
         if(st.status==='PENDING'){st.status='ISSUED';st.execution='REMOTE_A2A';st.remoteWorkId=work.id;r.revision++;}});
+      await this.dispatched(record,work.id,phase.phase,binding.host);
       return {...common,status:'REMOTE_A2A_DISPATCHED',phaseId:phase.id,next:[{agentId:phase.agentId,workId:work.id,
         execution:'REMOTE_A2A',host:binding.host,automatic:true}]};
     }

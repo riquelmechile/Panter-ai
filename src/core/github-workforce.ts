@@ -218,6 +218,27 @@ export class GitHubWorkforce{
     });
     return {workId,revoked:found};
   }
+  /** Leader-side, read-only: the diff of a frozen candidate against its base, as text material for hosts that
+   * cannot reach the repository (e.g. Gemini by e-mail). Pinned to an allowed repository like every call. */
+  async candidateMaterial(repository:string,base:string|null,head:string,max=26_000){
+    this.ensure();
+    check(repoAllowed(this.allow,repository),'Repository is not in PANTER_GITHUB_WORKFORCE_REPOS');
+    check(/^[a-f0-9]{40}$/.test(head),'Invalid candidate SHA');
+    const repo=base?null:this.ok(await this.api('GET',repository,''),'repository lookup');
+    const from=base??repo.default_branch;
+    check(validRefName(from)||/^[a-f0-9]{40}$/.test(from),'Invalid base');
+    const cmp=this.ok(await this.api('GET',repository,`compare/${refPath(from)}...${head}`),'compare');
+    const files:any[]=Array.isArray(cmp?.files)?cmp.files:[];
+    const out=[`Repository: ${repository}`,`Diff ${from}...${head} (${files.length} file(s), ${cmp?.ahead_by??'?'} commit(s) ahead)`];
+    let used=out.join('\n').length,omitted=0;
+    for(const f of files){
+      const block=`\n### ${String(f.filename)} (${String(f.status)}, +${f.additions??0} -${f.deletions??0})\n\`\`\`diff\n${typeof f.patch==='string'?f.patch:'(no textual patch: binary or too large)'}\n\`\`\``;
+      if(used+block.length>max){omitted++;continue;}
+      out.push(block);used+=block.length;
+    }
+    if(omitted)out.push(`\n[${omitted} file(s) omitted to fit the size limit; judge only what is shown and say so.]`);
+    return out.join('\n');
+  }
   audit(caller:string,workId?:string){
     this.ensure();
     check(caller===this.leader(),'Only the leader reads the GitHub audit');

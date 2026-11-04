@@ -126,6 +126,26 @@ if(process.env.PANTER_RDD_LOCAL_WORKTREES_FILE&&process.env.PANTER_GITHUB_WORKFO
 const localGit=process.env.PANTER_RDD_LOCAL_WORKTREES_FILE?await LocalGitVerifier.open(process.env.PANTER_RDD_LOCAL_WORKTREES_FILE):null;
 const panterRdd = await PanterRdd.open(dataDir,nativeSubagentReview,mesh,githubGate,rddRunnerKeys,localGit);
 const harness = await AutomaticHarness.open(dataDir,mesh,nativeSubagentReview,githubGate,nativeReview,panterRdd,true);
+// Bound hosts run the harness phases. Hosts reached only by e-mail (no repository access) get the candidate diff
+// as packet material; every other host gets a work-scoped GitHub grant for its phase; a host that does not start
+// a dispatched phase in time loses it to native execution.
+const materialHosts = new Set((process.env.PANTER_MATERIAL_HOSTS ?? 'gemini').split(',').map(x => x.trim()).filter(Boolean));
+const pickupSeconds = Number(process.env.PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS ?? '180');
+const pickupMailSeconds = Number(process.env.PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS_MAIL ?? '1200');
+if (![pickupSeconds, pickupMailSeconds].every(n => Number.isInteger(n) && n >= 30 && n <= 86_400)) throw new Error('Invalid remote pickup timeout (30-86400 seconds)');
+harness.setHostHooks({
+  materialFor: async (run, host) => {
+    if (!materialHosts.has(host) || !githubWorkforce.configured || !run.githubRepository || !/^[a-f0-9]{40}$/.test(run.candidateSha ?? '')) return undefined;
+    try { return await githubWorkforce.candidateMaterial(run.githubRepository, run.githubExpectedBase ?? null, run.candidateSha!); } catch { return undefined; }
+  },
+  afterDispatch: async ({ run, workId, phase, host }) => {
+    if (!githubWorkforce.configured || !run.githubRepository || materialHosts.has(host)) return;
+    const comment = (phase === 'VERIFY' || phase === 'REVIEW' || phase === 'JUDGMENT') && run.githubPrNumber ? ['comment' as const] : [];
+    await githubWorkforce.grant(leaderHost(), { workId, repository: run.githubRepository,
+      ops: phase === 'IMPLEMENT' ? ['commit', 'pr'] : comment, numbers: comment.length ? [run.githubPrNumber!] : [] });
+  },
+  pickupTimeoutMs: host => (materialHosts.has(host) ? pickupMailSeconds : pickupSeconds) * 1000,
+});
 // Legacy/direct A2A writers cannot bypass the operator-issued harness grant.
 mesh.setWriteGuard((missionId,paths)=>harness.authorizeDelegatedWrite(missionId,paths));
 const engramEnabled = process.env.PANTER_ENGRAM_ENABLED === '1';
