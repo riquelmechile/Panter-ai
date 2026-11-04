@@ -63,6 +63,10 @@ Cloudflare.** Revisar PR y CI SHA exacto antes de merge y E2E antes de producci�
   el ledger Mesh; cuando se persiste una delegación, el evento posterior al
   commit despierta únicamente la espera de ese actor. Recupera el candidato
   desde SQLite, nunca desde un evento con instrucciones.
+- Cada respuesta trae `nextTool` y `nextArguments`. Si no hay trabajo
+  (`IMMEDIATE_EMPTY` o `TIMED_OUT`), apunta a otra espera con `waitSeconds: 300`,
+  incluso cuando la llamada anterior fue un sondeo con `waitSeconds: 0`. Así
+  un worker que sigue la pista nunca cae en un bucle apretado.
 - Al expirar el tiempo devuelve `TIMED_OUT`; un cliente puede repetir la
   operación respetando sus límites y permisos. Desregistra el listener tanto
   en éxito como al fallar. Una sesión desconectada sin cancelación explícita

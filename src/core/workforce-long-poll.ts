@@ -76,3 +76,18 @@ export class WorkforceLongPoll {
     }
   }
 }
+
+/** Seconds a standing worker should block on its next wait: long enough to never be a tight loop. */
+export const LISTEN_WAIT_SECONDS = 300;
+/** Tell a standing worker what to do next after a wait, in plain visible fields. The next wait always
+ *  carries a non-zero waitSeconds, so even an immediate (waitSeconds 0) probe turns into a blocking wait. */
+export function withListenHint<T extends {waitOutcome:string}>(r:T, protocolEra:string|null,
+  waitTool:'panter_workforce_wait'|'panter_workforce_listen'='panter_workforce_wait'){
+  // panter_workforce_listen takes the era from the connection, so it gets no protocolEra argument.
+  const nextArguments=protocolEra===null?{waitSeconds:LISTEN_WAIT_SECONDS}:{protocolEra,waitSeconds:LISTEN_WAIT_SECONDS};
+  return r.waitOutcome==='CANDIDATE'
+    ?{...r,nextTool:'panter_workforce_pickup' as const,nextArguments:{},
+      instruction:'Work is queued for you: claim it with panter_workforce_pickup.'}
+    :{...r,nextTool:waitTool,nextArguments,
+      instruction:`No work yet. A standing Panter worker calls ${waitTool} again with waitSeconds ${LISTEN_WAIT_SECONDS}; it blocks on the server for that long, so this is not a tight loop.`};
+}

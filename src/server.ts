@@ -13,7 +13,7 @@ import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from '@model
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { MeshEngine, HOSTS, isHost } from './core/mesh.js';
 import { registerTaskWire } from './core/workforce-task-wire.js';
-import { WorkforceLongPoll } from './core/workforce-long-poll.js';
+import { WorkforceLongPoll, withListenHint } from './core/workforce-long-poll.js';
 import { GrokRoutineWake } from './core/grok-routine-wake.js';
 import { WorkforceEvents, reconcileWorkforceEventOutbox } from './core/workforce-events.js';
 import { registerWorkforceEventWire } from './core/workforce-event-wire.js';
@@ -486,9 +486,9 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_workforce_listen',{
     description:'Authenticated live MCP listen request (0–3600s) with server-observed protocol era. Resumes a connected host when a work pointer arrives; not cold-start.',
     inputSchema:z.object({waitSeconds:z.number().int().min(0).max(3600).default(300)}).strict()
-  },async (x,ctx)=>execute(()=>workforceLongPoll.wait(hostPrincipal(),
+  },async (x,ctx)=>execute(async()=>withListenHint(await workforceLongPoll.wait(hostPrincipal(),
     reqCtx.era==='modern'?'2026-07-28':'2025-11-25',
-    x.waitSeconds*1000,ctx.mcpReq.signal)));
+    x.waitSeconds*1000,ctx.mcpReq.signal),null,'panter_workforce_listen')));
   // Actor-bound, single-process long-poll fallback: one bounded waiter per worker.
   // Not a provider wake and not the MCP Tasks 2026 extension.
   server.registerTool('panter_workforce_wait',{
@@ -497,7 +497,7 @@ const handler = createMcpHandler(reqCtx => {
       protocolEra:z.enum(['2026-07-28','2025-11-25','UNKNOWN']),
       waitSeconds:z.number().int().min(0).max(3600).default(300),
     }).strict(),
-  },async (x,ctx)=>execute(()=>workforceLongPoll.wait(hostPrincipal(), x.protocolEra, x.waitSeconds * 1000,ctx.mcpReq.signal)));
+  },async (x,ctx)=>execute(async()=>withListenHint(await workforceLongPoll.wait(hostPrincipal(), x.protocolEra, x.waitSeconds * 1000,ctx.mcpReq.signal),x.protocolEra)));
   server.registerTool('panter_workforce_status',{
     description:`${leaderLabel()} read-only four-worker presence, claims, receipts and unverified wake-route reports. No invented READY or wake proof.`,
     inputSchema:z.object({}),annotations:{readOnlyHint:true},

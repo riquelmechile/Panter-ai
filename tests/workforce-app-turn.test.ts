@@ -55,3 +55,11 @@ test('host must be GPT-B or Gemini; no identity override or coordinator pickup',
   await assert.rejects(appWorkforceTurn(mesh,'claude','2026-07-28'),/Native ChatGPT\/Gemini app OAuth/);
   await assert.rejects(appWorkforceTurn(mesh,'gpt-b','2026-07-28',10),/Invalid lease/);
 }));
+
+test('an empty in-app turn points a standing worker to the blocking wait, not a tight loop',()=>fixture(async mesh=>{
+  const turn=await appWorkforceTurn(mesh,'gemini','2025-11-25',300);
+  assert.equal(turn.status,'EMPTY');
+  if(turn.status!=='EMPTY')throw Error('expected empty');
+  assert.equal(turn.nextTool,'panter_workforce_wait');
+  assert.match(turn.instruction,/blocks on the server/);
+}));
