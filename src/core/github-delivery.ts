@@ -1,3 +1,4 @@
+import {validRefName} from './github-workforce.js';
 /** Read-only GitHub destination gate, adapted from Gentle Shell branch-pr and
  * work-unit-commits. Evidence is fetched from GitHub, never from a model report.
  * This module never commits, pushes, merges, labels, or opens pull requests.
@@ -33,12 +34,12 @@ const MAX_REVIEW_PAGES = 10;
 const repoPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const branchPattern = /^(feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert)\/[a-z0-9._-]+$/;
 /** Branches the Panter GitHub workforce creates for a worker's work (panter/<host>-<work8> by default, or a leader-chosen
- * name under panter/). Workers can only push there, so the gate must accept them. */
-const panterBranchPattern = /^panter\/[a-z0-9._-]+$/;
+ * name under panter/): exactly the names the workforce itself accepts. Workers can only push there. */
+const panterBranch=(branch:string)=>branch.startsWith('panter/')&&validRefName(branch);
 const conventional = /^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9._-]+\))?!?: .+$/;
 const acceptedTypes = new Set(['type:bug','type:feature','type:docs','type:refactor','type:chore','type:breaking-change']);
 export function inspectCommitMessage(message:string){return conventional.test(message.split('\n')[0]??'');}
-export function inspectBranchName(branch:string){return (branchPattern.test(branch)||panterBranchPattern.test(branch)) && !branch.includes('..');}
+export function inspectBranchName(branch:string){return (branchPattern.test(branch)||panterBranch(branch)) && !branch.includes('..');}
 function check(value:unknown,why:string):asserts value{if(!value)throw new Error(why);}
 function labelNames(list:unknown):string[]{return Array.isArray(list)?list.map(x=>typeof x==='string'?x:(x && typeof x==='object' && 'name' in x ? String(x.name):'')).filter(Boolean):[];}
 function linkedIssue(body:string, targetRepository:string):number|null {
@@ -70,7 +71,8 @@ export class GitHubDeliveryGate {
   }
   allows(repository:string){return this.allowed.has(repository)&&repoPattern.test(repository);}
   private async api(repository:string,endpoint:string):Promise<unknown>{
-    const r=await this.fetcher(`https://api.github.com/repos/${repository}/${endpoint}`,{
+    // The repository itself is /repos/{owner}/{repo} — GitHub answers 404 to a trailing slash.
+    const r=await this.fetcher(`https://api.github.com/repos/${repository}${endpoint?`/${endpoint}`:''}`,{
       headers:{Accept:'application/vnd.github+json', 'X-GitHub-Api-Version':'2022-11-28',
         ...(this.cfg.token?{Authorization:`Bearer ${this.cfg.token}`}:{})},
       signal:AbortSignal.timeout(12000),redirect:'error',

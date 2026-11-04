@@ -26,7 +26,9 @@ test('matches Gentle Shell branch and Conventional Commit formats',()=>{
   assert.equal(inspectBranchName('panter/gpt-a-dee64fd2'),true);
   assert.equal(inspectBranchName('panter/../main'),false);
   assert.equal(inspectBranchName('panter/'),false);
-  assert.equal(inspectBranchName('panter/Gpt-A'),false);
+  assert.equal(inspectBranchName('panter/fix/login'),true, 'a leader-chosen name the workforce accepts');
+  for (const bad of ['panter/.', 'panter/.hidden', 'panter/x.', 'panter/x.lock', 'panter/a//b', 'panter/x@{1}'])
+    assert.equal(inspectBranchName(bad), false, bad);
   assert.equal(inspectCommitMessage('feat(review): add review tests'),true);
   assert.equal(inspectCommitMessage('Update everything'),false);
 });
@@ -118,4 +120,13 @@ test('bootstrap PR #1 accepts 117 commits only with single-PR operator consent a
   assert.match(approved.warnings.join(' '),/117 commits checked/);
   entries['pulls/1/commits?per_page=100&page=2']=items(16);
   assert.match((await g.inspect({...input,deliveryStrategy:'single-pr',parentAuthorizedSinglePr:true})).blockers.join(' '),/Incomplete/);
+});
+
+test('the repository itself is read without a trailing slash (GitHub answers 404 to it)', async () => {
+  const urls: string[] = [];
+  const gate = new GitHubDeliveryGate({ allowedRepositories: ['example/project'], requiredChecks: ['test'] },
+    (async (u: string | URL | Request) => { urls.push(String(u)); return { ok: false, status: 404, text: async () => '{}' } as Response; }) as typeof fetch);
+  await gate.inspect({ repository: 'example/project', prNumber: 1, expectedSha: 'a'.repeat(40) });
+  assert.ok(urls.includes('https://api.github.com/repos/example/project'), urls.join(' '));
+  assert.ok(!urls.some(u => u.endsWith('/')));
 });
