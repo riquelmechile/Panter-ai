@@ -483,9 +483,9 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_workforce_listen',{
     description:'Authenticated live MCP listen request (0–3600s) with server-observed protocol era. Resumes a connected host when a work pointer arrives; not cold-start.',
     inputSchema:z.object({waitSeconds:z.number().int().min(0).max(3600).default(300)}).strict()
-  },async (x,ctx)=>execute(()=>workforceLongPoll.wait(hostPrincipal(),
+  },async (x,ctx)=>execute(async()=>withListenHint(await workforceLongPoll.wait(hostPrincipal(),
     reqCtx.era==='modern'?'2026-07-28':'2025-11-25',
-    x.waitSeconds*1000,ctx.mcpReq.signal)));
+    x.waitSeconds*1000,ctx.mcpReq.signal),null,'panter_workforce_listen')));
   // Actor-bound, single-process long-poll fallback: one bounded waiter per worker.
   // Not a provider wake and not the MCP Tasks 2026 extension.
   server.registerTool('panter_workforce_wait',{

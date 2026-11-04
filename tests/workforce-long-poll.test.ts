@@ -127,4 +127,7 @@ test('listen hints: a candidate points to pickup, every empty outcome to a block
     assert.deepEqual(empty.nextArguments, { protocolEra: '2026-07-28', waitSeconds: LISTEN_WAIT_SECONDS });
     assert.match(empty.instruction, /not a tight loop/);
   }
+  const listen = withListenHint({ waitOutcome: 'IMMEDIATE_EMPTY' }, null, 'panter_workforce_listen');
+  assert.equal(listen.nextTool, 'panter_workforce_listen');
+  assert.deepEqual(listen.nextArguments, { waitSeconds: LISTEN_WAIT_SECONDS });
 });
