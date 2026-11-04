@@ -146,18 +146,23 @@ harness.setHostHooks({
     try { return await githubWorkforce.candidateMaterial(run.githubRepository, run.githubExpectedBase ?? null, run.candidateSha!); } catch { return undefined; }
   },
   afterDispatch: async ({ run, workId, phase, host }) => {
-    // Grok is woken only by its routine webhook: ring it for harness work too (independent of grants).
-    if (host === 'grok') await ringGrokForWork(mesh, grokRoutineWake, workId).catch(() => undefined);
-    if (!autoGithubGrants || !githubWorkforce.configured || !run.githubRepository || materialHosts.has(host)) return;
-    // Commits/PRs also need the run's own operator write approval (IMPLEMENT is never dispatched without it).
-    if (phase === 'IMPLEMENT' && run.permission !== 'WRITE_APPROVED') return;
-    const comment = (phase === 'VERIFY' || phase === 'REVIEW' || phase === 'JUDGMENT') && run.githubPrNumber ? ['comment' as const] : [];
-    await githubWorkforce.grant(leaderHost(), { workId, repository: run.githubRepository, auto: true,
-      ops: phase === 'IMPLEMENT' ? ['commit', 'pr'] : comment, numbers: comment.length ? [run.githubPrNumber!] : [],
-      // The implementer commits only inside the run's approved edit surfaces.
-      ...(phase === 'IMPLEMENT' ? { paths: run.paths } : {}),
-      // The worker branches from, and opens its PR against, the run's target base.
-      ...(phase === 'IMPLEMENT' && run.githubExpectedBase ? { base: run.githubExpectedBase } : {}) });
+    const grantFor = async () => {
+      if (!autoGithubGrants || !githubWorkforce.configured || !run.githubRepository || materialHosts.has(host)) return;
+      // Commits/PRs also need the run's own operator write approval (IMPLEMENT is never dispatched without it).
+      if (phase === 'IMPLEMENT' && run.permission !== 'WRITE_APPROVED') return;
+      const comment = (phase === 'VERIFY' || phase === 'REVIEW' || phase === 'JUDGMENT') && run.githubPrNumber ? ['comment' as const] : [];
+      await githubWorkforce.grant(leaderHost(), { workId, repository: run.githubRepository, auto: true,
+        ops: phase === 'IMPLEMENT' ? ['commit', 'pr'] : comment, numbers: comment.length ? [run.githubPrNumber!] : [],
+        // The implementer commits only inside the run's approved edit surfaces.
+        ...(phase === 'IMPLEMENT' ? { paths: run.paths } : {}),
+        // The worker branches from, and opens its PR against, the run's target base.
+        ...(phase === 'IMPLEMENT' && run.githubExpectedBase ? { base: run.githubExpectedBase } : {}) });
+    };
+    // The grant exists before any doorbell rings, so a fast worker never finds itself without access.
+    try { await grantFor(); } finally {
+      // Grok is woken only by its routine webhook: ring it for harness work too (even if the grant failed).
+      if (host === 'grok') await ringGrokForWork(mesh, grokRoutineWake, workId).catch(() => undefined);
+    }
   },
   accessFor: (run, host, phase) => {
     if (!run.githubRepository) return undefined;
