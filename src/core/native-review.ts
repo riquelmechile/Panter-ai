@@ -96,7 +96,9 @@ export function lensEnvelope(text:string,agentId:string,candidateSha:string):(Re
   const ok=findings.every((x:any)=>!!x&&typeof x==='object'&&typeof x.location==='string'&&SEVERITIES.includes(x.severity)&&Array.isArray(x.proofRefs)&&x.proofRefs.length>0);
   if(!ok)return 'UNBOUND';
   if(!findings.some(isSevere)&&severeUnderSeverityKeys(obj)>0)return 'UNBOUND';
-  return {...f,findings} as Record<string,any>&{findings:LensFinding[]};
+  // Return the findings exactly as the lens wrote them: Panter-RDD verifies runner signatures over them, so the
+  // proof_refs alias is only used to validate, never written back.
+  return f as Record<string,any>&{findings:LensFinding[]};
 }
 /** Severe values claimed in a report that was not accepted, so they are surfaced, never lost. */
 export function unacceptedSevere(text:string){

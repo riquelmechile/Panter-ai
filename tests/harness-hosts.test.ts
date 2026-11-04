@@ -352,7 +352,7 @@ test('4R lens reports are strict: one JSON object (optionally fenced), bound to 
   // Nested lens_results with the outer SHA; proof_refs accepted.
   const nested = { candidateSha: sha, review_result: { lens_results: [{ lens: 'review-reliability', findings: [{ id: 'R1', location: 'a.js:1', severity: 'WARNING', claim: 'c', proof_refs: ['h'] }] }] } };
   const n = lensEnvelope(JSON.stringify(nested), 'review-reliability', sha);
-  assert.ok(typeof n === 'object' && Array.isArray((n.findings[0] as any).proofRefs));
+  assert.ok(typeof n === 'object' && Array.isArray((n.findings[0] as any).proof_refs) && (n.findings[0] as any).proofRefs === undefined, 'findings returned exactly as written (signed)');
   // Unbound: no SHA, wrong lens, wrong SHA, two entries for one lens.
   assert.equal(lensEnvelope(JSON.stringify({ review_result: { lens_results: [{ lens: 'review-risk', findings: [] }] } }), 'review-risk', sha), 'UNBOUND');
   assert.equal(lensEnvelope(JSON.stringify({ ...env, agentId: 'review-resilience' }), 'review-risk', sha), 'UNBOUND');
