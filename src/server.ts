@@ -12,6 +12,7 @@ import { ClientAddressPolicy } from './core/trusted-proxy.js';
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { MeshEngine, HOSTS, isHost } from './core/mesh.js';
+import { GitHubWorkforce, GITHUB_WRITE_OPS } from './core/github-workforce.js';
 import { registerTaskWire } from './core/workforce-task-wire.js';
 import { WorkforceLongPoll, withListenHint } from './core/workforce-long-poll.js';
 import { GrokRoutineWake } from './core/grok-routine-wake.js';
@@ -98,6 +99,8 @@ const mesh = await MeshEngine.open(dataDir);
 if (mesh.leaderSwitch) console.error(`Panter leader switch ${mesh.leaderSwitch.from} -> ${mesh.leaderSwitch.to}`);
 for (const line of await adoptPendingLeaderPhases(mesh, agents)) console.error(line);
 const workforceLongPoll = new WorkforceLongPoll(mesh);
+// GitHub for workers: the operator token stays server-side (PANTER_GITHUB_WORKFORCE_TOKEN), never in repo or packets.
+const githubWorkforce = new GitHubWorkforce(dataDir, mesh, leaderHost);
 const grokRoutineWake = new GrokRoutineWake();
 const claudeRoutineWake = new ClaudeRoutineWake();
 const workforceEvents = new WorkforceEvents(dataDir);
@@ -368,7 +371,38 @@ const handler = createMcpHandler(reqCtx => {
   const roleEnum = z.enum(['orchestrator','explorer','architect','implementer','verifier','reviewer']);
   server.registerTool('panter_mesh_profile_set',{description:`${leaderLabel()} configures a host agent profile. Model, effort and executionRequest (service tier, stream, parallel tool calls, native subagents) are frozen into each delegated work as REQUESTED_UNVERIFIED requirements the worker must apply and report; Panter cannot enforce them.`,inputSchema:z.object({host:hostEnum,actorId:bounded(160),modelRequest:z.string().regex(MODEL_REQUEST_PATTERN),effortRequest:z.string().regex(EFFORT_REQUEST_PATTERN),roles:z.array(roleEnum).min(1),coordinationMode:z.enum(['AUTO','GPT_A_ONLY']).optional(),preferNativeSubagents:z.boolean().optional(),maxRequestedNativeWorkers:z.number().int().min(0).max(32).optional(),scheduledPickupEnabled:z.boolean().optional(),scheduledPollIntervalSeconds:z.number().int().min(3600).max(86400).optional(),executionRequest:z.object({serviceTier:z.string().regex(/^[a-z][a-z0-9_-]{1,31}$/).optional(),stream:z.boolean().optional(),parallelToolCalls:z.boolean().optional(),maxNativeSubagents:z.number().int().min(0).max(32).optional()}).strict().optional(),expectedRevision:z.number().int().nonnegative()})},async x=>execute(()=>mesh.setProfile(hostPrincipal(),x,x.expectedRevision)));
   server.registerTool('panter_mesh_profiles',{description:'List configured host profiles.',inputSchema:z.object({}),annotations:{readOnlyHint:true}},async()=>execute(()=>mesh.profiles()));
-  server.registerTool('panter_mesh_delegate',{description:`${leaderLabel()} creates actor-bound A2A work for one configured host.`,inputSchema:z.object({missionId:bounded(120),target:hostEnum,role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160)})},async x=>execute(()=>mesh.delegate(hostPrincipal(),x)));
+  const githubOps = z.array(z.enum(GITHUB_WRITE_OPS)).max(4);
+  const githubGrantInput = z.object({repository:bounded(201),ops:githubOps.default([]),branch:bounded(200).optional(),base:bounded(200).optional()}).strict();
+  server.registerTool('panter_mesh_delegate',{description:`${leaderLabel()} creates actor-bound A2A work for one configured host. Optional github attaches a work-scoped GitHub grant (see panter_github_grant).`,inputSchema:z.object({missionId:bounded(120),target:hostEnum,role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160),github:githubGrantInput.optional()})},async x=>execute(async()=>{
+    const {github,...input}=x;
+    if(github&&!githubWorkforce.configured)throw new Error('GitHub workforce is not configured on this server');
+    const work=await mesh.delegate(hostPrincipal(),input);
+    if(!github)return work;
+    return {...work,github:await githubWorkforce.grant(hostPrincipal(),{workId:work.id,...github})};
+  }));
+  // ---- GitHub for the workforce (operator token held by Panter; narrow, work-scoped, audited) ----
+  server.registerTool('panter_github_grant',{description:`${leaderLabel()} lets the worker of one delegated work use GitHub in ONE repository: always read; plus the listed write operations. commit = commits to the work's own new branch only (default panter/<host>-<work8>, never default/protected branches, never workflows, never forced); pr = open a pull request from that branch; comment = comment on issues/PRs; issue = open issues. There is NO merge, approve, delete, label, release or settings operation. The grant dies with the work's lease.`,
+    inputSchema:z.object({workId:z.uuid()}).extend(githubGrantInput.shape).strict()},async x=>execute(()=>githubWorkforce.grant(hostPrincipal(),x)));
+  server.registerTool('panter_github_revoke',{description:`${leaderLabel()} revokes a work's GitHub grant.`,inputSchema:z.object({workId:z.uuid()}).strict()},
+    async x=>execute(()=>githubWorkforce.revoke(hostPrincipal(),x.workId)));
+  server.registerTool('panter_github_audit',{description:`${leaderLabel()} reads GitHub workforce configuration, grants and the audit of every worker GitHub action.`,inputSchema:z.object({workId:z.uuid().optional()}).strict(),annotations:{readOnlyHint:true}},
+    async x=>execute(async()=>({...githubWorkforce.describe(),...githubWorkforce.audit(hostPrincipal(),x.workId)})));
+  const githubClaim = {workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive()};
+  server.registerTool('panter_github_read',{description:'Worker: read GitHub for your claimed work, in the repository the leader granted. path is relative to repos/{owner}/{repo}/ (e.g. "contents/src/app.ts?ref=main", "pulls/12", "pulls/12/files", "issues?state=open", "commits?sha=main", "compare/main...my-branch"). path "grant" shows your grant. File contents come back decoded as text. Secrets, keys, hooks and admin paths are not readable.',
+    inputSchema:z.object({...githubClaim,path:bounded(500)}).strict(),annotations:{readOnlyHint:true}},
+    async x=>execute(()=>githubWorkforce.read(hostPrincipal(),x,x.path)));
+  server.registerTool('panter_github_commit',{description:'Worker (grant op "commit"): commit up to 50 text files (create/update with content, or delete:true) to YOUR work branch in one commit. The branch is created from the base on first use. Never the default branch, never .github/workflows, never forced.',
+    inputSchema:z.object({...githubClaim,message:bounded(5000),files:z.array(z.object({path:bounded(400),content:z.string().max(1_000_000).optional(),delete:z.literal(true).optional()}).strict()).min(1).max(50)}).strict()},
+    async x=>execute(()=>githubWorkforce.commit(hostPrincipal(),x,x.message,x.files)));
+  server.registerTool('panter_github_open_pr',{description:'Worker (grant op "pr"): open a pull request from YOUR work branch to the granted base (default branch if none). Returns the existing PR if one is open. Merging and approving stay with the leader and the reviewer account.',
+    inputSchema:z.object({...githubClaim,title:bounded(250),body:z.string().max(60000).default(''),draft:z.boolean().default(false)}).strict()},
+    async x=>execute(()=>githubWorkforce.openPr(hostPrincipal(),x,x.title,x.body,x.draft)));
+  server.registerTool('panter_github_comment',{description:'Worker (grant op "comment"): comment on an issue or pull request of the granted repository.',
+    inputSchema:z.object({...githubClaim,number:z.number().int().positive(),body:bounded(20000)}).strict()},
+    async x=>execute(()=>githubWorkforce.comment(hostPrincipal(),x,x.number,x.body)));
+  server.registerTool('panter_github_create_issue',{description:'Worker (grant op "issue"): open an issue in the granted repository.',
+    inputSchema:z.object({...githubClaim,title:bounded(250),body:z.string().max(60000).default('')}).strict()},
+    async x=>execute(()=>githubWorkforce.issue(hostPrincipal(),x,x.title,x.body)));
   server.registerTool('panter_mesh_delegate_auto',{
     description:`${leaderLabel()} routes to the least-loaded recently authenticated standing peer with the requested role; returns LOCAL_FALLBACK_REQUIRED when no live peer is evidenced. Does not prove cold-start wake.`,
     inputSchema:z.object({missionId:bounded(120),role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160)}).strict(),

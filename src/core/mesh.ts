@@ -868,6 +868,25 @@ export class MeshEngine {
       return w;
     });
   }
+  /** The caller's live claim on its own work (no mutation): used to authorize work-scoped capabilities. */
+  async liveWork(caller: Host, id: string, attemptId: string, generation: number) {
+    check(caller!==leaderHost(),'Only workers hold delegated work');
+    return this.read(d => {
+      const w = d.works.find(w => w.id === id && w.target === caller);
+      check(w && w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
+      check(Date.parse(w.leaseUntil!) > Date.now(), 'Lease expired');
+      return { id: w.id, missionId: w.missionId, target: w.target, role: w.role };
+    });
+  }
+  /** Leader view of one work's target and state, for attaching work-scoped grants. */
+  async workTarget(caller: Host, id: string) {
+    check(caller===leaderHost(),`Only ${leaderLabel()} may inspect work for grants`);
+    return this.read(d => {
+      const w = d.works.find(w => w.id === id);
+      check(w, 'Work not found');
+      return { id: w.id, target: w.target, role: w.role, state: w.state };
+    });
+  }
   async complete(caller: Host, id: string, attemptId: string, generation: number, result: string, success = true) {
     check(caller!==leaderHost(),'Only workers may complete delegated work');
     check(result.length <= 50000, 'Result too long');
