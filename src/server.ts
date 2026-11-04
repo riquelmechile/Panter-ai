@@ -1,4 +1,4 @@
-import { leaderHost, leaderLabel, appEventHosts, freezeLeaderHost, leaderPolicyProfile } from './core/leadership.js';
+import { leaderHost, leaderLabel, appEventHosts, freezeLeaderHost, leaderPolicyProfile, adoptPendingLeaderPhases } from './core/leadership.js';
 import { ExternalOAuthVerifier, staticBearerMatch } from './core/oauth.js';
 import { isAdminPrincipal, parseOwnerTrustedHosts } from './core/owner-trust.js';
 import { EmbeddedOAuth } from './core/embedded-oauth.js';
@@ -96,13 +96,7 @@ const store = await PanterStore.open(dataDir);
 const agents = await AgentEngine.open(dataDir, store);
 const mesh = await MeshEngine.open(dataDir);
 if (mesh.leaderSwitch) console.error(`Panter leader switch ${mesh.leaderSwitch.from} -> ${mesh.leaderSwitch.to}`);
-// Runs on every boot while the ledger marker exists, so a crash between the mesh migration
-// and the phase adoption is finished on the next start.
-for (const from of mesh.pendingPhaseAdoption) {
-  const moved = await agents.adoptLeaderPhases(from, leaderHost());
-  console.error(`Panter leader phases ${from} -> ${leaderHost()}: ${moved} open native phases adopted`);
-}
-if (mesh.pendingPhaseAdoption.length) await mesh.clearPhaseAdoption(mesh.pendingPhaseAdoption);
+for (const line of await adoptPendingLeaderPhases(mesh, agents)) console.error(line);
 const workforceLongPoll = new WorkforceLongPoll(mesh);
 const grokRoutineWake = new GrokRoutineWake();
 const claudeRoutineWake = new ClaudeRoutineWake();
@@ -690,9 +684,15 @@ const handler = createMcpHandler(reqCtx => {
       inputSchema:z.object({clientId:z.string().regex(/^pc_[A-Za-z0-9_-]{24,64}$/)})
     },async x=>execute(async()=>{requireAdmin();
       const hosts=await embedded.clientHosts(x.clientId);
-      const revokedGrants=await embedded.revokeClient(x.clientId);
       // A revoked connection must stop receiving work events immediately, not at subscription expiry.
-      return {revokedGrants,droppedEventSubscriptions:workforceEvents.dropOwners(hosts)};}));
+      // Drop before revoking (a crash in between leaves a still-valid client, which can resubscribe) and
+      // again after, so a subscribe verified across the revoke is refused by the epoch check.
+      let dropped=workforceEvents.dropOwners(hosts);
+      const revokedGrants=await embedded.revokeClient(x.clientId);
+      dropped+=workforceEvents.dropOwners(hosts);
+      return {revokedGrants,droppedEventSubscriptions:dropped,
+        hostsToResubscribe:hosts,
+        note:hosts.length?'Event subscriptions are per host: any other live connection of these hosts must subscribe again.':undefined};}));
   }
   server.registerTool('panter_harness_write_grant',{
     description:`Admin-only explicit bounded write authorization for a particular project/objective; ${leaderLabel()} cannot issue its own permission.`,

@@ -308,3 +308,20 @@ test('dead outbox entries never hold back live deliveries queued behind them',()
   assert.equal(await engine.flush(),1);
   assert.deepEqual(delivered,[geminiUrl]);
 }));
+
+test('a subscribe still verifying when the connection is revoked is never stored',()=>fixture(async dir=>{
+  let engine!:WorkforceEvents;
+  const post:EventPost=async(_u,_h,b)=>{
+    const body=JSON.parse(b) as {type?:string;challenge?:string};
+    // The admin revokes while the callback verification is in flight.
+    if(body.type==='verification'){engine.dropOwners(['gpt-b']);return {status:200,body:JSON.stringify({challenge:body.challenge})};}
+    return {status:200,body:''};
+  };
+  engine=new WorkforceEvents(dir,post);
+  await assert.rejects(engine.subscribe('gpt-b',args),/revoked during subscription/);
+  assert.equal(engine.hasActive('gpt-b'),false);
+  // A fresh subscribe after the revoke (by a still-valid connection) works normally.
+  const ok=new WorkforceEvents(dir,async(_u,_h,b)=>{const x=JSON.parse(b) as {challenge?:string};return {status:200,body:JSON.stringify({challenge:x.challenge})};});
+  await ok.subscribe('gpt-b',args);
+  assert.equal(ok.hasActive('gpt-b'),true);
+}));
