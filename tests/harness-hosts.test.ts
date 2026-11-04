@@ -475,3 +475,38 @@ test('a read-only phase whose host fails runs native and its grant is released',
   assert.deepEqual(abandoned.filter(a => a.workId === workId).map(a => a.host), ['gpt-b']);
   assert.equal((await h.tick(s.id, all)).status, 'WAITING_HOST_PHASE_REPORT', 'never redispatched to the failed host');
 }));
+
+test('a remote verification that fails runs native and its grant (PR comment) is released', () => withHosts(async (h, m, { abandoned }) => {
+  await m.bindSpecialist('gpt-a', { agentId: 'gentle-ai-verify', host: 'gpt-b', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] } as any, 0);
+  const s = await h.start({ project: 'app', objective: 'Fix login security', idempotencyKey: 'v-fail', writesAuthorized: true, changeSurfaces: ['src/auth.ts'] });
+  let t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Plan', evidence: ['plan'] });
+  t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Done', evidence: ['tests'], candidateSha: sha, runId: 'impl-run-1' });
+  t = await h.tick(s.id, all);
+  assert.equal(t.status, 'REMOTE_A2A_DISPATCHED');
+  assert.equal((t.next[0] as any).host, 'gpt-b');
+  const workId = t.next[0]!.workId as string;
+  const c: any = await m.claim('gpt-b', workId, 600);
+  await m.complete('gpt-b', workId, c.attemptId, c.leaseGeneration, 'No execution environment.', false);
+  const fb: any = await h.tick(s.id, all);
+  assert.equal(fb.fallback?.reason, 'REMOTE_FAILED');
+  assert.equal(fb.status, 'GPT_A_NATIVE');
+  assert.ok(abandoned.some(a => a.workId === workId));
+}));
+
+test('a read-only host that let its lease run out and never came back loses the phase to native', () => withHosts(async (h, m, { timeout }) => {
+  const s = await h.start({ project: 'app', objective: 'Repair unknown issue', idempotencyKey: 'ro-lease', writesAuthorized: true });
+  const first = await h.tick(s.id, all);
+  const workId = first.next[0]!.workId as string;
+  await m.claim('gpt-b', workId, 30);
+  assert.equal((await h.tick(s.id, all)).status, 'WAITING_REMOTE_PEER', 'a live lease keeps the phase remote');
+  timeout.ms = 60_000;
+  const original = Date.now;
+  try {
+    Date.now = () => original() + 31_000 + 30_000;
+    assert.equal((await h.tick(s.id, all)).status, 'WAITING_REMOTE_PEER', 'still within the grace after the lease');
+    Date.now = () => original() + 31_000 + 61_000;
+    const fb: any = await h.tick(s.id, all);
+    assert.equal(fb.fallback?.reason, 'REMOTE_LEASE_LOST');
+    assert.equal(fb.status, 'GPT_A_NATIVE');
+  } finally { Date.now = original; }
+}));
