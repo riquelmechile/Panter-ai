@@ -54,7 +54,7 @@ export class MeshEngine {
     // Ledgers written before PANTER_LEAD_HOST existed were always led by gpt-a.
     // An empty ledger has no prior leader to migrate from.
     const storedLeader = (d: MeshData): Host => d.leader && isHost(d.leader) ? d.leader
-      : (d.profiles.length || d.works.length || d.messages.length) ? 'gpt-a' : lead;
+      : (d.profiles.length || d.works.length || d.messages.length || d.reviews?.length || d.specialistBindings?.length) ? 'gpt-a' : lead;
     const normalize = (data: MeshData): { from: Host; to: Host } | null => {
       const from = storedLeader(data);
       if (from !== lead) {
@@ -75,7 +75,8 @@ export class MeshEngine {
         // Fresh revisions above the new leader's cursor, so incremental inbox polling still sees them.
         let next = Math.max(data.inboxRevision[lead] ?? 0, ...data.messages.filter(m => m.to === lead).map(m => m.inboxRevision || 0));
         for (const m of data.messages) {
-          if (m.to !== from || m.from === from) continue;
+          // Messages the new leader sent while it was a worker stay with the old leader: never self-addressed.
+          if (m.to !== from || m.from === from || m.from === lead) continue;
           const w = m.workId ? data.works.find(x => x.id === m.workId) : undefined;
           if (!w || w.target === m.from) { m.to = lead; m.inboxRevision = ++next; }
         }
@@ -95,6 +96,10 @@ export class MeshEngine {
         // across crashes until clearPhaseAdoption() confirms it.
         data.pendingPhaseAdoption = [...new Set([...(data.pendingPhaseAdoption ?? []), from])];
       }
+      // A mesh ledger without a leader predates PANTER_LEAD_HOST, so GPT-A led it even when it looks
+      // empty: GPT-A may still own native ODD phases in the agents store. Adoption is idempotent.
+      if (!data.leader && lead !== 'gpt-a' && from === lead)
+        data.pendingPhaseAdoption = [...new Set([...(data.pendingPhaseAdoption ?? []), 'gpt-a' as Host])];
       if (data.pendingPhaseAdoption) {
         data.pendingPhaseAdoption = data.pendingPhaseAdoption.filter(h => isHost(h) && h !== lead);
         if (!data.pendingPhaseAdoption.length) delete data.pendingPhaseAdoption;

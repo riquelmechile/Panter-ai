@@ -321,6 +321,60 @@ test('phase adoption marker survives a crash until cleared, and accumulates acro
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test('an upgraded ledger with no leader and no mesh rows still hands GPT-A native phases to the new leader', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-switch10-'));
+  try {
+    const { AgentEngine } = await import('../src/core/agents.js');
+    const { PanterStore } = await import('../src/core/store.js');
+    const { SqliteLedger } = await import('../src/core/sqlite-ledger.js');
+    const { adoptPendingLeaderPhases } = await import('../src/core/leadership.js');
+    // Pre-PR mesh row: no leader field, nothing delegated yet.
+    const seed = SqliteLedger.open(dir);
+    seed.mutate('mesh', {} as any, (d: any) => Object.assign(d, { version: 1, profiles: [], works: [], messages: [],
+      inboxRevision: { 'gpt-a': 0, 'gpt-b': 0, grok: 0, gemini: 0, claude: 0 } }));
+    seed.close();
+    let adopted: string[] = [];
+    const fakeAgents = { adoptLeaderPhases: async (from: string, to: string) => { adopted.push(`${from}->${to}`); return 1; } };
+    process.env.PANTER_LEAD_HOST = 'claude';
+    const m = await MeshEngine.open(dir);
+    assert.equal(m.leaderSwitch, null);
+    assert.deepEqual(m.pendingPhaseAdoption, ['gpt-a']);
+    // Crash during adoption: the marker survives and the next boot repeats it.
+    const crashing = { adoptLeaderPhases: async () => { throw new Error('crash'); } };
+    await assert.rejects(adoptPendingLeaderPhases(m, crashing), /crash/);
+    const again = await MeshEngine.open(dir);
+    assert.deepEqual(again.pendingPhaseAdoption, ['gpt-a']);
+    const lines = await adoptPendingLeaderPhases(again, fakeAgents);
+    assert.deepEqual(adopted, ['gpt-a->claude']);
+    assert.equal(lines.length, 1);
+    assert.deepEqual((await MeshEngine.open(dir)).pendingPhaseAdoption, []);
+    // A real agents store accepts the adoption (no phases is a no-op).
+    const agents = await AgentEngine.open(dir, await PanterStore.open(dir));
+    assert.equal(await agents.adoptLeaderPhases('gpt-a', 'claude'), 0);
+    // A truly fresh ledger with a GPT-A leader needs nothing.
+    const fresh = await mkdtemp(join(tmpdir(), 'panter-switch10b-'));
+    process.env.PANTER_LEAD_HOST = 'gpt-a';
+    assert.deepEqual((await MeshEngine.open(fresh)).pendingPhaseAdoption, []);
+    await rm(fresh, { recursive: true, force: true });
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('messages the new leader sent as a worker are not re-addressed to itself', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-switch11-'));
+  try {
+    process.env.PANTER_LEAD_HOST = 'gpt-a';
+    const a = await MeshEngine.open(dir);
+    await a.setProfile('gpt-a', { host: 'claude', actorId: 'actor-claude', modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer'] }, 0);
+    const w = await a.delegate('gpt-a', { missionId: 'm', target: 'claude', role: 'reviewer', instruction: 'x', idempotencyKey: 'x' });
+    await a.message('claude', { missionId: 'm', workId: w.id, to: 'gpt-a', kind: 'UPDATE', text: 'from claude as worker' });
+    process.env.PANTER_LEAD_HOST = 'claude';
+    const m = await MeshEngine.open(dir);
+    const own = (await m.inbox('claude')).messages.filter(x => x.text === 'from claude as worker');
+    assert.equal(own.length, 0);
+    assert.ok((await m.inbox('claude')).messages.every(x => x.from !== x.to));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 // Keep last: freezing is process-wide by design.
 test('freezeLeaderHost pins the leader for the process', async () => {
   const mod = await import('../src/core/leadership.js');
