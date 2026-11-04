@@ -429,3 +429,27 @@ test('a severe finding inside an unusable lens report is never retried away', ()
   assert.equal((await h.get(id))!.reviewId, first);
   assert.ok(t.review.reasons.some((x: string) => x.startsWith('Severe finding(s) reported in an unaccepted report')));
 }));
+
+test('no retry while any lens says something severe: accepted CRITICAL, failed lens, or severe words in prose', async () => {
+  const critical = (a: string) => lensReport(a, [{ id: 'R1', location: 'src/auth.ts:1', severity: 'CRITICAL', claim: 'token leaks', proofRefs: ['changed-hunk:src/auth.ts:1'] }]);
+  const cases: Array<[string, (a: string) => string, string?]> = [
+    ['accepted CRITICAL next to a prose lens', a => a === 'review-risk' ? critical(a) : a === 'review-readability' ? 'looks fine' : lensReport(a)],
+    ['bare BLOCKER prose', a => a === 'review-risk' ? 'BLOCKER: migration drops the users table' : lensReport(a)],
+    ['bracketed prose', a => a === 'review-risk' ? '[critical] token in logs' : lensReport(a)],
+    ['failed lens carrying a CRITICAL', a => critical(a), 'review-risk'],
+  ];
+  for (const [name, report, failAgent] of cases) await withHosts(async (h, m) => {
+    const id = await toReview(h, `sev-${name}`);
+    await h.tick(id, all);
+    const first = (await h.get(id))!.reviewId;
+    for (const host of ['grok', 'grok', 'gemini', 'gpt-b'] as const) {
+      const p: any = await m.pickup(host, 300);
+      if (p.status !== 'CLAIMED') continue;
+      const agent = p.work.specialist.agentId;
+      await m.complete(host, p.work.id, p.work.attemptId, p.work.leaseGeneration, failAgent && agent !== failAgent ? 'prose' : report(agent), agent !== failAgent);
+    }
+    const t: any = await h.tick(id, all);
+    assert.equal(t.retry, undefined, name);
+    assert.equal((await h.get(id))!.reviewId, first, name);
+  });
+});
