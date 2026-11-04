@@ -129,6 +129,9 @@ const harness = await AutomaticHarness.open(dataDir,mesh,nativeSubagentReview,gi
 // Bound hosts run the harness phases. Hosts reached only by e-mail (no repository access) get the candidate diff
 // as packet material; every other host gets a work-scoped GitHub grant for its phase; a host that does not start
 // a dispatched phase in time loses it to native execution.
+// Work-scoped GitHub grants are issued automatically only when the operator opted in (a standing, separate
+// authorization for GitHub writes); otherwise hosts keep the manual, leader-issued grant flow.
+const autoGithubGrants = process.env.PANTER_HARNESS_AUTO_GITHUB_GRANTS === '1';
 const materialHosts = new Set((process.env.PANTER_MATERIAL_HOSTS ?? 'gemini').split(',').map(x => x.trim()).filter(Boolean));
 const pickupSeconds = Number(process.env.PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS ?? '180');
 const pickupMailSeconds = Number(process.env.PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS_MAIL ?? '1200');
@@ -139,12 +142,16 @@ harness.setHostHooks({
     try { return await githubWorkforce.candidateMaterial(run.githubRepository, run.githubExpectedBase ?? null, run.candidateSha!); } catch { return undefined; }
   },
   afterDispatch: async ({ run, workId, phase, host }) => {
-    if (!githubWorkforce.configured || !run.githubRepository || materialHosts.has(host)) return;
+    if (!autoGithubGrants || !githubWorkforce.configured || !run.githubRepository || materialHosts.has(host)) return;
+    // Commits/PRs also need the run's own operator write approval (IMPLEMENT is never dispatched without it).
+    if (phase === 'IMPLEMENT' && run.permission !== 'WRITE_APPROVED') return;
     const comment = (phase === 'VERIFY' || phase === 'REVIEW' || phase === 'JUDGMENT') && run.githubPrNumber ? ['comment' as const] : [];
     await githubWorkforce.grant(leaderHost(), { workId, repository: run.githubRepository,
       ops: phase === 'IMPLEMENT' ? ['commit', 'pr'] : comment, numbers: comment.length ? [run.githubPrNumber!] : [],
       // The implementer commits only inside the run's approved edit surfaces.
-      ...(phase === 'IMPLEMENT' ? { paths: run.paths } : {}) });
+      ...(phase === 'IMPLEMENT' ? { paths: run.paths } : {}),
+      // The worker branches from, and opens its PR against, the run's target base.
+      ...(phase === 'IMPLEMENT' && run.githubExpectedBase ? { base: run.githubExpectedBase } : {}) });
   },
   pickupTimeoutMs: host => (materialHosts.has(host) ? pickupMailSeconds : pickupSeconds) * 1000,
   abandoned: async ({ workId }) => { if (githubWorkforce.configured) await githubWorkforce.revoke(leaderHost(), workId); },
