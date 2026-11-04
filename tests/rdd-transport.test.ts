@@ -138,3 +138,8 @@ test('a foreign packet digest in upper case is still foreign', async () => {
   const v = await remoteReview(true, (a, d) => clean(a, a === 'review-risk' ? 'F'.repeat(64) : d));
   assert.equal(v.transportAttested, false);
 });
+
+test('a foreign packet digest wrapped in other text is still foreign', async () => {
+  const v = await remoteReview(true, (a, d) => clean(a, a === 'review-risk' ? `sha256:${'e'.repeat(64)} ` : d));
+  assert.equal(v.transportAttested, false);
+});

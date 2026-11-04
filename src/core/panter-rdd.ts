@@ -177,7 +177,7 @@ export class PanterRdd {
           data.agentId===w.agentId&&data.candidateSha===current.candidateSha&&typeof data.subagentRunId==='string'&&
           Array.isArray(data.evidence)&&data.evidence.length>0&&Array.isArray(data.findings)&&
           /^[0-9a-f]{64}$/.test(w.packetDigest??'')&&
-          (!/^[0-9a-f]{64}$/i.test(String(data.packetDigest??''))||String(data.packetDigest).toLowerCase()===w.packetDigest);
+          (String(data.packetDigest??'').match(/[0-9a-f]{64}/gi)??[]).every(d=>d.toLowerCase()===w.packetDigest);
       });
     }
     const attested=runnerAttested||transportAttested;

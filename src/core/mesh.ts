@@ -991,8 +991,9 @@ export class MeshEngine {
    * tied to the mission that wrote it), and every former leader (native implementation is not mesh work). Their
    * review receipts never count as independent of a candidate's authors. */
   authorHosts(){
-    return this.read(d=>[...new Set([...d.works.filter(w=>w.role==='implementer'&&
-      w.state!=='QUEUED'&&w.state!=='ABORTED_NO_EFFECTS').map(w=>w.target),...(d.formerLeaders??[])])]);
+    // Ever claimed counts, whatever happened after (an operator "no effects" reconciliation included).
+    return this.read(d=>[...new Set([...d.works.filter(w=>w.role==='implementer'&&w.leaseGeneration>0).map(w=>w.target),
+      ...(d.formerLeaders??[])])]);
   }
   /** Operator-only ledger view; does not expose credentials and cannot stop a worker. */
   uncertainWriters(){
