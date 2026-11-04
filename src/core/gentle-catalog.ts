@@ -113,15 +113,24 @@ export interface SpecialistPacket {
 /** Read-only material the leader attaches for hosts that cannot reach the repository themselves (e.g. Gemini by e-mail). */
 export const MATERIAL_BEGIN='## Material provided by the leader (read-only, fetched by Panter; you may not have repository access)';
 export const MATERIAL_END='## End of leader material';
-/** Comparison form of a packet: leader material section (first begin to last end marker) removed, blank runs collapsed. */
-export function packetWithoutMaterial(instruction:string){
-  const start=instruction.indexOf(MATERIAL_BEGIN),end=instruction.lastIndexOf(MATERIAL_END);
-  const rest=start<0||end<start?instruction:instruction.slice(0,start)+instruction.slice(end+MATERIAL_END.length);
-  return rest.replace(/\n{3,}/g,'\n\n');
+/** Trusted, leader-composed notes (repository access, completion format). They may change between retransmissions
+ * (e.g. a PR bound later), so, like material, they are left out of the idempotency comparison. */
+export const LEADER_NOTES_HEADING='## From the leader: repository access and how to report';
+export const LEADER_NOTES_END='## End of leader notes';
+function cut(text:string,begin:string,end:string){
+  const start=text.indexOf(begin),stop=text.lastIndexOf(end);
+  return start<0||stop<start?text:text.slice(0,start)+text.slice(stop+end.length);
 }
-/** Material can never contain the section markers, so it cannot fake the end of the data section. */
-function neutralizeMarkers(material:string){return material.split(MATERIAL_BEGIN).join('[material heading removed]').split(MATERIAL_END).join('[material end marker removed]');}
-export const LEADER_NOTES_HEADING='## From the leader: repository access and completion format (overrides output formats above)';
+/** Comparison form of a packet: leader material and leader notes removed (first begin to last end marker), blank runs collapsed. */
+export function packetWithoutMaterial(instruction:string){
+  return cut(cut(instruction,MATERIAL_BEGIN,MATERIAL_END),LEADER_NOTES_HEADING,LEADER_NOTES_END).replace(/\n{3,}/g,'\n\n');
+}
+/** Untrusted text can never contain a section marker, so it cannot fake a leader section or its end. */
+function neutralizeMarkers(text:string){
+  return [[MATERIAL_BEGIN,'[material heading removed]'],[MATERIAL_END,'[material end marker removed]'],
+    [LEADER_NOTES_HEADING,'[leader notes heading removed]'],[LEADER_NOTES_END,'[leader notes end marker removed]']]
+    .reduce((t,[m,r])=>t.split(m!).join(r!),text);
+}
 export const MAX_PACKET_MATERIAL=28_000;
 export async function specialistPacket(input:{agentId:string; skillIds:readonly string[]; objective:string; modelRequest:string; effortRequest:string; candidateSha?:string; allowedEditSurfaces?:string[]; material?:string;
   /** Leader-composed (trusted) notes: how to reach the repository and how to report completion. */leaderNotes?:string}):Promise<SpecialistPacket> {
@@ -162,7 +171,7 @@ export async function specialistPacket(input:{agentId:string; skillIds:readonly 
     }
   }
   // Last, so it takes precedence over generic output formats in the definition and skills above.
-  if(input.leaderNotes)parts.push(`${LEADER_NOTES_HEADING}\n${neutralizeMarkers(input.leaderNotes)}`);
+  if(input.leaderNotes)parts.push(`${LEADER_NOTES_HEADING}\n${neutralizeMarkers(input.leaderNotes)}\n${LEADER_NOTES_END}`);
   const instruction=parts.filter(Boolean).join('\n\n');
   if (instruction.length>50_000) throw new Error('Specialist packet exceeds bound; choose fewer skills');
   return {agentId:definition.id,role:definition.role,skillIds:skills,modelRequest:input.modelRequest,effortRequest:input.effortRequest,instruction,digest:sha(instruction),assetDigests,allowedEditSurfaces:surfaces};

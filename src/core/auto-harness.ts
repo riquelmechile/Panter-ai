@@ -97,21 +97,42 @@ export function chooseHarness(input:HarnessInput){
 }
 
 /** How a remote phase reports back, so the harness can record it without the leader re-typing it. */
-const PHASE_COMPLETION_FORMAT='Complete this work with exactly one JSON object and nothing else: {"summary": "<what you did and found>", "evidence": ["<one observed fact per item: commands run and their results, files read, commits made>"], "candidateSha": "<the exact 40-hex commit you produced or verified, if any>", "runId": "<a unique id for this run of yours>"}. Never claim evidence you did not observe.';
+const PHASE_COMPLETION_FORMAT='This completion format overrides any output format above. Complete this work with exactly one JSON object and nothing else: {"summary": "<what you did and found>", "evidence": ["<one observed fact per item: commands run and their results, files read, commits made>"], "candidateSha": "<the exact 40-hex commit you produced or verified, if any>", "runId": "<a unique id for this run of yours>"}. Never claim evidence you did not observe.';
 function phaseNotes(access?:string){return [access,PHASE_COMPLETION_FORMAT].filter(Boolean).join('\n\n');}
-/** A remote phase result: one JSON object, also accepted inside a fenced block or surrounded by prose. */
-export function structuredResult(text:string|null|undefined):{summary:string;evidence:string[];runId?:string;candidateSha?:string;discoveredPaths?:string[]}|null{
-  if(!text)return null;
-  const tries=[text.trim()];
-  const fenced=/```(?:json)?\s*\n([\s\S]*?)\n```/.exec(text);if(fenced)tries.push(fenced[1]!.trim());
-  const a=text.indexOf('{'),b=text.lastIndexOf('}');if(a>=0&&b>a)tries.push(text.slice(a,b+1));
-  for(const t of tries){
-    try{
-      const v=JSON.parse(t);
-      if(v&&typeof v==='object'&&typeof v.summary==='string'&&Array.isArray(v.evidence)&&v.evidence.every((e:unknown)=>typeof e==='string'))return v;
-    }catch{/* try the next form */}
+type PhaseResult={summary:string;evidence:string[];runId?:string;candidateSha?:string;discoveredPaths?:string[]};
+/** Top-level balanced {...} spans of a text, string-aware. */
+function objectSpans(text:string){
+  const out:string[]=[];let depth=0,start=-1,inString=false,escaped=false;
+  for(let i=0;i<text.length;i++){
+    const c=text[i];
+    if(inString){if(escaped)escaped=false;else if(c==='\\')escaped=true;else if(c==='"')inString=false;continue;}
+    if(c==='"'&&depth>0){inString=true;continue;}
+    if(c==='{'){if(depth===0)start=i;depth++;}
+    else if(c==='}'&&depth>0){depth--;if(depth===0)out.push(text.slice(start,i+1));}
   }
-  return null;
+  return out;
+}
+/** A remote phase result: one JSON object, bare, fenced or surrounded by prose. Every candidate in the text is
+ * considered; if they disagree (e.g. a result-shaped object quoted from a diff), nothing is accepted. */
+export function structuredResult(text:string|null|undefined):PhaseResult|null{
+  if(!text||text.length>200_000)return null;
+  const candidates=[text.trim(),...[...text.matchAll(/```[a-zA-Z0-9_-]*[ \t]*\n([\s\S]*?)\n```/g)].map(m=>m[1]!.trim()),...objectSpans(text)];
+  const valid=new Map<string,PhaseResult>();
+  for(const c of candidates){
+    try{
+      const v=JSON.parse(c);
+      if(v&&typeof v==='object'&&!Array.isArray(v)&&typeof v.summary==='string'&&Array.isArray(v.evidence)&&v.evidence.every((e:unknown)=>typeof e==='string'))
+        valid.set(JSON.stringify(v),v);
+    }catch{/* not JSON */}
+  }
+  return valid.size===1?[...valid.values()][0]!:null;
+}
+/** The shape panter_harness_report accepts, checked before recording so a bad remote result never throws from tick. */
+function reportable(r:PhaseResult){
+  return r.summary.trim().length>0&&r.summary.length<=6000&&r.evidence.length>0&&r.evidence.length<=40&&
+    r.evidence.every(x=>!!x.trim()&&x.length<=1000)&&(r.candidateSha===undefined||/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(r.candidateSha))&&
+    (r.runId===undefined||(typeof r.runId==='string'&&r.runId.length<=160))&&
+    (r.discoveredPaths===undefined||(Array.isArray(r.discoveredPaths)&&r.discoveredPaths.length<=16&&r.discoveredPaths.every(p=>typeof p==='string'&&p.length>0&&p.length<=256)));
 }
 export class AutomaticHarness {
   private state:State={version:1,runs:[]};
@@ -420,9 +441,8 @@ export class AutomaticHarness {
         const result=structuredResult(persisted.result);
         if(!result||typeof result!=='object'||!('summary' in result)||!('evidence' in result))
           return {...common,status:'REMOTE_RESULT_NEEDS_STRUCTURED_EVIDENCE',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
-        try{await this.report(runId,phase.id,result);}
-        catch(error){return {...common,status:'REMOTE_RESULT_NEEDS_STRUCTURED_EVIDENCE',phaseId:phase.id,workId:phase.remoteWorkId,next:[],
-          detail:[`Remote result rejected: ${error instanceof Error?error.message.slice(0,200):'invalid'}`]};}
+        if(!reportable(result))return {...common,status:'REMOTE_RESULT_NEEDS_STRUCTURED_EVIDENCE',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
+        await this.report(runId,phase.id,result);
         return this.tick(runId,runtime);
       }
       const stale=await this.unstartedTooLong(phase.remoteWorkId);

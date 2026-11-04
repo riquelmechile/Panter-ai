@@ -156,7 +156,7 @@ harness.setHostHooks({
   accessFor: (run, host, phase) => {
     if (!run.githubRepository) return undefined;
     const target = `Repository: ${run.githubRepository} (base branch ${run.githubExpectedBase ?? 'the repository default'}).`;
-    if (materialHosts.has(host)) return `${target} This transport has no repository access: judge only the change provided as read-only material.`;
+    if (materialHosts.has(host)) return `${target} This transport has no repository access: work only from what this packet provides, including any read-only material.`;
     const granted = autoGithubGrants && githubWorkforce.configured && (phase !== 'IMPLEMENT' || run.permission === 'WRITE_APPROVED');
     if (!granted) return `${target} Panter issued no GitHub grant for this work: use only what this packet provides.`;
     const claim = 'There is no local checkout. Use the Panter GitHub tools, passing workId, attemptId and leaseGeneration from your claim. Read with panter_github_read (e.g. "contents/<path>?ref=<branch or sha>", "compare/<base>...<sha>", or "grant" to see what this work may do).';
