@@ -1,0 +1,8 @@
+# Restarts panter-ai.service after two failed /health checks in a row; optional alert webhook in etc/ops.env.
+[Unit]
+Description=Panter-ai health check
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/panter-ai/etc/ops.env
+ExecStart=%h/panter-ai/current/deploy/healthcheck.sh

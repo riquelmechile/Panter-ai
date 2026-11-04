@@ -1,0 +1,8 @@
+# Daily online backup with restore check; keeps 14 daily backups (deploy backups are never pruned).
+[Unit]
+Description=Panter-ai daily backup
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=/usr/bin/node %h/panter-ai/current/deploy/backup.mjs --base %h/panter-ai --daily --keep-daily 14
