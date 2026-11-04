@@ -1,4 +1,5 @@
 /** GPT-A-only host-native fallback. Plans work; never starts AI inference or fabricates native workers. */
+import { leaderHost, leaderLabel, leaderPolicyProfile } from './leadership.js';
 import { agentDefinition, checkSkills, gentleCatalog, readOrchestratorSection, specialistPacket, type GentleAgentId } from './gentle-catalog.js';
 import { routeFlow, type FlowSignals } from './agents.js';
 import { type Host, type SpecialistBinding } from './mesh.js';
@@ -35,12 +36,12 @@ export function planHostNative(input: {
 }) {
   const { signals,capabilities }=input;
   const route=routeFlow(signals);
-  const policy=hostRequest('chatgpt');
+  const policy=hostRequest(leaderPolicyProfile());
   const coordinationMode=input.coordinationMode??'AUTO';
   if(coordinationMode!=='AUTO'&&coordinationMode!=='GPT_A_ONLY')throw new Error('Invalid coordination mode');
   const requestedNativeWorkers=input.requestedNativeWorkers??policy.plannerCeiling;
   if(!Number.isInteger(requestedNativeWorkers)||requestedNativeWorkers<0||requestedNativeWorkers>policy.plannerCeiling)
-    throw new Error('Invalid requested GPT-A parallel capacity');
+    throw new Error(`Invalid requested ${leaderLabel()} parallel capacity`);
   if(!Number.isInteger(capabilities.maxParallelSubagents)||capabilities.maxParallelSubagents<0||capabilities.maxParallelSubagents>32)
     throw new Error('Invalid host-native worker count');
   if(input.assignments.length===0||input.assignments.length>32)throw new Error('Invalid assignment count');
@@ -60,7 +61,7 @@ export function planHostNative(input: {
   if(capabilities.observedWorkerProcessing!==undefined&&capabilities.observedWorkerProcessing!=='fast')
     capabilityGaps.push('Fast native branch processing not reported; preserve max reasoning at standard speed.');
   if(!capabilities.nativeSubagents||reportedNativeSlots===0)
-    capabilityGaps.push('Host-native subagents unavailable; GPT-A retains maximum requested reasoning inline.');
+    capabilityGaps.push(`Host-native subagents unavailable; ${leaderLabel()} retains maximum requested reasoning inline.`);
   // Distinct native worker slots are NOT a filesystem isolation guarantee.
   // Reject conflicting parallel writer scopes before recommending fanout.
   const writers=input.assignments.filter(a=>agentDefinition(a.agentId)?.role==='implementer'&&a.allowedEditSurfaces?.length);
@@ -81,7 +82,7 @@ export function planHostNative(input: {
       (route.mode!=='READ_ONLY'&&available)?'REMOTE_A2A':
       (!capabilities.toolsAvailable)?'BLOCKED_TOOLS':
       (route.mode!=='READ_ONLY'&&workerSlots>0&&input.assignments.length>1)?'GPT_A_NATIVE_SUBAGENT':'GPT_A_INLINE';
-    const chosenHost=execution==='REMOTE_A2A'?host!:'gpt-a';
+    const chosenHost=execution==='REMOTE_A2A'?host!:leaderHost();
     const group=execution==='GPT_A_NATIVE_SUBAGENT'?index%Math.max(workerSlots,1):0;
     return {
       agentId:agent.id,host:chosenHost,execution,skillIds:checkSkills(binding?.skillIds??[...agent.defaultSkills]),
@@ -95,8 +96,8 @@ export function planHostNative(input: {
       reason:execution==='REMOTE_A2A'?'An independently authenticated remote host is reported connected.':
         execution==='BLOCKED_AUTHORIZATION'?'Writes were not authorized.':
         execution==='BLOCKED_TOOLS'?'The host has no tools to execute this work.':
-        execution==='GPT_A_NATIVE_SUBAGENT'?'GPT-A may request a native subagent if its host exposes one.':
-        'GPT-A performs this specialist phase inline, without a remote workforce.',
+        execution==='GPT_A_NATIVE_SUBAGENT'?`${leaderLabel()} may request a native subagent if its host exposes one.`:
+        `${leaderLabel()} performs this specialist phase inline, without a remote workforce.`,
     } satisfies NativeAssignment;
   });
   return {
@@ -117,7 +118,7 @@ export function planHostNative(input: {
       inferenceApiCalls:0 as const,serverModelWorkers:0 as const},
     capacityGaps:capabilityGaps,fullCapacityObserved:false,
     hostReportedEvidence:capabilities.evidence,serverWorkersStarted:0,
-    instructions:'GPT-A remains the only orchestrator. In GPT_A_ONLY mode never delegate to a remote host even if CONNECTED. Enforce the maximum requested GPT-A model/effort policy (gpt-6-astra max, xhigh fallback) through the host-native controls when available. Request fast native subagents at maximum observed independent parallelism without degrading reasoning; if unavailable continue with the same maximum-quality root inline and batch independent tool I/O. Report missing native capacity rather than claiming compliance. Load MCP skills for every relevant ODD phase; No model may claim independent review of its own changes. Never re-dispatch writes with unknown outcome.',
+    instructions:`${leaderLabel()} remains the only orchestrator. In GPT_A_ONLY mode never delegate to a remote host even if CONNECTED. Enforce the maximum requested ${leaderLabel()} model/effort policy (${policy.model} ${policy.reasoningEffort}${policy.reasoningFallback?`, ${policy.reasoningFallback} fallback`:''}) through the host-native controls when available. Request fast native subagents at maximum observed independent parallelism without degrading reasoning; if unavailable continue with the same maximum-quality root inline and batch independent tool I/O. Report missing native capacity rather than claiming compliance. Load MCP skills for every relevant ODD phase; No model may claim independent review of its own changes. Never re-dispatch writes with unknown outcome.`,
     upstream:gentleCatalog().source,
   };
 }
@@ -129,9 +130,9 @@ export async function nativePacket(input:{agentId:string;objective:string;candid
   if(!agent)throw new Error('Unknown native fallback agent');
   const packet=await specialistPacket({agentId:input.agentId,objective:input.objective,
     skillIds:input.skillIds??[...agent.defaultSkills],candidateSha:input.candidateSha,
-    allowedEditSurfaces:input.allowedEditSurfaces,modelRequest:input.modelRequest??hostRequest('chatgpt').model,effortRequest:input.effortRequest??hostRequest('chatgpt').reasoningEffort});
-  return {...packet,executionOwner:'gpt-a' as const,
-    notice:'GPT-A must execute using its own host tools or explicitly available native subagents. This packet does not launch a worker, create a verified reviewer, or grant write privileges.'};
+    allowedEditSurfaces:input.allowedEditSurfaces,modelRequest:input.modelRequest??hostRequest(leaderPolicyProfile()).model,effortRequest:input.effortRequest??hostRequest(leaderPolicyProfile()).reasoningEffort});
+  return {...packet,executionOwner:leaderHost(),
+    notice:`${leaderLabel()} must execute using its own host tools or explicitly available native subagents. This packet does not launch a worker, create a verified reviewer, or grant write privileges.`};
 }
 
 export async function nativeOddInstructions(){

@@ -577,3 +577,22 @@ test('rejection logs never echo request bodies (malformed JSON with a credential
     assert.ok(seen.every(line => !line.includes('SUPERSECRET')));
   } finally { console.warn = original; }
 }));
+
+test('after a leader switch the former leader loses panter:lead on refresh and the new leader gets it at consent', () => harness(async ({ request }) => {
+  const previous = process.env.PANTER_LEAD_HOST;
+  try {
+    delete process.env.PANTER_LEAD_HOST;
+    const client = await register(request);
+    const { code } = await authorize(request, client, 'gpt-a', callbackA, 'mcp offline_access panter:mesh panter:lead');
+    const initial = await (await token(request, client, code)).json() as { scope: string; refresh_token: string };
+    assert.ok(initial.scope.split(' ').includes('panter:lead'));
+    process.env.PANTER_LEAD_HOST = 'claude';
+    const rotated = await request('/token', post({ grant_type: 'refresh_token', client_id: client, refresh_token: initial.refresh_token }));
+    assert.equal(rotated.status, 200);
+    assert.ok(!((await rotated.json()) as { scope: string }).scope.split(' ').includes('panter:lead'));
+    const claudeClient = await register(request, callbackB);
+    const granted = await authorize(request, claudeClient, 'claude', callbackB, 'mcp offline_access panter:mesh panter:lead');
+    const claude = await (await token(request, claudeClient, granted.code, callbackB)).json() as { scope: string };
+    assert.ok(claude.scope.split(' ').includes('panter:lead'));
+  } finally { if (previous === undefined) delete process.env.PANTER_LEAD_HOST; else process.env.PANTER_LEAD_HOST = previous; }
+}));

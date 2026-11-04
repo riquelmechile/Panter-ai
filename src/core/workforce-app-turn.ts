@@ -3,13 +3,14 @@
  * no provider API, CLI runner, background model process, or authority to make
  * an inactive chat autonomously generate a new turn.
  */
+import { leaderLabel, isAppEventHost } from './leadership.js';
 import type {Host,MeshEngine} from './mesh.js';
 
 type ProtocolEra='2025-11-25'|'2026-07-28';
 
 export async function appWorkforceTurn(mesh:MeshEngine,caller:Host,
   protocolEra:ProtocolEra,leaseSeconds=900){
-  if(caller!=='gpt-b'&&caller!=='gemini')
+  if(!isAppEventHost(caller))
     throw Error('Native ChatGPT/Gemini app OAuth worker required');
   if(!Number.isInteger(leaseSeconds)||leaseSeconds<30||leaseSeconds>3600)
     throw Error('Invalid lease');
@@ -23,7 +24,7 @@ export async function appWorkforceTurn(mesh:MeshEngine,caller:Host,
   };
   if(pickup.status==='OUTCOME_UNKNOWN')return {
     ...pickup,actor:caller,transport:'IN_APP_MCP_TOOL' as const,
-    instruction:'Uncertain outcome; stop. GPT-A must reconcile before any replay.',
+    instruction:`Uncertain outcome; stop. ${leaderLabel()} must reconcile before any replay.`,
     autonomousWakeVerified:false as const
   };
   return {

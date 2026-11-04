@@ -1,3 +1,4 @@
+import { leaderHost, leaderLabel, leaderPolicyProfile } from './leadership.js';
 import { SqliteLedger } from './sqlite-ledger.js';
 /** Panter automatic ODD harness: the user chooses an objective, not agents.
  * GPT-A/host-owned models execute packets. This engine never launches inference.
@@ -232,7 +233,7 @@ export class AutomaticHarness {
       r.units=derived;r.revision++;return r;});
   }
   async reportUnit(runId:string,unitId:string,result:{runId:string;summary:string;evidence:string[]}){
-    ensure(/^[A-Za-z0-9._:-]{8,160}$/.test(result.runId)&&result.runId!=='gpt-a','Native child run identity required');
+    ensure(/^[A-Za-z0-9._:-]{8,160}$/.test(result.runId)&&result.runId!==leaderHost(),'Native child run identity required');
     ensure(result.summary.trim().length>0&&result.summary.length<=3000,'Invalid unit summary');
     ensure(Array.isArray(result.evidence)&&result.evidence.length>0&&result.evidence.length<=30&&result.evidence.every(x=>typeof x==='string'&&x.trim()&&x.length<=1000),'Unit evidence required');
     return this.write(s=>{const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');
@@ -287,9 +288,9 @@ export class AutomaticHarness {
       if(step.phase==='VERIFY'){
         ensure(payload.candidateSha===r.candidateSha&&!!r.candidateSha,'Verifier must report exact candidate SHA');
         if(step.execution==='GPT_A_INLINE'){
-          ensure(payload.runId==='gpt-a','Solo verifier must identify GPT-A itself; no fabricated independent run ID');
+          ensure(payload.runId===leaderHost(),`Solo verifier must identify ${leaderLabel()} itself; no fabricated independent run ID`);
         }else{
-          ensure(!!payload.runId&&payload.runId!=='gpt-a'&&payload.runId!==r.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId&&payload.runId!==r.correctionRunId&&!(r.units??[]).some(u=>u.runId===payload.runId),
+          ensure(!!payload.runId&&payload.runId!==leaderHost()&&payload.runId!==r.steps.find(x=>x.phase==='IMPLEMENT')?.result?.runId&&payload.runId!==r.correctionRunId&&!(r.units??[]).some(u=>u.runId===payload.runId),
             'Independent verifier run ID required');
         }
       }
@@ -302,11 +303,11 @@ export class AutomaticHarness {
     ensure(Number.isInteger(runtime.maxParallelSubagents)&&runtime.maxParallelSubagents>=0&&runtime.maxParallelSubagents<=32,'Invalid host native capacity');
     const record=await this.get(runId);ensure(record,'Harness not found');
     const phase=record.steps.find(s=>s.status!=='COMPLETE');
-    const profile=(await this.mesh.profiles()).find(p=>p.host==='gpt-a');
+    const profile=(await this.mesh.profiles()).find(p=>p.host===leaderHost());
     // An operator may switch to GPT_A_ONLY mid-mission. Never dispatch fresh
     // remote work after that change, or silently reassign an in-flight write.
     const effectiveMode:HarnessMode=record.mode==='GPT_A_ONLY'||profile?.coordinationMode==='GPT_A_ONLY'?'GPT_A_ONLY':'AUTO';
-    const policy=hostRequest('chatgpt');
+    const policy=hostRequest(leaderPolicyProfile());
     const common={runId:record.id,mode:effectiveMode,risk:record.risk,reason:record.reason,
       capacityRequest:{model:policy.model,reasoning:policy.reasoningEffort,workerProcessing:policy.worker.preferredProcessing,
         requestedParallelism:Math.min(runtime.nativeSubagents?runtime.maxParallelSubagents:0,policy.plannerCeiling),
@@ -337,13 +338,13 @@ export class AutomaticHarness {
         if(solo?.soloEvidenceComplete)return {...common,status:'SOLO_4R_COMPLETED_UNVERIFIED',reviewId:record.reviewId??undefined,review:solo,
           verificationMode:record.steps.find(s=>s.phase==='VERIFY')?.result?.verificationMode??null,
           rdd:nativeVerdict,next:[],approved:false,
-          instruction:'GPT-A completed all four self-review lenses. These are not independent: a new signed native 4R is still required for RDD approval and merge.'};
+          instruction:`${leaderLabel()} completed all four self-review lenses. These are not independent: a new signed native 4R is still required for RDD approval and merge.`};
         return {...common,status:'AWAITING_PANTER_RDD_AUTHORITY',rdd:nativeVerdict,next:[]};
       }
       const judgmentVerdict=this.rdd&&record.judgmentId?await this.rdd.getForReview(record.judgmentId):null;
       if(record.judgmentRequested&&judgmentVerdict?.state!=='ACKNOWLEDGED')return {...common,status:'AWAITING_JUDGMENT_RDD_AUTHORITY',rdd:judgmentVerdict,next:[]};
       if(!repository)return {...common,status:record.risk==='HIGH'?'PANTER_RDD_REVIEWED_NO_GITHUB_DELIVERY_AUTHORITY':'REPORTED_COMPLETE_UNVERIFIED',next:[]};
-      if(!record.githubPrNumber)return {...common,status:'AWAITING_GITHUB_PR_EVIDENCE',next:[],instruction:'GPT-A must identify or obtain permission to create the exact target PR; never push or open a PR without authorization.'};
+      if(!record.githubPrNumber)return {...common,status:'AWAITING_GITHUB_PR_EVIDENCE',next:[],instruction:`${leaderLabel()} must identify or obtain permission to create the exact target PR; never push or open a PR without authorization.`};
       if(!record.candidateSha||!(/^[a-f0-9]{40}$/.test(record.candidateSha)))return {...common,status:'BLOCKED_CANDIDATE_SHA',next:[]};
       if(!this.github)return {...common,status:'GITHUB_VERIFICATION_NOT_CONFIGURED',next:[]};
       const github=await this.github.inspect({repository,prNumber:record.githubPrNumber,expectedSha:record.candidateSha,expectedBase:record.githubExpectedBase,deliveryStrategy:record.deliveryStrategy,parentAuthorizedSinglePr:record.deliveryStrategy==='single-pr'});
@@ -351,7 +352,7 @@ export class AutomaticHarness {
         instruction:'GitHub verification is evidence, not permission for commit, push, merge, release, or deployment.'};
     }
     if(phase.execution==='REMOTE_A2A'&&phase.remoteWorkId){
-      const inbox=await this.mesh.inbox('gpt-a');
+      const inbox=await this.mesh.inbox(leaderHost());
       const work=inbox.works.find(w=>w.id===phase.remoteWorkId);
       if(work?.state==='ABORTED_NO_EFFECTS'){
         await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;
@@ -368,7 +369,7 @@ export class AutomaticHarness {
         return {...common,status:'REMOTE_OUTCOME_NEEDS_RECONCILIATION',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
       if(work?.state==='COMPLETED'){
         // Result is persisted in the Mesh ledger and never echoed via inbox.
-        const persisted=await this.mesh.resultGet('gpt-a',phase.remoteWorkId);
+        const persisted=await this.mesh.resultGet(leaderHost(),phase.remoteWorkId);
         let result:unknown;
         try{result=JSON.parse(persisted.result??'');}catch{result=null;}
         if(!result||typeof result!=='object'||!('summary' in result)||!('evidence' in result))
@@ -450,7 +451,7 @@ export class AutomaticHarness {
           return a&&runtime.peerStates?.[a.host]==='CONNECTED';
         });
         if(remoteReady){
-          const remote=await this.mesh.startReview('gpt-a',{missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:review:${record.candidateSha}:${record.reviewAttempt??0}`});
+          const remote=await this.mesh.startReview(leaderHost(),{missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:review:${record.candidateSha}:${record.reviewAttempt??0}`});
           await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(!r.reviewId){r.reviewId=remote.id;r.reviewTransport='REMOTE';r.revision++;}});
         }else{
           const native=await this.native.create({missionId:record.id,kind,objective:record.objective,candidateSha:record.candidateSha!,idempotencyKey:`harness:${record.id}:review:${record.candidateSha}:${record.reviewAttempt??0}`});
@@ -474,8 +475,8 @@ export class AutomaticHarness {
           return {...common,status:batch.dispatch,phaseId:phase.id,reviewId:now.reviewId,next:batch.packets,concurrentSlots:batch.concurrentSlots,
             reviewMode:batch.reviewMode,approved:false,
             instruction:batch.reviewMode==='GPT_A_SOLO_UNVERIFIED'?
-              'GPT-A: run this one 4R lens inline and submit via panter_native_review_submit_solo, then request the next lens. Do not claim independent review or approval.':
-              'GPT-A: automatically dispatch real native child packets in parallel when supported. No remote peers or model-provider APIs are required.'};
+              `${leaderLabel()}: run this one 4R lens inline and submit via panter_native_review_submit_solo, then request the next lens. Do not claim independent review or approval.`:
+              `${leaderLabel()}: automatically dispatch real native child packets in parallel when supported. No remote peers or model-provider APIs are required.`};
         }
         if(this.rdd){
           const tx=await this.rdd.begin({missionId:now.id,reviewId:now.reviewId,source:'NATIVE',
@@ -501,7 +502,14 @@ export class AutomaticHarness {
           phaseId:phase.id,reviewId:now.reviewId,review,officialRdd,next:[],
           instruction:'Panter-RDD not configured; no model report grants approval.'};
       }
-      const review=await this.mesh.reviewStatus('gpt-a',now.reviewId);
+      const review=await this.mesh.reviewStatus(leaderHost(),now.reviewId);
+      if(review.stage==='INTERRUPTED'){
+        // Interrupted by a leader switch: close its queued lenses, drop the session and start a fresh
+        // attempt (native until rebound).
+        await this.mesh.abortInterruptedReview(leaderHost(),now.reviewId);
+        await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;if(r.reviewId===now.reviewId){r.reviewId=null;r.reviewTransport=null;r.reviewAttempt=(r.reviewAttempt??0)+1;r.revision++;}});
+        return this.tick(runId,runtime);
+      }
       const evidence=assessMeshReview({kind:review.review.kind,candidateSha:review.review.candidateSha,work:review.work});
       if(this.rdd&&review.stage==='READY_FOR_CONTROLLER'){
         const tx=await this.rdd.begin({missionId:now.id,reviewId:now.reviewId,source:'REMOTE',
@@ -555,7 +563,7 @@ export class AutomaticHarness {
     const objective=phase.phase==='DISCOVER'?`Explore the repository for: ${brief}. Return exact permitted edit surfaces, risks and path:line evidence. Do not write.`:
       phase.phase==='DESIGN'?`Plan the smallest authorized change for: ${brief}. Preserve exact specification, acceptance checks and ODD task IDs. Confirm scoped edit surfaces: ${record.paths.join(', ')||'unknown; do not write yet'}.`:
       phase.phase==='IMPLEMENT'?`Implement the authorized scoped change: ${brief}. Allowed surfaces: ${record.paths.join(', ')}. Test first when applicable; return the exact commit SHA for high-risk review.`:
-      `Verify the exact frozen candidate ${record.candidateSha} against: ${brief}. If the host supplies an actual verifier, report its independent run ID. Otherwise perform a GPT-A self-check inline, report runId=gpt-a, and label evidence SELF_UNVERIFIED.`;
+      `Verify the exact frozen candidate ${record.candidateSha} against: ${brief}. If the host supplies an actual verifier, report its independent run ID. Otherwise perform a ${leaderLabel()} self-check inline, report runId=${leaderHost()}, and label evidence SELF_UNVERIFIED.`;
     const packetObjective=objective.length>5800?objective.slice(0,5700)+' [Retrieve complete objective and paths from panter_harness_status.]':objective;
     if(phase.phase==='DESIGN'){
       await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;if(st.status==='PENDING'){st.status='ISSUED';r.revision++;}});
@@ -566,12 +574,12 @@ export class AutomaticHarness {
     const binding=(await this.mesh.specialistBindings()).find(x=>x.agentId===phase.agentId);
     const implementer=record.steps.find(s=>s.phase==='IMPLEMENT');
     const candidateVerifierIsIndependent=phase.phase!=='VERIFY'||!implementer?.remoteWorkId||
-      (await this.mesh.inbox('gpt-a')).works.find(w=>w.id===implementer.remoteWorkId)?.target!==binding?.host;
+      (await this.mesh.inbox(leaderHost())).works.find(w=>w.id===implementer.remoteWorkId)?.target!==binding?.host;
     const requestedRole=phase.phase==='IMPLEMENT'?'implementer':phase.phase==='VERIFY'?'verifier':'explorer';
     const remoteEligible=effectiveMode==='AUTO'&&binding&&runtime.peerStates?.[binding.host]==='CONNECTED'&&candidateVerifierIsIndependent&&
       (await this.mesh.profiles()).some(p=>p.host===binding.host&&p.roles.includes(requestedRole));
     if(remoteEligible){
-      const work=await this.mesh.delegateBoundSpecialist('gpt-a',{missionId:record.id,agentId:phase.agentId,objective:packetObjective,
+      const work=await this.mesh.delegateBoundSpecialist(leaderHost(),{missionId:record.id,agentId:phase.agentId,objective:packetObjective,
         candidateSha:record.candidateSha??undefined,allowedEditSurfaces:phase.phase==='IMPLEMENT'?record.paths:undefined,
         idempotencyKey:`harness:${record.id}:${phase.id}:${record.candidateSha??'none'}:${record.correctionAttempts??0}:${phase.redispatchGeneration??0}`});
       await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;

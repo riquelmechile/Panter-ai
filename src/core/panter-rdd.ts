@@ -2,6 +2,7 @@
  * The MCP never executes an LLM, authenticates native child model instances or authorizes GitHub writes.
  * One process; immutable SHA/receipt binding; GitHub is queried by the server, not asserted by an LLM.
  */
+import { leaderHost } from './leadership.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -74,7 +75,7 @@ export class PanterRdd {
     const allAuthors=[...new Set([i.implementerRunId,...(i.implementerRunIds??[])].filter((id):id is string=>!!id))].sort();
     const source = i.source==='NATIVE'
       ? await this.native.status(i.reviewId)
-      : (await this.mesh.reviewStatus('gpt-a',i.reviewId)).review;
+      : (await this.mesh.reviewStatus(leaderHost(),i.reviewId)).review;
     const sourceSha=source.candidateSha;
     const sourceMission=source.missionId;
     const sourceKind=source.kind;
@@ -118,14 +119,14 @@ export class PanterRdd {
       const slots=r.slots;
       complete=r.evidenceComplete&&slots.every(s=>s.state==='REPORTED'&&/^[0-9a-f]{64}$/.test(s.receiptDigest??''));
       const runs=slots.map(s=>s.subagentRunId).filter((v):v is string=>typeof v==='string');
-      independence=complete&&runs.length===slots.length&&new Set(runs).size===runs.length&&runs.every(v=>!authorRuns.has(v)&&v!=='gpt-a');
+      independence=complete&&runs.length===slots.length&&new Set(runs).size===runs.length&&runs.every(v=>!authorRuns.has(v)&&v!==leaderHost());
       runnerAttested=independence&&slots.every(slot=>verifyRunnerSignature({reviewId:current.reviewId,slotId:slot.slotId,agentId:slot.agentId,
         candidateSha:current.candidateSha,packetDigest:slot.packetDigest,subagentRunId:slot.subagentRunId!,
         evidence:slot.evidence,findings:slot.findings},slot.attestation??undefined,this.runnerKeys));
       severe=r.severeFindings.length;
       receipts=slots.map(s=>s.receiptDigest??'');
     }else{
-      const r=await this.mesh.reviewStatus('gpt-a',current.reviewId);
+      const r=await this.mesh.reviewStatus(leaderHost(),current.reviewId);
       demand(r.review.candidateSha===current.candidateSha&&r.review.missionId===current.missionId&&r.review.kind===current.kind,'Remote review target changed');
       const a=assessMeshReview({kind:current.kind,candidateSha:current.candidateSha,work:r.work});
       complete=r.stage==='READY_FOR_CONTROLLER'&&a.status==='EVIDENCE_COLLECTED_UNVERIFIED';
@@ -134,8 +135,8 @@ export class PanterRdd {
       // attests genuinely distinct executions. Host names alone prove no independence.
       const parsed=r.work.map(w=>{try{return JSON.parse(w.result??'') as Record<string,unknown>;}catch{return null;}});
       const ids=parsed.map(d=>d?.subagentRunId).filter((v):v is string=>typeof v==='string');
-      independence=complete&&r.work.every(w=>w.host!=='gpt-a')&&ids.length===r.work.length&&
-        new Set(ids).size===ids.length&&ids.every(id=>id!=='gpt-a'&&!authorRuns.has(id));
+      independence=complete&&r.work.every(w=>w.host!==leaderHost())&&ids.length===r.work.length&&
+        new Set(ids).size===ids.length&&ids.every(id=>id!==leaderHost()&&!authorRuns.has(id));
       severe=0;
       if(complete)for(const data of parsed){
         if(data&&Array.isArray(data.findings))severe+=data.findings.filter((f:{severity?:string})=>f.severity==='CRITICAL'||f.severity==='BLOCKER').length;

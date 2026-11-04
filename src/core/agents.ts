@@ -107,6 +107,15 @@ export class AgentEngine {
     return engine;
   }
 
+  /** After a leader switch the new leader adopts the former leader's open native ODD phases. */
+  adoptLeaderPhases(from: string, to: string): Promise<number> {
+    return this.write(state => {
+      let moved = 0;
+      for (const t of state.tasks) if (t.target === from && !['DONE', 'FAILED', 'CANCELLED'].includes(t.state)) { t.target = to; moved++; }
+      return moved;
+    });
+  }
+
   private write<T>(fn: (state: AgentState) => T): Promise<T> {
     const pending = this.chain.then(() => {
       const { after, result } = this.sqlite.mutate('agents', this.state, fn);

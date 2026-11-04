@@ -1,3 +1,5 @@
+import { leaderHost, leaderLabel, isWorker, leaderPolicyProfile } from './leadership.js';
+import { hostRequest } from './policy.js';
 import { SqliteLedger } from './sqlite-ledger.js';
 import { summarizeWorkforce, validateRouteReport, type WorkerHost, type WorkerObservation, type WorkerRouteReport } from './workforce-readiness.js';
 /** Original, provider-independent collaboration ledger for authenticated MCP hosts. */
@@ -19,18 +21,26 @@ export type WorkforceTaskBridge = {taskId:string;host:WorkerHost;protocolEra:'20
 export type WorkforceRearmIntent = {workId:string;host:WorkerHost;status:'PENDING'|'ACKED';createdAt:string;acknowledgedAt?:string};
 export type GrokWakeAttempt = {workId:string;state:'RESERVED'|'SIGNAL_ACCEPTED'|'SIGNAL_FAILED';reservedAt:string;statusCode:number|null;claimedAt?:string};
 export type ClaudeWakeAttempt = GrokWakeAttempt & {sessionId:string|null};
-type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; claudeWakeAttempts?: ClaudeWakeAttempt[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
+type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; claudeWakeAttempts?: ClaudeWakeAttempt[]; leader?: Host; pendingPhaseAdoption?: Host[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
 const hosts = new Set<string>(HOSTS);
 const roles = new Set<MeshRole>(['orchestrator', 'explorer', 'architect', 'implementer', 'verifier', 'reviewer']);
 export function isHost(x: string): x is Host { return hosts.has(x); }
 function check(condition: unknown, reason: string): asserts condition { if (!condition) throw new Error(reason); }
 function sha(value: string) { return createHash('sha256').update(value).digest('hex'); }
 function iso() { return new Date().toISOString(); }
+/** A review session can never yield valid evidence once a lens was aborted by a leader switch or ran on
+ *  the host that is now the leader (the leader's own lens is not independent review). */
+function reviewInterrupted(works: Array<Pick<MeshWork, 'state' | 'target'>>) {
+  return works.some(w => w.state === 'ABORTED_NO_EFFECTS' || w.target === leaderHost());
+}
+function activeBindings(d: MeshData) { return (d.specialistBindings ?? []).filter(b => b.host !== leaderHost()); }
 
 export class MeshEngine {
   private readonly sqlite: SqliteLedger;
   private state: MeshData = { version: 1, profiles: [], specialistBindings: [], reviews:[], works: [], messages: [], inboxRevision: { 'gpt-a': 0, 'gpt-b': 0, 'grok': 0, 'gemini': 0, 'claude': 0 } };
   private chain: Promise<unknown> = Promise.resolve();
+  /** Set at open when the stored leader differs from PANTER_LEAD_HOST; other stores migrate from it. */
+  leaderSwitch: { from: Host; to: Host } | null = null;
   /** Emitted only AFTER the updated ledger is atomically persisted. */
   readonly events = new EventEmitter();
   private writeGuard:((missionId:string,paths:string[])=>Promise<void>)|null=null;
@@ -45,7 +55,63 @@ export class MeshEngine {
     check(parsed.version === 1 && Array.isArray(parsed.works) && Array.isArray(parsed.profiles) && Array.isArray(parsed.messages), 'Invalid mesh ledger');
     for (const host of HOSTS) check(Number.isSafeInteger(parsed.inboxRevision[host]) && parsed.inboxRevision[host] >= 0, 'Invalid inbox revision');
     const before = JSON.stringify(parsed);
-    const normalize = (data: MeshData) => {
+    const lead = leaderHost();
+    // Ledgers written before PANTER_LEAD_HOST existed were always led by gpt-a.
+    // An empty ledger has no prior leader to migrate from.
+    const storedLeader = (d: MeshData): Host => d.leader && isHost(d.leader) ? d.leader
+      : (d.profiles.length || d.works.length || d.messages.length || d.reviews?.length || d.specialistBindings?.length) ? 'gpt-a' : lead;
+    const normalize = (data: MeshData): { from: Host; to: Host } | null => {
+      const from = storedLeader(data);
+      if (from !== lead) {
+        const stamp = iso();
+        // Work addressed to the new leader can never be claimed now: close it explicitly.
+        for (const w of data.works) {
+          if (w.target !== lead) continue;
+          if (w.state === 'QUEUED') { w.state = 'ABORTED_NO_EFFECTS'; w.completedAt = stamp; w.result = `Leader switch ${from} -> ${lead}: never claimed, aborted without effects`; }
+          else if (w.state === 'RUNNING' || w.state === 'WAITING_INPUT') {
+            // A writer may have produced effects: reconcile it. Read-only work had none, so it aborts
+            // cleanly and any review it belonged to reads as INTERRUPTED instead of a failed lens.
+            if (w.role === 'implementer') w.state = 'OUTCOME_UNKNOWN';
+            else { w.state = 'ABORTED_NO_EFFECTS'; w.completedAt = stamp; w.result = `Leader switch ${from} -> ${lead}: interrupted while running, read-only, no effects`; }
+            w.leaseUntil = null;
+          }
+        }
+        // Worker messages to the former leader go to the new one (one leader per process).
+        // Fresh revisions above the new leader's cursor, so incremental inbox polling still sees them.
+        let next = Math.max(data.inboxRevision[lead] ?? 0, ...data.messages.filter(m => m.to === lead).map(m => m.inboxRevision || 0));
+        for (const m of data.messages) {
+          // Messages the new leader sent while it was a worker stay with the old leader: never self-addressed.
+          if (m.to !== from || m.from === from || m.from === lead) continue;
+          const w = m.workId ? data.works.find(x => x.id === m.workId) : undefined;
+          if (!w || w.target === m.from) { m.to = lead; m.inboxRevision = ++next; }
+        }
+        data.inboxRevision[lead] = Math.max(data.inboxRevision[lead] ?? 0, next);
+        if (!data.profiles.some(p => p.host === lead)) data.profiles.push({ host: lead, actorId: `actor-${lead}`,
+          modelRequest: hostRequest(leaderPolicyProfile()).model, effortRequest: 'max', roles: ['orchestrator'], revision: 1 });
+        // Leader-only policy (e.g. GPT_A_ONLY: no remote delegation) belongs to the role, not the host:
+        // carry it over before the per-profile cleanup strips it from the former leader.
+        const prior = data.profiles.find(p => p.host === from);
+        const target = data.profiles.find(p => p.host === lead)!;
+        if (prior) {
+          if (prior.coordinationMode !== undefined) target.coordinationMode = prior.coordinationMode;
+          if (prior.preferNativeSubagents !== undefined) target.preferNativeSubagents = prior.preferNativeSubagents;
+          if (prior.maxRequestedNativeWorkers !== undefined) target.maxRequestedNativeWorkers = prior.maxRequestedNativeWorkers;
+        }
+        // Durable marker: other stores adopt the former leader's phases at boot, and keep retrying
+        // across crashes until clearPhaseAdoption() confirms it.
+        data.pendingPhaseAdoption = [...new Set([...(data.pendingPhaseAdoption ?? []), from])];
+      }
+      // A mesh ledger without a leader predates PANTER_LEAD_HOST, so GPT-A led it even when it looks
+      // empty: GPT-A may still own native ODD phases in the agents store. Adoption is idempotent.
+      if (!data.leader && lead !== 'gpt-a' && from === lead)
+        data.pendingPhaseAdoption = [...new Set([...(data.pendingPhaseAdoption ?? []), 'gpt-a' as Host])];
+      if (data.pendingPhaseAdoption) {
+        data.pendingPhaseAdoption = data.pendingPhaseAdoption.filter(h => isHost(h) && h !== lead);
+        if (!data.pendingPhaseAdoption.length) delete data.pendingPhaseAdoption;
+      }
+      // Always record the leader, including on an empty ledger, so the next switch migrates from the right host.
+      const switched = from !== lead ? { from, to: lead } : null;
+      data.leader = lead;
       const historical: Record<Host, number> = { 'gpt-a': 0, 'gpt-b': 0, 'grok': 0, 'gemini': 0, 'claude': 0 };
       for (const m of data.messages) {
         check(isHost(m.to) && isHost(m.from), 'Invalid message actor');
@@ -62,12 +128,50 @@ export class MeshEngine {
       data.rearmIntents ??= [];
       data.grokWakeAttempts ??= [];
       data.claudeWakeAttempts ??= [];
+      // The leader profile is orchestrator-only with leader settings; workers keep worker settings only.
+      for (const p of data.profiles) {
+        if (p.host === lead) {
+          if (p.roles.join() !== 'orchestrator') p.roles = ['orchestrator'];
+          delete p.scheduledPickupEnabled; delete p.scheduledPollIntervalSeconds;
+        } else {
+          if (p.roles.includes('orchestrator')) p.roles = p.roles.filter(r => r !== 'orchestrator');
+          delete p.coordinationMode; delete p.preferNativeSubagents; delete p.maxRequestedNativeWorkers;
+        }
+      }
+      return switched;
     };
     normalize(parsed);
     // Persist upgrades inside a transaction; subsequent reads cannot lose historical cursors.
-    x.state = JSON.stringify(parsed) === before ? parsed
-      : x.sqlite.mutate('mesh', x.state, data => normalize(data)).after;
+    // The switch is taken from the committed transaction, not from the pre-read snapshot.
+    if (JSON.stringify(parsed) === before) x.state = parsed;
+    else { const r = x.sqlite.mutate('mesh', x.state, data => normalize(data)); x.state = r.after; x.leaderSwitch = r.result; }
     return x;
+  }
+  /** Former leaders whose open phases other stores still have to adopt (survives crashes). */
+  get pendingPhaseAdoption(): Host[] { return [...(this.state.pendingPhaseAdoption ?? [])]; }
+  /** Called only after every adoption resolved; a crash before this re-runs the (idempotent) adoption. */
+  async clearPhaseAdoption(done: Host[]) {
+    return this.write(d => {
+      if (!d.pendingPhaseAdoption) return;
+      d.pendingPhaseAdoption = d.pendingPhaseAdoption.filter(h => !done.includes(h));
+      if (!d.pendingPhaseAdoption.length) delete d.pendingPhaseAdoption;
+    });
+  }
+  /** After a review read as INTERRUPTED, close its still-queued lenses so no worker picks them up later. */
+  async abortInterruptedReview(caller: Host, reviewId: string) {
+    check(caller === leaderHost(), `Only ${leaderLabel()} may reset a review`);
+    return this.write(d => {
+      const review = (d.reviews ?? []).find(r => r.id === reviewId);
+      check(review, 'Review not found');
+      const works = review.workIds.map(id => d.works.find(w => w.id === id)).filter((w): w is MeshWork => !!w);
+      check(reviewInterrupted(works), 'Review is not interrupted');
+      let aborted = 0;
+      for (const w of works) if (w.state === 'QUEUED') {
+        w.state = 'ABORTED_NO_EFFECTS'; w.completedAt = iso(); w.result = 'Review interrupted by leader switch: sibling lens aborted without effects';
+        this.notify(d, w.target); aborted++;
+      }
+      return aborted;
+    });
   }
 
   private async write<T>(fn: (d: MeshData) => T): Promise<T> {
@@ -91,24 +195,24 @@ export class MeshEngine {
   private notify(d: MeshData, host: Host) { d.inboxRevision[host] = (d.inboxRevision[host] ?? 0) + 1; return d.inboxRevision[host]; }
 
   async setProfile(caller: Host, profile: Omit<ActorProfile, 'revision'>, expectedRevision: number) {
-    check(caller === 'gpt-a', 'Only orchestrator configures agents');
+    check(caller === leaderHost(), 'Only orchestrator configures agents');
     check(isHost(profile.host), 'Unrecognized host');
     check(profile.actorId.trim().length >= 3 && profile.actorId.length <= 160, 'Invalid actor');
     check(profile.modelRequest.length <= 120 && profile.effortRequest.length <= 32, 'Invalid model request');
     check(profile.roles.length > 0 && profile.roles.every(r => roles.has(r)), 'Invalid roles');
-    if(profile.preferNativeSubagents !== undefined) check(typeof profile.preferNativeSubagents==='boolean' && profile.host==='gpt-a', 'Native worker preferences are leader-only');
-    if(profile.coordinationMode !== undefined) check(profile.host==='gpt-a' && ['AUTO','GPT_A_ONLY'].includes(profile.coordinationMode), 'Coordination mode is GPT-A-only');
-    if(profile.maxRequestedNativeWorkers !== undefined) check(profile.host==='gpt-a' && Number.isInteger(profile.maxRequestedNativeWorkers) && profile.maxRequestedNativeWorkers>=0 && profile.maxRequestedNativeWorkers<=32, 'Invalid native worker ceiling');
+    if(profile.preferNativeSubagents !== undefined) check(typeof profile.preferNativeSubagents==='boolean' && profile.host===leaderHost(), 'Native worker preferences are leader-only');
+    if(profile.coordinationMode !== undefined) check(profile.host===leaderHost() && ['AUTO','GPT_A_ONLY'].includes(profile.coordinationMode), `Coordination mode is ${leaderLabel()}-only`);
+    if(profile.maxRequestedNativeWorkers !== undefined) check(profile.host===leaderHost() && Number.isInteger(profile.maxRequestedNativeWorkers) && profile.maxRequestedNativeWorkers>=0 && profile.maxRequestedNativeWorkers<=32, 'Invalid native worker ceiling');
     if(profile.scheduledPickupEnabled!==undefined)
-      check(profile.host!=='gpt-a'&&typeof profile.scheduledPickupEnabled==='boolean','Scheduled pickup is worker-only');
+      check(profile.host!==leaderHost()&&typeof profile.scheduledPickupEnabled==='boolean','Scheduled pickup is worker-only');
     if(profile.scheduledPollIntervalSeconds!==undefined)
-      check(profile.host!=='gpt-a'&&Number.isInteger(profile.scheduledPollIntervalSeconds)&&
+      check(profile.host!==leaderHost()&&Number.isInteger(profile.scheduledPollIntervalSeconds)&&
         profile.scheduledPollIntervalSeconds>=3600&&profile.scheduledPollIntervalSeconds<=86400,
         'Scheduled pickup interval must be 3600..86400 seconds');
     if(profile.scheduledPickupEnabled)
       check(profile.scheduledPollIntervalSeconds!==undefined,'Scheduled pickup interval required');
-    check(profile.host !== 'gpt-a' || profile.roles.every(r => r === 'orchestrator'), 'GPT-A is the coordinator');
-    check(profile.host === 'gpt-a' || !profile.roles.includes('orchestrator'), 'Only GPT-A is the coordinator');
+    check(profile.host !== leaderHost() || profile.roles.every(r => r === 'orchestrator'), `${leaderLabel()} is the coordinator`);
+    check(profile.host === leaderHost() || !profile.roles.includes('orchestrator'), `Only ${leaderLabel()} is the coordinator`);
     return this.write(d => {
       const i = d.profiles.findIndex(p => p.host === profile.host);
       const before = d.profiles[i];
@@ -116,29 +220,29 @@ export class MeshEngine {
       const next = { ...profile, roles: [...new Set(profile.roles)], revision: expectedRevision + 1 };
       if (i < 0) d.profiles.push(next); else d.profiles[i] = next;
       this.notify(d, profile.host);
-      this.notify(d, 'gpt-a');
+      this.notify(d, leaderHost());
       return next;
     });
   }
   /** Persist the user's single-host choice without reopening Agent Studio. */
   setCoordinationMode(caller:Host, coordinationMode:'AUTO'|'GPT_A_ONLY', expectedRevision:number){
-    check(caller==='gpt-a','GPT-A alone may change coordination mode');
+    check(caller===leaderHost(),`${leaderLabel()} alone may change coordination mode`);
     check(coordinationMode==='AUTO'||coordinationMode==='GPT_A_ONLY','Invalid coordination mode');
     return this.write(d=>{
-      const before=d.profiles.find(p=>p.host==='gpt-a');
-      check((before?.revision??0)===expectedRevision,'Stale GPT-A coordination revision');
+      const before=d.profiles.find(p=>p.host===leaderHost());
+      check((before?.revision??0)===expectedRevision,`Stale ${leaderLabel()} coordination revision`);
       const next:ActorProfile={...(before??{
-        host:'gpt-a',actorId:'actor-gpt-a',modelRequest:'gpt-6-astra',effortRequest:'max',roles:['orchestrator'],
+        host:leaderHost(),actorId:`actor-${leaderHost()}`,modelRequest:hostRequest(leaderPolicyProfile()).model,effortRequest:'max',roles:['orchestrator'],
         preferNativeSubagents:true,maxRequestedNativeWorkers:32,revision:0
-      }),coordinationMode,revision:expectedRevision+1};
+      }),roles:['orchestrator'],coordinationMode,revision:expectedRevision+1};
       if(before)d.profiles[d.profiles.indexOf(before)]=next;else d.profiles.push(next);
-      this.notify(d,'gpt-a');return next;
+      this.notify(d,leaderHost());return next;
     });
   }
   profiles() { return this.read(d => d.profiles); }
   /** Authenticated worker poll; exposes a QUEUED candidate only. Claim may still reject expired authorization. */
   async workforcePoll(caller: Host, report: WorkerRouteReport) {
-    check(caller !== 'gpt-a', 'Only workers may poll');
+    check(caller !== leaderHost(), 'Only workers may poll');
     validateRouteReport(report);
     return this.write(d => {
       const registry = d.workforce ??= {};
@@ -166,7 +270,7 @@ export class MeshEngine {
     });
   }
   async workforceStatus(caller: Host) {
-    check(caller === 'gpt-a', 'Only GPT-A may inspect Workforce');
+    check(caller === leaderHost(), `Only ${leaderLabel()} may inspect Workforce`);
     return this.read(d => summarizeWorkforce(d.profiles, d.workforce ?? {}, d.works).map(view=>{
       const active=(d.taskBridges??[]).filter(t=>t.host===view.host&&
         (t.status==='ARMED'||t.status==='DELIVERED')&&Date.parse(t.expiresAt)>Date.now());
@@ -190,7 +294,7 @@ export class MeshEngine {
    * listener rows are actor-bound transport pointers to QUEUED Mesh work.
    */
   async taskBridgeArm(caller:Host, protocolEra:'2025-11-25'|'2026-07-28', ttlSeconds=3600) {
-    check(caller!=='gpt-a','Only workers may arm task bridge');
+    check(caller!==leaderHost(),'Only workers may arm task bridge');
     check(['2025-11-25','2026-07-28'].includes(protocolEra),'Unsupported protocol era');
     check(Number.isInteger(ttlSeconds)&&ttlSeconds>=60&&ttlSeconds<=86400,'Invalid task bridge TTL');
     return this.write(d=>{
@@ -218,7 +322,7 @@ export class MeshEngine {
     });
   }
   async taskBridgeGet(caller:Host,taskId:string){
-    check(caller!=='gpt-a','Only workers may retrieve task bridge');
+    check(caller!==leaderHost(),'Only workers may retrieve task bridge');
     return this.read(d=>{
       const t=(d.taskBridges??[]).find(x=>x.taskId===taskId&&x.host===caller);
       check(t,'Task not found');
@@ -234,7 +338,7 @@ export class MeshEngine {
    * This never allows an event or task ID to claim executable work.
    */
   async wireTaskGet(caller:Host,taskId:string,era:'2025-11-25'|'2026-07-28'){
-    check(caller!=='gpt-a','Only workers may inspect listener tasks');
+    check(caller!==leaderHost(),'Only workers may inspect listener tasks');
     return this.read(d=>{
       const item=(d.taskBridges??[]).find(t=>t.taskId===taskId&&t.host===caller&&t.protocolEra===era);
       check(item,'Task not found');
@@ -249,7 +353,7 @@ export class MeshEngine {
     });
   }
   async wireTaskList(caller:Host,era:'2025-11-25'|'2026-07-28',cursor?:string){
-    check(caller!=='gpt-a','Only workers may inspect listener tasks');
+    check(caller!==leaderHost(),'Only workers may inspect listener tasks');
     return this.read(d=>{
       const rows=(d.taskBridges??[]).filter(t=>t.host===caller&&t.protocolEra===era)
         .sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.taskId.localeCompare(b.taskId));
@@ -260,7 +364,7 @@ export class MeshEngine {
     });
   }
   async taskBridgeCancel(caller:Host,taskId:string){
-    check(caller!=='gpt-a','Only workers may cancel task bridge');
+    check(caller!==leaderHost(),'Only workers may cancel task bridge');
     return this.write(d=>{
       const t=(d.taskBridges??[]).find(x=>x.taskId===taskId&&x.host===caller);
       check(t,'Task not found');
@@ -270,38 +374,43 @@ export class MeshEngine {
     });
   }
   async rearmStatus(caller:Host){
-    return this.read(d=>(d.rearmIntents??[]).filter(i=>caller==='gpt-a'||i.host===caller)
+    return this.read(d=>(d.rearmIntents??[]).filter(i=>caller===leaderHost()||i.host===caller)
       .map(i=>({workId:i.workId,host:i.host,status:i.status,createdAt:i.createdAt,acknowledgedAt:i.acknowledgedAt??null})));
   }
   /** Full result stays in the durable Mesh ledger; GPT-A explicitly retrieves it.
    * No worker can read another actor's result via this tool.
    */
   async resultGet(caller:Host,workId:string){
-    check(caller==='gpt-a','Only GPT-A may read Workforce results');
+    check(caller===leaderHost(),`Only ${leaderLabel()} may read Workforce results`);
     return this.read(d=>{
-      const w=d.works.find(w=>w.id===workId&&w.from==='gpt-a');
+      const w=d.works.find(w=>w.id===workId);
       check(w&&['COMPLETED','FAILED'].includes(w.state),'Work result not found');
       return {workId:w.id,missionId:w.missionId,host:w.target,state:w.state,
         result:w.result,receiptDigest:w.receiptDigest,completedAt:w.completedAt};
     });
   }
-  specialistBindings() { return this.read(d => d.specialistBindings ?? []); }
+  /** Bindings to the current leader are inactive: after a leader switch they must not
+   * route remote work back to the orchestrator; callers fall back to native phases. */
+  specialistBindings() { return this.read(d => activeBindings(d)); }
   /** GPT-A configures many specialist definitions independently of the five hosts. */
   bindSpecialist(caller:Host, input:{agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:string[]}, expectedRevision:number) {
-    check(caller==='gpt-a', 'Only GPT-A configures specialist bindings');
+    check(caller===leaderHost(), `Only ${leaderLabel()} configures specialist bindings`);
     const definition=agentDefinition(input.agentId);
     check(definition, 'Unknown catalog agent');
-    check(isHost(input.host) && input.host!=='gpt-a', 'Specialists require a worker host');
+    check(isHost(input.host) && input.host!==leaderHost(), 'Specialists require a worker host');
     check(input.modelRequest.length<=120 && input.effortRequest.length<=32, 'Invalid model configuration');
     check(Number.isSafeInteger(expectedRevision) && expectedRevision>=0,'Invalid binding revision');
     const skills=checkSkills(input.skillIds);
     return this.write(d=>{
       const bindings=d.specialistBindings ??= [];
       const i=bindings.findIndex(b=>b.agentId===input.agentId);
-      check((bindings[i]?.revision??0)===expectedRevision,'Stale specialist binding revision');
-      const next:SpecialistBinding={agentId:definition.id,host:input.host,modelRequest:input.modelRequest,effortRequest:input.effortRequest,skillIds:skills,revision:expectedRevision+1};
+      // A binding to the current leader is inactive and hidden from callers, who see it as unbound (revision 0).
+      const stored=bindings[i]?.revision??0;
+      const visible=bindings[i]?.host===leaderHost()?0:stored;
+      check(visible===expectedRevision,'Stale specialist binding revision');
+      const next:SpecialistBinding={agentId:definition.id,host:input.host,modelRequest:input.modelRequest,effortRequest:input.effortRequest,skillIds:skills,revision:stored+1};
       if(i===-1)bindings.push(next);else bindings[i]=next;
-      this.notify(d,'gpt-a');
+      this.notify(d,leaderHost());
       return next;
     });
   }
@@ -309,27 +418,27 @@ export class MeshEngine {
    * retains the exact packet; later skill updates cannot change in-flight work.
    */
   async delegateBoundSpecialist(caller:Host,input:{missionId:string;agentId:string;objective:string;idempotencyKey:string;candidateSha?:string;allowedEditSurfaces?:string[]}) {
-    check(caller==='gpt-a','Only GPT-A can delegate');
-    const binding=await this.read(d=>(d.specialistBindings??[]).find(b=>b.agentId===input.agentId)??null);
+    check(caller===leaderHost(),`Only ${leaderLabel()} can delegate`);
+    const binding=await this.read(d=>activeBindings(d).find(b=>b.agentId===input.agentId)??null);
     check(binding,'Specialist must be configured in Agent Studio');
     const packet=await specialistPacket({agentId:binding.agentId,skillIds:binding.skillIds,objective:input.objective,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,candidateSha:input.candidateSha,allowedEditSurfaces:input.allowedEditSurfaces});
     return this.delegate(caller,{missionId:input.missionId,target:binding.host,role:packet.role,instruction:packet.instruction,idempotencyKey:input.idempotencyKey,
       specialist:{agentId:packet.agentId,skillIds:packet.skillIds,packetDigest:packet.digest,assetDigests:packet.assetDigests,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,bindingRevision:binding.revision,candidateSha:input.candidateSha,allowedEditSurfaces:packet.allowedEditSurfaces}});
   }
   async delegate(caller: Host, input: { missionId: string; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?:NonNullable<MeshWork['specialist']>; wakeOnly?:boolean; scheduleOnly?:boolean }) {
-    check(caller === 'gpt-a', 'Only GPT-A can delegate');
+    check(caller === leaderHost(), `Only ${leaderLabel()} can delegate`);
     check(input.missionId.length > 0 && input.missionId.length <= 120, 'Invalid mission');
-    check(isHost(input.target) && input.target !== 'gpt-a', 'Invalid target');
+    check(isHost(input.target) && input.target !== leaderHost(), 'Invalid target');
     check(roles.has(input.role) && input.role !== 'orchestrator', 'Invalid role');
     check(input.instruction.trim().length > 0 && input.instruction.length <= 50000, 'Invalid instruction');
     check(input.idempotencyKey.length > 0 && input.idempotencyKey.length <= 160, 'Invalid idempotency');
     if(input.role==='implementer'&&this.writeGuard)
       await this.writeGuard(input.missionId,input.specialist?.allowedEditSurfaces??[]);
     return this.write(d => {
-      check(!d.profiles.some(p=>p.host==='gpt-a'&&p.coordinationMode==='GPT_A_ONLY'),
-        'GPT_A_ONLY forbids remote delegation; use native GPT-A phases');
+      check(!d.profiles.some(p=>p.host===leaderHost()&&p.coordinationMode==='GPT_A_ONLY'),
+        `GPT_A_ONLY forbids remote delegation; use native ${leaderLabel()} phases`);
       if (input.specialist) {
-        const binding=(d.specialistBindings??[]).find(b=>b.agentId===input.specialist?.agentId);
+        const binding=activeBindings(d).find(b=>b.agentId===input.specialist?.agentId);
         check(binding?.host===input.target && binding.revision===input.specialist.bindingRevision, 'Specialist binding changed during dispatch');
         check(input.specialist.packetDigest===sha(input.instruction), 'Specialist packet digest mismatch');
       }
@@ -356,7 +465,7 @@ export class MeshEngine {
           'Scheduled worker busy');
       }
       if(input.wakeOnly){
-        check((input.target==='grok'||input.target==='claude'||input.target==='gpt-b'||input.target==='gemini') && input.role!=='implementer','External wake cannot authorize remote writes');
+        check(isWorker(input.target) && input.role!=='implementer','External wake cannot authorize remote writes');
         check(!d.works.some(w=>w.target===input.target &&
           ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state)),
           input.target==='grok'?'Grok wake peer busy':input.target==='claude'?'Claude wake peer busy':'MCP event peer busy');
@@ -365,13 +474,13 @@ export class MeshEngine {
         const conflict=d.works.find(w=>w.missionId===input.missionId && w.role==='implementer' && ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state) && (w.specialist?.allowedEditSurfaces??[]).some(a=>input.specialist!.allowedEditSurfaces.some(b=>a===b || a.startsWith(b+'/') || b.startsWith(a+'/'))));
         check(!conflict,'Overlapping active writer edit surfaces');
       }
-      const w: MeshWork = { id: randomUUID(), missionId: input.missionId, from: 'gpt-a', target: input.target, role: input.role, instruction: input.instruction, idempotencyKey: input.idempotencyKey, specialist: input.specialist, state: 'QUEUED', attemptId: null, leaseGeneration: 0, leaseUntil: null, result: null, receiptDigest: null, createdAt: iso(), completedAt: null };
+      const w: MeshWork = { id: randomUUID(), missionId: input.missionId, from: leaderHost(), target: input.target, role: input.role, instruction: input.instruction, idempotencyKey: input.idempotencyKey, specialist: input.specialist, state: 'QUEUED', attemptId: null, leaseGeneration: 0, leaseUntil: null, result: null, receiptDigest: null, createdAt: iso(), completedAt: null };
       d.works.push(w);
       // Bind the oldest active transport listener to the authoritative queued work.
       const bridge=(d.taskBridges??[]).find(t=>t.host===w.target&&t.status==='ARMED'&&Date.parse(t.expiresAt)>Date.now());
       if(bridge){bridge.status='DELIVERED';bridge.workId=w.id;}
       this.notify(d, input.target);
-      this.notify(d, 'gpt-a');
+      this.notify(d, leaderHost());
       return w;
     });
   }
@@ -380,35 +489,35 @@ export class MeshEngine {
    * A lost response is never blindly resent: RESERVED is an uncertain outcome.
    */
   async reserveGrokWake(caller:Host,workId:string){
-    check(caller==='gpt-a','Only GPT-A may signal delegated work');
+    check(caller===leaderHost(),`Only ${leaderLabel()} may signal delegated work`);
     return this.write(d=>{
-      const w=d.works.find(w=>w.id===workId&&w.from==='gpt-a'&&w.target==='grok');
+      const w=d.works.find(w=>w.id===workId&&w.target==='grok');
       check(w,'Grok work not found');
       const existing=(d.grokWakeAttempts??[]).find(a=>a.workId===workId);
       if(existing)return {send:false,attempt:existing};
       check(w.state==='QUEUED','Only queued Grok work can receive wake');
       const attempt:GrokWakeAttempt={workId,state:'RESERVED',reservedAt:iso(),statusCode:null};
       (d.grokWakeAttempts??=[]).push(attempt);
-      this.notify(d,'gpt-a');
+      this.notify(d,leaderHost());
       return {send:true,attempt};
     });
   }
   async finishGrokWake(caller:Host,workId:string,accepted:boolean,statusCode:number|null){
-    check(caller==='gpt-a','Only GPT-A may record wake delivery');
+    check(caller===leaderHost(),`Only ${leaderLabel()} may record wake delivery`);
     return this.write(d=>{
       const attempt=(d.grokWakeAttempts??[]).find(a=>a.workId===workId);
       check(attempt,'Wake attempt not found');
       if(attempt.state!=='RESERVED')return attempt;
       attempt.state=accepted?'SIGNAL_ACCEPTED':'SIGNAL_FAILED';
       attempt.statusCode=statusCode;
-      this.notify(d,'gpt-a');
+      this.notify(d,leaderHost());
       return attempt;
     });
   }
   async grokWakeStatus(caller:Host,workId:string){
-    check(caller==='gpt-a','Only GPT-A may inspect Grok wake attempts');
+    check(caller===leaderHost(),`Only ${leaderLabel()} may inspect Grok wake attempts`);
     return this.read(d=>{
-      const w=d.works.find(w=>w.id===workId&&w.from==='gpt-a'&&w.target==='grok');
+      const w=d.works.find(w=>w.id===workId&&w.target==='grok');
       check(w,'Grok work not found');
       const a=(d.grokWakeAttempts??[]).find(x=>x.workId===workId);
       return {workId,state:a?.state??'DELIVERY_ONLY',statusCode:a?.statusCode??null,
@@ -423,7 +532,7 @@ export class MeshEngine {
    * The host owns the schedule; this method never invokes a model.
    */
   async delegateScheduled(caller:Host,input:{missionId:string;role:MeshRole;instruction:string;idempotencyKey:string}){
-    check(caller==='gpt-a','Only GPT-A can delegate');
+    check(caller===leaderHost(),`Only ${leaderLabel()} can delegate`);
     check(input.missionId.trim().length>0&&input.missionId.length<=120,'Invalid mission');
     check(roles.has(input.role)&&input.role!=='orchestrator','Invalid role');
     check(input.instruction.trim().length>0&&input.instruction.length<=50000,'Invalid instruction');
@@ -431,12 +540,12 @@ export class MeshEngine {
     const choice=await this.read(d=>{
       const replay=d.works.find(w=>w.missionId===input.missionId&&w.idempotencyKey===input.idempotencyKey);
       if(replay)return {replay};
-      if(d.profiles.some(p=>p.host==='gpt-a'&&p.coordinationMode==='GPT_A_ONLY'))
+      if(d.profiles.some(p=>p.host===leaderHost()&&p.coordinationMode==='GPT_A_ONLY'))
         return {reason:'GPT_A_ONLY' as const};
       if(input.role==='implementer')return {reason:'SCHEDULED_WRITES_NOT_ENABLED' as const};
       const now=Date.now();
       const ready=d.profiles.filter(p=>{
-        if(p.host==='gpt-a'||!p.roles.includes(input.role)||p.scheduledPickupEnabled!==true)
+        if(p.host===leaderHost()||!p.roles.includes(input.role)||p.scheduledPickupEnabled!==true)
           return false;
         const interval=p.scheduledPollIntervalSeconds;
         const ob=d.workforce?.[p.host as WorkerHost];
@@ -483,9 +592,9 @@ export class MeshEngine {
    * uncertain: never automatically retry, since each fire starts a new session.
    */
   async reserveClaudeWake(caller:Host,workId:string){
-    check(caller==='gpt-a','Only GPT-A may signal delegated work');
+    check(caller===leaderHost(),`Only ${leaderLabel()} may signal delegated work`);
     return this.write(d=>{
-      const w=d.works.find(w=>w.id===workId&&w.from==='gpt-a'&&w.target==='claude');
+      const w=d.works.find(w=>w.id===workId&&w.target==='claude');
       check(w,'Claude work not found');
       const existing=(d.claudeWakeAttempts??[]).find(a=>a.workId===workId);
       if(existing)return {send:false,attempt:existing};
@@ -493,12 +602,12 @@ export class MeshEngine {
       const attempt:ClaudeWakeAttempt={workId,state:'RESERVED',reservedAt:iso(),
         statusCode:null,sessionId:null};
       (d.claudeWakeAttempts??=[]).push(attempt);
-      this.notify(d,'gpt-a');
+      this.notify(d,leaderHost());
       return {send:true,attempt};
     });
   }
   async finishClaudeWake(caller:Host,workId:string,accepted:boolean,statusCode:number|null,sessionId:string|null){
-    check(caller==='gpt-a','Only GPT-A may record wake delivery');
+    check(caller===leaderHost(),`Only ${leaderLabel()} may record wake delivery`);
     return this.write(d=>{
       const attempt=(d.claudeWakeAttempts??[]).find(a=>a.workId===workId);
       check(attempt,'Claude wake attempt not found');
@@ -506,14 +615,14 @@ export class MeshEngine {
       attempt.state=accepted?'SIGNAL_ACCEPTED':'SIGNAL_FAILED';
       attempt.statusCode=statusCode;
       attempt.sessionId=accepted?sessionId:null;
-      this.notify(d,'gpt-a');
+      this.notify(d,leaderHost());
       return attempt;
     });
   }
   async claudeWakeStatus(caller:Host,workId:string){
-    check(caller==='gpt-a','Only GPT-A may inspect Claude wake attempts');
+    check(caller===leaderHost(),`Only ${leaderLabel()} may inspect Claude wake attempts`);
     return this.read(d=>{
-      const w=d.works.find(w=>w.id===workId&&w.from==='gpt-a'&&w.target==='claude');
+      const w=d.works.find(w=>w.id===workId&&w.target==='claude');
       check(w,'Claude work not found');
       const a=(d.claudeWakeAttempts??[]).find(x=>x.workId===workId);
       return {workId,state:a?.state??'DELIVERY_ONLY',statusCode:a?.statusCode??null,
@@ -528,7 +637,7 @@ export class MeshEngine {
    * Existing work is authoritative: an idempotent retry cannot reroute it.
    */
   async delegateAuto(caller:Host,input:{missionId:string;role:MeshRole;instruction:string;idempotencyKey:string}) {
-    check(caller==='gpt-a','Only GPT-A can delegate');
+    check(caller===leaderHost(),`Only ${leaderLabel()} can delegate`);
     check(input.missionId.length>0&&input.missionId.length<=120,'Invalid mission');
     check(roles.has(input.role)&&input.role!=='orchestrator','Invalid role');
     check(input.instruction.trim().length>0&&input.instruction.length<=50000,'Invalid instruction');
@@ -536,11 +645,11 @@ export class MeshEngine {
     const choice=await this.read(d=>{
       const replay=d.works.find(w=>w.missionId===input.missionId&&w.idempotencyKey===input.idempotencyKey);
       if(replay)return {replay};
-      if(d.profiles.some(p=>p.host==='gpt-a'&&p.coordinationMode==='GPT_A_ONLY'))
+      if(d.profiles.some(p=>p.host===leaderHost()&&p.coordinationMode==='GPT_A_ONLY'))
         return {reason:'GPT_A_ONLY' as const};
       const now=Date.now();
       const eligible=d.profiles.filter(p=>{
-        if(p.host==='gpt-a'||!p.roles.includes(input.role))return false;
+        if(p.host===leaderHost()||!p.roles.includes(input.role))return false;
         const observation=d.workforce?.[p.host as WorkerHost];
         const age=now-Date.parse(observation?.lastPollAt??'');
         // A worker can self-report LONG_POLL via panter_workforce_next.
@@ -581,7 +690,7 @@ export class MeshEngine {
    * judgment authority is NOT emulated; a controller must evaluate results.
    */
   async startReview(caller:Host,input:{missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string}) {
-    check(caller==='gpt-a','Only GPT-A can initiate reviews');
+    check(caller===leaderHost(),`Only ${leaderLabel()} can initiate reviews`);
     check(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(input.candidateSha),'Invalid frozen candidate SHA');
     check(input.missionId.trim().length>0 && input.missionId.length<=120,'Invalid mission');
     check(input.objective.trim().length>0 && input.objective.length<=6000,'Invalid review objective');
@@ -597,37 +706,41 @@ export class MeshEngine {
       return specialistPacket({agentId:id,skillIds:binding.skillIds,objective:input.objective,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,candidateSha:input.candidateSha});
     }));
     return this.write(d=>{
-      check(!d.profiles.some(p=>p.host==='gpt-a'&&p.coordinationMode==='GPT_A_ONLY'),
+      check(!d.profiles.some(p=>p.host===leaderHost()&&p.coordinationMode==='GPT_A_ONLY'),
         'GPT_A_ONLY forbids remote review fanout; use native review/evidence gates');
       const reviews=d.reviews??=[];
       const previous=reviews.find(r=>r.missionId===input.missionId && r.idempotencyKey===input.idempotencyKey);
       if(previous){check(previous.kind===input.kind && previous.candidateSha===input.candidateSha && previous.objective===input.objective,'Conflicting review idempotency');return previous;}
       const now=iso();const workIds:string[]=[];
       for(let i=0;i<ids.length;i++){
-        const binding=(d.specialistBindings??[]).find(b=>b.agentId===ids[i]);
+        const binding=activeBindings(d).find(b=>b.agentId===ids[i]);
         const original=configured[i]!,packet=packets[i]!;
         check(binding?.revision===original.revision && binding.host===original.host,'Review binding changed during dispatch');
+        check(binding.host!==leaderHost(),'Specialists require a worker host');
         const profile=d.profiles.find(p=>p.host===binding.host);
         check(profile?.roles.includes('reviewer'),'Review host is not authorized for reviewer role');
-        const work:MeshWork={id:randomUUID(),missionId:input.missionId,from:'gpt-a',target:binding.host,role:'reviewer',instruction:packet.instruction,
+        const work:MeshWork={id:randomUUID(),missionId:input.missionId,from:leaderHost(),target:binding.host,role:'reviewer',instruction:packet.instruction,
           idempotencyKey:`${input.idempotencyKey}:${ids[i]}`,specialist:{agentId:packet.agentId,skillIds:packet.skillIds,packetDigest:packet.digest,
             assetDigests:packet.assetDigests,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,bindingRevision:binding.revision,
             candidateSha:input.candidateSha,allowedEditSurfaces:[]},state:'QUEUED',attemptId:null,leaseGeneration:0,leaseUntil:null,result:null,receiptDigest:null,createdAt:now,completedAt:null};
         d.works.push(work);workIds.push(work.id);this.notify(d,binding.host);
       }
       const review:ReviewSession={id:randomUUID(),missionId:input.missionId,kind:input.kind,objective:input.objective,candidateSha:input.candidateSha,idempotencyKey:input.idempotencyKey,workIds,createdAt:now};
-      reviews.push(review);this.notify(d,'gpt-a');return review;
+      reviews.push(review);this.notify(d,leaderHost());return review;
     });
   }
   reviewStatus(caller:Host,reviewId:string){
-    check(caller==='gpt-a','Only GPT-A may inspect review aggregate');
+    check(caller===leaderHost(),`Only ${leaderLabel()} may inspect review aggregate`);
     return this.read(d=>{
       const review=(d.reviews??[]).find(r=>r.id===reviewId);
       check(review,'Review not found');
       const work=review.workIds.map(id=>d.works.find(w=>w.id===id));
       check(work.every(Boolean),'Review ledger inconsistent');
       const terminal=work.every(w=>w!.state==='COMPLETED'||w!.state==='FAILED');
-      return {review,stage:terminal?'READY_FOR_CONTROLLER':'AWAITING_REPORTS',
+      // A leader switch aborts review work addressed to the new leader, and a lens already completed by
+      // the new leader no longer counts as independent: either way that session can never complete.
+      const interrupted=reviewInterrupted(work as MeshWork[]);
+      return {review,stage:interrupted?'INTERRUPTED' as const:terminal?'READY_FOR_CONTROLLER' as const:'AWAITING_REPORTS' as const,
         nativeReviewAuthority:false,
         work:work.map(w=>({workId:w!.id,agentId:w!.specialist?.agentId,packetDigest:w!.specialist?.packetDigest,host:w!.target,state:w!.state,receiptDigest:w!.receiptDigest,result:w!.result}))};
     });
@@ -635,6 +748,7 @@ export class MeshEngine {
 
   pending(caller: Host) { return this.read(d => d.works.filter(w => w.target === caller && w.state === 'QUEUED').map(w => ({ workId: w.id, missionId: w.missionId, role: w.role, createdAt: w.createdAt }))); }
   async claim(caller: Host, workId: string, leaseSeconds = 300, requireQueued = false) {
+    check(caller!==leaderHost(),'Only workers may claim delegated work');
     check(leaseSeconds >= 30 && leaseSeconds <= 3600, 'Invalid lease');
     const offered=await this.read(d=>d.works.find(w=>w.id===workId&&w.target===caller)??null);
     if(offered?.role==='implementer'&&this.writeGuard)
@@ -649,11 +763,11 @@ export class MeshEngine {
       // A lost ACK after an uncertain write cannot authorize an automatic replay.
       if (expired && w.role === 'implementer') {
         w.state = 'OUTCOME_UNKNOWN';
-        this.notify(d, 'gpt-a');
+        this.notify(d, leaderHost());
         return { ...w, instruction: '', result: null };
       }
       w.state = 'RUNNING'; w.leaseGeneration++; w.attemptId = randomUUID();
-      if (caller !== 'gpt-a') {
+      if (caller !== leaderHost()) {
         const presence = (d.workforce ??= {})[caller as WorkerHost] ??= {};
         presence.lastClaimAt = iso();
         const grokWake=(d.grokWakeAttempts??[]).find(a=>a.workId===w.id);
@@ -662,7 +776,7 @@ export class MeshEngine {
           if(wake?.state==='SIGNAL_ACCEPTED')wake.claimedAt=presence.lastClaimAt;
       }
       w.leaseUntil = new Date(Date.now() + leaseSeconds * 1000).toISOString();
-      this.notify(d, 'gpt-a');
+      this.notify(d, leaderHost());
       return w;
     });
   }
@@ -670,7 +784,7 @@ export class MeshEngine {
    * No inference takes place here; the host executes the returned instructions.
    */
   async pickup(caller:Host,leaseSeconds=300,readOnlyOnly=false) {
-    check(caller!=='gpt-a','Only workers may pick up delegated work');
+    check(caller!==leaderHost(),'Only workers may pick up delegated work');
     check(Number.isInteger(leaseSeconds)&&leaseSeconds>=30&&leaseSeconds<=3600,'Invalid lease');
     // Snapshot candidates only; claim() still validates authority and CAS under SQLite.
     const candidates=(await this.pending(caller))
@@ -695,7 +809,7 @@ export class MeshEngine {
    */
   async completeAndRearm(caller:Host,id:string,attemptId:string,generation:number,result:string,
     success:boolean,protocolEra:'2025-11-25'|'2026-07-28'){
-    check(caller!=='gpt-a','Only workers may complete delegated work');
+    check(caller!==leaderHost(),'Only workers may complete delegated work');
     const receipt=await this.complete(caller,id,attemptId,generation,result,success);
     try {
       const listener=await this.taskBridgeArm(caller,protocolEra);
@@ -707,6 +821,7 @@ export class MeshEngine {
     }
   }
   async heartbeat(caller: Host, id: string, attemptId: string, generation: number, leaseSeconds = 300) {
+    check(caller!==leaderHost(),'Only workers may renew delegated work');
     return this.write(d => {
       const w = d.works.find(w => w.id === id && w.target === caller);
       check(w && w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
@@ -717,6 +832,7 @@ export class MeshEngine {
     });
   }
   async complete(caller: Host, id: string, attemptId: string, generation: number, result: string, success = true) {
+    check(caller!==leaderHost(),'Only workers may complete delegated work');
     check(result.length <= 50000, 'Result too long');
     return this.write(d => {
       const w = d.works.find(w => w.id === id && w.target === caller);
@@ -731,14 +847,14 @@ export class MeshEngine {
       check(Date.parse(w.leaseUntil!) > Date.now(), 'Lease expired');
       w.state = success ? 'COMPLETED' : 'FAILED'; w.result = result; w.receiptDigest = digest;
       w.completedAt = iso(); w.leaseUntil = null;
-      if (caller !== 'gpt-a') {
+      if (caller !== leaderHost()) {
         const presence = (d.workforce ??= {})[caller as WorkerHost] ??= {};
         presence.lastReceiptAt = w.completedAt;
       }
-      const revision = this.notify(d, 'gpt-a');
+      const revision = this.notify(d, leaderHost());
       // Only the receipt pointer enters the inbox, never worker result text.
-      d.messages.push({ id: randomUUID(), missionId: w.missionId, from: caller, to: 'gpt-a', workId: id, kind: 'RESULT', text: JSON.stringify({workId:id,state:w.state,receiptDigest:digest,resultAvailable:true}), createdAt: iso(), inboxRevision: revision });
-      if(caller!=='gpt-a'&&!(d.rearmIntents??[]).some(x=>x.workId===id))
+      d.messages.push({ id: randomUUID(), missionId: w.missionId, from: caller, to: leaderHost(), workId: id, kind: 'RESULT', text: JSON.stringify({workId:id,state:w.state,receiptDigest:digest,resultAvailable:true}), createdAt: iso(), inboxRevision: revision });
+      if(caller!==leaderHost()&&!(d.rearmIntents??[]).some(x=>x.workId===id))
         (d.rearmIntents??=[]).push({workId:id,host:caller as WorkerHost,status:'PENDING',createdAt:iso()});
       // Compact terminal receipt: result remains in SQLite for GPT-A.
       return {workId:w.id,state:w.state,receiptDigest:w.receiptDigest,completedAt:w.completedAt,
@@ -787,12 +903,12 @@ export class MeshEngine {
         w.state='COMPLETED';w.result=result;
         w.receiptDigest=sha(JSON.stringify({reconciledWorkId:w.id,attemptId:w.attemptId,
           generation:w.leaseGeneration,result,operatorEvidence:input.evidence}));
-        const revision=this.notify(d,'gpt-a');
-        d.messages.push({id:randomUUID(),missionId:w.missionId,from:w.target,to:'gpt-a',
+        const revision=this.notify(d,leaderHost());
+        d.messages.push({id:randomUUID(),missionId:w.missionId,from:w.target,to:leaderHost(),
           workId:w.id,kind:'RESULT',text:JSON.stringify({workId:w.id,state:w.state,receiptDigest:w.receiptDigest,resultAvailable:true}),createdAt:iso(),inboxRevision:revision});
       }else{
         w.state='ABORTED_NO_EFFECTS';w.result=null;w.receiptDigest=null;
-        this.notify(d,'gpt-a');
+        this.notify(d,leaderHost());
       }
       return {workId:w.id,state:w.state,reconciliation:w.reconciliation,leaseGeneration:w.leaseGeneration};
     });
@@ -803,7 +919,7 @@ export class MeshEngine {
     return this.write(d => {
       const w = input.workId ? d.works.find(x => x.id === input.workId) : null;
       check(w && w.missionId === input.missionId, 'Known work is required for peer messages');
-      check((caller === 'gpt-a' && w.target === input.to) || (input.to === 'gpt-a' && w.target === caller), 'Not a member of this delegation');
+      check((caller === leaderHost() && w.target === input.to) || (input.to === leaderHost() && w.target === caller), 'Not a member of this delegation');
       const revision = this.notify(d, input.to);
       const msg: MeshMessage = { id: randomUUID(), missionId: input.missionId, from: caller, to: input.to, workId: w.id, kind: input.kind, text: input.text, createdAt: iso(), inboxRevision: revision };
       d.messages.push(msg);
@@ -815,7 +931,7 @@ export class MeshEngine {
     return this.read(d => ({
       revision: d.inboxRevision[caller],
       messages: d.messages.filter(m => m.to === caller && m.inboxRevision > sinceRevision),
-      works: d.works.filter(w => w.target === caller || (caller === 'gpt-a' && w.from === 'gpt-a')).map(w => ({ id: w.id, missionId: w.missionId, target: w.target, role: w.role, state: w.state, receiptDigest: w.receiptDigest, completedAt: w.completedAt })),
+      works: d.works.filter(w => w.target === caller || caller === leaderHost()).map(w => ({ id: w.id, missionId: w.missionId, target: w.target, role: w.role, state: w.state, receiptDigest: w.receiptDigest, completedAt: w.completedAt })),
     }));
   }
   /** Safe to publish across the host mesh: never include actor-specific counts or secrets. */

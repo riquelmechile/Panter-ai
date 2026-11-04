@@ -3,6 +3,7 @@
  * subscription and the callback. Only opaque, actor-bound work pointers leave.
  * https://developers.openai.com/plugins/build/mcp-events
  */
+import { leaderHost, leaderLabel, appEventHosts, isAppEventHost, hostLabel, type LeaderHost } from './leadership.js';
 import {createHash,createHmac,randomBytes,timingSafeEqual} from 'node:crypto';
 import {lookup} from 'node:dns/promises';
 import {request} from 'node:https';
@@ -10,7 +11,8 @@ import {BlockList,isIP,type LookupFunction} from 'node:net';
 import {SqliteLedger} from './sqlite-ledger.js';
 
 export const WORK_EVENT='panter.work.ready';
-export type EventHost='gpt-b'|'gemini';
+/** ChatGPT/Gemini app workers (GPT-A, GPT-B, Gemini), excluding the leader. */
+export type EventHost=LeaderHost;
 type Subscription={id:string;owner:EventHost;url:string;secret:string;expiresAt:string;verifiedAt:string};
 type Delivery={id:string;subId:string;workId:string;state:'PENDING'|'SENDING'|'ACCEPTED'|'FAILED';
   attempts:number;nextAt:number;lastStatus:number|null;terminalAt?:number;
@@ -127,8 +129,8 @@ export async function safeWebhookPost(url:string,headers:Record<string,string>,
   });
 }
 function assertActor(actor:string):asserts actor is EventHost{
-  if(actor!=='gpt-b'&&actor!=='gemini')
-    throw Error('Only GPT-B or Gemini OAuth actors may subscribe to Panter MCP events');
+  if(!isAppEventHost(actor))
+    throw Error(`Only ${appEventHosts().map(hostLabel).join(' or ')} OAuth actors may subscribe to Panter MCP events`);
 }
 function eventArgs(input:unknown,actor:EventHost){
   if(!input||typeof input!=='object'||Array.isArray(input))throw Error('Invalid event arguments');
@@ -148,7 +150,7 @@ export class WorkforceEvents{
   list(actor:string){
     // Other authenticated Panter hosts still use the same MCP plugin;
     // an empty event catalog must not disrupt their ordinary tool discovery.
-    if(actor!=='gpt-b'&&actor!=='gemini')return {events:[]};
+    if(!isAppEventHost(actor))return {events:[]};
     return {events:[{name:WORK_EVENT,
       description:'An authenticated '+actor+' work pointer is ready. Claim with panter_workforce_pickup.',
       delivery:['webhook'],
@@ -287,9 +289,9 @@ export class WorkforceEvents{
     return attempted;
   }
   status(actor:string){
-    if(actor!=='gpt-a')throw Error('Only GPT-A may inspect event wake');
+    if(actor!==leaderHost())throw Error(`Only ${leaderLabel()} may inspect event wake`);
     const data=this.db.read('events',seed);
-    return {hosts:['gpt-b','gemini'].map(host=>({host,activeSubscriptions:data.subscriptions.filter(s=>s.owner===host&&isLive(s)).length})),subscriptions:data.subscriptions.filter(s=>isLive(s)).length,
+    return {hosts:appEventHosts().map(host=>({host,activeSubscriptions:data.subscriptions.filter(s=>s.owner===host&&isLive(s)).length})),subscriptions:data.subscriptions.filter(s=>isLive(s)).length,
       pending:data.deliveries.filter(x=>x.state==='PENDING'||x.state==='SENDING').length,
       accepted:data.deliveries.filter(x=>x.state==='ACCEPTED').length,
       failed:data.deliveries.filter(x=>x.state==='FAILED').length,

@@ -1,3 +1,4 @@
+import { leaderHost, leaderLabel } from './leadership.js';
 /** Curated, project-bound Engram MCP memory. Only GPT-A can access durable knowledge.
  * Worker assertions remain A2A evidence, not automatically trusted memories.
  */
@@ -19,7 +20,7 @@ export type MemoryBridgeConfig = {
 const TOPIC = /^[a-z0-9][a-z0-9._/-]{0,159}$/;
 const NAME = /^[a-z][a-z0-9-]{1,79}$/;
 function requireLeader(principal: MemoryPrincipal) {
-  if (principal !== 'gpt-a') throw new Error('Only GPT-A can access curated project memory');
+  if (principal !== leaderHost()) throw new Error(`Only ${leaderLabel()} can access curated project memory`);
 }
 function requireValid(condition: unknown, msg: string): asserts condition {
   if (!condition) throw new Error(msg);

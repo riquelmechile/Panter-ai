@@ -2,6 +2,7 @@
  * The identity provider owns browser consent, PKCE, token issuance and rotation.
  * This module never implements a password form, DCR, or a model API.
  */
+import { leaderHost, leaderLabel } from './leadership.js';
 import { createPublicKey, verify, type KeyObject, timingSafeEqual, createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import type { Host } from './mesh.js';
@@ -105,7 +106,7 @@ export class ExternalOAuthVerifier {
     const matches = HOST_ROLES.filter(host => this.bindings.has(principalId(host, payload.sub as string, payload.client_id as string)));
     ensure(matches.length === 1, 'Unregistered OAuth actor');
     const host = matches[0]!;
-    if (host === 'gpt-a') ensure(scope.includes('panter:lead'), 'GPT-A leader scope required');
+    if (host === leaderHost()) ensure(scope.includes('panter:lead'), `${leaderLabel()} leader scope required`);
     return host;
   }
 }
