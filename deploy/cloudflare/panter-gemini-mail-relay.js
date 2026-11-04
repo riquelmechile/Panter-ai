@@ -3,10 +3,11 @@
 //   confirms (POST /a2a/gemini/email-validate), to the single Gmail inbox that Gemini monitors.
 // email(): Gemini's reply to RELAY_ADDRESS is forwarded raw to Panter (/a2a/gemini/email-result), which
 //   completes the work only with the one-time token of the current lease.
-// Bindings: PANTER_BASE_URL, RECIPIENT, RELAY_ADDRESS (text), EMAIL (send_email to RECIPIENT) and optional
-//   RELAY_SECRET: shared with Panter (PANTER_GEMINI_MAIL_RELAY_SECRET); /wake requires it and both calls send it.
+// Bindings: PANTER_BASE_URL (https), RECIPIENT, RELAY_ADDRESS, RELAY_SECRET (text) and EMAIL (send_email to
+//   RECIPIENT). RELAY_SECRET equals Panter's PANTER_GEMINI_MAIL_RELAY_SECRET: /wake requires it and both calls
+//   to Panter carry it. Without it (or with a non-https PANTER_BASE_URL) the Worker refuses to run.
 const MAX_WAKE_BYTES = 160_000;
-const MAX_EMAIL_BYTES = 512 * 1024;
+const MAX_EMAIL_BYTES = 300 * 1024; // base64 of this stays under Panter's 420 000-character cap
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function json(body, status = 200) {
@@ -20,10 +21,13 @@ function sameKey(a, b) {
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
 }
+function misconfigured(env) {
+  return typeof env.RELAY_SECRET !== "string" || env.RELAY_SECRET.length < 32 ||
+    !String(env.PANTER_BASE_URL || "").startsWith("https://");
+}
 function panterHeaders(env) {
-  const h = { "content-type": "application/json", accept: "application/json", "user-agent": "Panter-Gemini-Mail-Relay/1" };
-  if (env.RELAY_SECRET) h["x-panter-relay-key"] = env.RELAY_SECRET;
-  return h;
+  return { "content-type": "application/json", accept: "application/json", "user-agent": "Panter-Gemini-Mail-Relay/1",
+    "x-panter-relay-key": env.RELAY_SECRET };
 }
 function toBase64(bytes) {
   let s = "";
@@ -63,7 +67,8 @@ export default {
     if (request.method === "GET" && url.pathname === "/health")
       return json({ ok: true, service: "panter-gemini-mail-relay" });
     if (request.method !== "POST" || url.pathname !== "/wake") return json({ ok: false, error: "not_found" }, 404);
-    if (env.RELAY_SECRET && !sameKey(request.headers.get("x-panter-relay-key") || "", env.RELAY_SECRET))
+    if (misconfigured(env)) return json({ ok: false, error: "relay_misconfigured" }, 503);
+    if (!sameKey(request.headers.get("x-panter-relay-key") || "", env.RELAY_SECRET))
       return json({ ok: false, error: "unauthorized" }, 401);
     const text = await request.text();
     if (new TextEncoder().encode(text).byteLength > MAX_WAKE_BYTES) return json({ ok: false, error: "body_too_large" }, 413);
@@ -93,6 +98,7 @@ export default {
   },
 
   async email(message, env) {
+    if (misconfigured(env)) { message.setReject("relay misconfigured"); return; }
     const from = String(message.from || "").trim().toLowerCase();
     const to = String(message.to || "").trim().toLowerCase();
     if (to !== String(env.RELAY_ADDRESS).toLowerCase()) { message.setReject("unexpected recipient"); return; }

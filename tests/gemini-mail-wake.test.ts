@@ -8,7 +8,8 @@ import { SqliteLedger } from '../src/core/sqlite-ledger.js';
 import { GeminiMailWake, GEMINI_MAIL_RESULT_MARKER, mimeTexts, markedJson } from '../src/core/gemini-mail-wake.js';
 
 before(() => { process.env.PANTER_LEAD_HOST = 'claude'; });
-const env = { PANTER_GEMINI_MAIL_RELAY_URL: 'https://relay.example.com/wake', PANTER_GEMINI_MAIL_RECIPIENT: 'worker@gmail.com' };
+const RELAY_KEY = 'r'.repeat(43);
+const env = { PANTER_GEMINI_MAIL_RELAY_URL: 'https://relay.example.com/wake', PANTER_GEMINI_MAIL_RECIPIENT: 'worker@gmail.com', PANTER_GEMINI_MAIL_RELAY_SECRET: RELAY_KEY };
 
 async function fixture(fn: (ctx: { dir: string; mesh: MeshEngine; sent: any[]; status: { code: number }; listening: { on: boolean }; wake: GeminiMailWake }) => Promise<void>) {
   const dir = await mkdtemp(join(tmpdir(), 'panter-gmail-'));
@@ -191,9 +192,10 @@ test('a shared relay key is sent to the relay and is the only way past the anony
     await wake.dispatchDue();
     assert.equal(headers[0]?.['x-panter-relay-key'], key);
     assert.throws(() => new GeminiMailWake(dir, mesh, () => false, { ...env, PANTER_GEMINI_MAIL_RELAY_SECRET: 'short' }), /32-256/);
-    const open = new GeminiMailWake(dir, mesh, () => false, env);
-    assert.equal(open.requiresRelayKey, false);
-    assert.equal(open.relayAuthorized(key), false);
+    assert.equal(new GeminiMailWake(dir, mesh, () => false, env).relayAuthorized(key), false, 'another key is refused');
+    const { PANTER_GEMINI_MAIL_RELAY_SECRET: _unused, ...noKey } = env;
+    assert.throws(() => new GeminiMailWake(dir, mesh, () => false, noKey), /required with PANTER_GEMINI_MAIL_RELAY_URL/);
+    assert.equal(new GeminiMailWake(dir, mesh, () => false, {}).relayAuthorized(key), false, 'disabled: nothing is authorized');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -207,4 +209,21 @@ test('a ticket stranded mid-send by a restart is retried once its lease expires'
   assert.deepEqual((await wake.dispatchDue()).sent, [work.id]);
   assert.equal(sent.length, 2);
   assert.equal(sent[1].payload.envelope.attempt, 2);
+}));
+
+test('a claim whose ticket was never saved (crash in between) is retried after its lease', () => fixture(async ({ dir, mesh, sent, wake }) => {
+  const work = await delegate(mesh, 'i1');
+  // State left by a crash: the intent and the claim are saved, the ticket is not.
+  const db = SqliteLedger.open(dir);
+  db.mutate('gemini_mail', { version: 1, tickets: [], backoff: [] } as any, (d: any) => { d.intents = [{ workId: work.id, at: Date.now() }]; });
+  db.close();
+  await mesh.claim('gemini', work.id, 3600);
+  assert.deepEqual((await wake.dispatchDue()).sent, [], 'not while the stranded lease may still be live');
+  expire(dir, work.id);
+  assert.deepEqual((await wake.dispatchDue(Date.now() + 3_601_000)).sent, [work.id]);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].payload.envelope.work_id, work.id);
+  const check = SqliteLedger.open(dir);
+  assert.deepEqual(check.read('gemini_mail', {} as any).intents, [], 'a saved ticket clears its intent');
+  check.close();
 }));

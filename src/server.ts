@@ -20,7 +20,7 @@ import { WorkforceEvents, reconcileWorkforceEventOutbox } from './core/workforce
 import { registerWorkforceEventWire } from './core/workforce-event-wire.js';
 import { appWorkforceTurn } from './core/workforce-app-turn.js';
 import { ClaudeRoutineWake } from './core/claude-routine-wake.js';
-import { createServer } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import * as z from 'zod/v4';
@@ -917,9 +917,44 @@ function mailRelayRate(client: string): boolean {
   const now = Date.now();
   const recent = (mailRelayHits.get(client) ?? []).filter(t => now - t < 60_000);
   if (recent.length >= 30) { mailRelayHits.set(client, recent); return false; }
-  recent.push(now); mailRelayHits.set(client, recent);
-  if (mailRelayHits.size > 10_000) mailRelayHits.clear();
+  recent.push(now); mailRelayHits.delete(client); mailRelayHits.set(client, recent);
+  // Evict the least recently seen clients (Map keeps insertion order) instead of resetting everyone.
+  for (const key of mailRelayHits.keys()) { if (mailRelayHits.size <= 10_000) break; mailRelayHits.delete(key); }
   return true;
+}
+let mailRelayKeyWarnAt = 0;
+async function handleMailRelay(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const reply = (status: number, body: unknown) => {
+    if (res.headersSent) return;
+    res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body));
+  };
+  const host = hostname(req.headers.host);
+  if (!host || !(allowedHosts.length ? allowedHosts.includes(host) : ['localhost','127.0.0.1','::1'].includes(host))) { reply(403, { ok: false }); return; }
+  if (!geminiMailWake.configured) { reply(404, { ok: false, error: 'disabled' }); return; }
+  // Only the relay holding the shared key gets through; junk traffic is bounded per client and never read.
+  if (!geminiMailWake.relayAuthorized(req.headers['x-panter-relay-key'])) {
+    let client: string;
+    try { client = rateLimitIdentity(clientAddresses.identify(req)); } catch { reply(400, { ok: false, error: 'invalid_client' }); return; }
+    if (!mailRelayRate(client)) { reply(429, { ok: false, error: 'rate_limited' }); return; }
+    if (Date.now() - mailRelayKeyWarnAt > 60_000) {
+      mailRelayKeyWarnAt = Date.now();
+      console.warn('Gemini mail relay: refused a request without a valid x-panter-relay-key (check RELAY_SECRET on the Worker)');
+    }
+    reply(401, { ok: false, error: 'relay_key_required' }); return;
+  }
+  const chunks: Buffer[] = []; let size = 0;
+  try {
+    for await (const chunk of req) { size += (chunk as Buffer).length; if (size > 450_000) { reply(413, { ok: false }); return; } chunks.push(chunk as Buffer); }
+  } catch { reply(400, { ok: false, error: 'aborted' }); return; } // client hung up mid-body
+  let payload: unknown;
+  try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { reply(400, { ok: false, error: 'invalid_json' }); return; }
+  try {
+    reply(200, req.url === '/a2a/gemini/email-validate'
+      ? geminiMailWake.validateEnvelope((payload as { envelope?: unknown })?.envelope)
+      : await geminiMailWake.acceptResult(payload));
+  } catch (error) {
+    reply(error instanceof MailError ? error.status : 500, { ok: false, error: error instanceof Error ? error.message : 'error' });
+  }
 }
 const http = createServer(async (req, res) => {
   if (req.url === '/health' && req.method === 'GET') {
@@ -932,28 +967,8 @@ const http = createServer(async (req, res) => {
     res.end(JSON.stringify(oauth.protectedResourceMetadata())); return;
   }
   if (req.method === 'POST' && (req.url === '/a2a/gemini/email-validate' || req.url === '/a2a/gemini/email-result')) {
-    const host = hostname(req.headers.host);
-    const reply = (status: number, body: unknown) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
-    if (!host || !(allowedHosts.length ? allowedHosts.includes(host) : ['localhost','127.0.0.1','::1'].includes(host))) { reply(403, { ok: false }); return; }
-    if (!geminiMailWake.configured) { reply(404, { ok: false, error: 'disabled' }); return; }
-    // The relay holding the shared key skips the anonymous budget, so junk traffic can never starve it.
-    if (!geminiMailWake.relayAuthorized(req.headers['x-panter-relay-key'])) {
-      let client: string;
-      try { client = rateLimitIdentity(clientAddresses.identify(req)); } catch { reply(400, { ok: false, error: 'invalid_client' }); return; }
-      if (!mailRelayRate(client)) { reply(429, { ok: false, error: 'rate_limited' }); return; }
-      if (geminiMailWake.requiresRelayKey) { reply(401, { ok: false, error: 'relay_key_required' }); return; }
-    }
-    const chunks: Buffer[] = []; let size = 0;
-    for await (const chunk of req) { size += (chunk as Buffer).length; if (size > 450_000) { reply(413, { ok: false }); return; } chunks.push(chunk as Buffer); }
-    let payload: unknown;
-    try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { reply(400, { ok: false, error: 'invalid_json' }); return; }
-    try {
-      reply(200, req.url === '/a2a/gemini/email-validate'
-        ? geminiMailWake.validateEnvelope((payload as { envelope?: unknown })?.envelope)
-        : await geminiMailWake.acceptResult(payload));
-    } catch (error) {
-      reply(error instanceof MailError ? error.status : 500, { ok: false, error: error instanceof Error ? error.message : 'error' });
-    }
+    // Never let a relay request reject unhandled: Node would terminate the whole MCP server.
+    await handleMailRelay(req, res).catch(() => { if (!res.headersSent) { res.writeHead(500); res.end(); } else res.destroy(); });
     return;
   }
   if (embedded && req.url !== '/mcp') {
