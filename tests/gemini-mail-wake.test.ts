@@ -268,3 +268,27 @@ test('a failed release after a refusal keeps the lease tracked; expiry requeues 
   status.code = 202;
   assert.deepEqual((await wake.dispatchDue()).sent, [work.id]);
 }));
+
+test('a Gemini chat cannot adopt or shorten a task that is in flight by e-mail', () => fixture(async ({ mesh, wake }) => {
+  const work = await delegate(mesh, 'a1');
+  await wake.dispatchDue();
+  await assert.rejects(mesh.claim('gemini', work.id, 300), /not claimable/);
+  assert.equal((await mesh.pickup('gemini', 300)).status, 'EMPTY');
+}));
+
+test('closing undeliverable work as the transport records neither presence nor a rearm', () => fixture(async ({ dir, mesh, status, wake }) => {
+  const work = await delegate(mesh, 'x1');
+  status.code = 400;
+  for (let i = 0; i < 8; i++) {
+    const db = SqliteLedger.open(dir);
+    db.mutate('gemini_mail', { version: 1, tickets: [], backoff: [] } as any, (d: any) => { for (const b of d.backoff ?? []) b.nextAt = 0; });
+    db.close();
+    await wake.dispatchDue();
+  }
+  assert.equal((await mesh.inbox('claude')).works.find(w => w.id === work.id)?.state, 'FAILED');
+  const db = SqliteLedger.open(dir);
+  const m = db.read('mesh', {} as any) as any;
+  db.close();
+  assert.equal(m.workforce?.gemini?.lastReceiptAt, undefined);
+  assert.equal((m.rearmIntents ?? []).some((i: any) => i.workId === work.id), false);
+}));

@@ -21,7 +21,7 @@ export const EFFORT_REQUEST_PATTERN = /^[A-Za-z0-9._-]{1,32}$/;
 export type WorkerExecutionRequest = { serviceTier?: string; stream?: boolean; parallelToolCalls?: boolean; maxNativeSubagents?: number };
 export type WorkExecutionRequest = WorkerExecutionRequest & { status: 'REQUESTED_UNVERIFIED'; model: string; reasoningEffort: string };
 export type MeshMessage = { id: string; missionId: string; from: Host; to: Host; workId: string | null; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' | 'RESULT'; text: string; createdAt: string; inboxRevision: number };
-export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string} };
+export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; transportClaim?: boolean };
 export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
 export type WorkforceTaskBridge = {taskId:string;host:WorkerHost;protocolEra:'2025-11-25'|'2026-07-28';status:'ARMED'|'DELIVERED'|'CANCELLED'|'EXPIRED';createdAt:string;expiresAt:string;workId:string|null};
@@ -797,7 +797,11 @@ export class MeshEngine {
       if(requireQueued)check(w.state==='QUEUED','Work is not claimable');
       const expired = w.state === 'RUNNING' && Date.parse(w.leaseUntil ?? '') <= Date.now();
       check(w.state === 'QUEUED' || w.state === 'RUNNING', 'Work is not claimable');
-      if (w.state === 'RUNNING' && !expired) { check(!requireFree, 'Work is not claimable'); return w; }
+      if (w.state === 'RUNNING' && !expired) {
+        // A live transport claim (task in flight by e-mail) is never adopted: one live copy per task.
+        check(!requireFree && !(w.transportClaim && !transport), 'Work is not claimable');
+        return w;
+      }
       // A lost ACK after an uncertain write cannot authorize an automatic replay.
       if (expired && w.role === 'implementer') {
         w.state = 'OUTCOME_UNKNOWN';
@@ -805,6 +809,7 @@ export class MeshEngine {
         return { ...w, instruction: '', result: null };
       }
       w.state = 'RUNNING'; w.leaseGeneration++; w.attemptId = randomUUID();
+      if (transport) w.transportClaim = true; else delete w.transportClaim;
       // A transport claim (e.g. Panter mailing the task) is not evidence that the worker itself showed up.
       if (caller !== leaderHost() && !transport) {
         const presence = (d.workforce ??= {})[caller as WorkerHost] ??= {};
@@ -859,8 +864,6 @@ export class MeshEngine {
       return {receipt,rearm:{status:'PENDING_RETRY' as const}};
     }
   }
-  /** A transport that claimed read-only work but could not deliver it (e.g. the Gemini mail relay failed
-   *  before any e-mail left) returns it to the queue. Fenced to the exact attempt; never for writers. */
   /** Read-only work of one worker whose lease ran out goes back to the queue (fencing out the old attempt).
    * Writers are never touched: their expiry is OUTCOME_UNKNOWN territory. */
   async requeueExpiredReadOnly(host: Host) {
@@ -870,18 +873,20 @@ export class MeshEngine {
     if ((await this.read(d => due(d).length)) === 0) return [];
     return this.write(d => {
       const ids: string[] = [];
-      for (const w of due(d)) { w.state = 'QUEUED'; w.attemptId = null; w.leaseUntil = null; ids.push(w.id); }
+      for (const w of due(d)) { w.state = 'QUEUED'; w.attemptId = null; w.leaseUntil = null; delete w.transportClaim; ids.push(w.id); }
       if (ids.length) { this.notify(d, host); this.notify(d, leaderHost()); }
       return ids;
     });
   }
+  /** A transport that claimed read-only work but could not deliver it (e.g. the Gemini mail relay failed
+   *  before any e-mail left) returns it to the queue. Fenced to the exact attempt; never for writers. */
   async releaseUnsentClaim(caller: Host, id: string, attemptId: string, generation: number) {
     check(caller!==leaderHost(),'Only workers may release delegated work');
     return this.write(d => {
       const w = d.works.find(w => w.id === id && w.target === caller);
       check(w && w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
       check(w.role !== 'implementer', 'Writer claims are never released automatically');
-      w.state = 'QUEUED'; w.attemptId = null; w.leaseUntil = null;
+      w.state = 'QUEUED'; w.attemptId = null; w.leaseUntil = null; delete w.transportClaim;
       this.notify(d, caller);
       return {workId:w.id,state:w.state};
     });
@@ -892,12 +897,13 @@ export class MeshEngine {
       const w = d.works.find(w => w.id === id && w.target === caller);
       check(w && w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
       check(Date.parse(w.leaseUntil!) > Date.now(), 'Lease expired');
+      check(!w.transportClaim, 'Work is held by a transport');
       check(leaseSeconds >= 30 && leaseSeconds <= 3600, 'Invalid lease');
       w.leaseUntil = new Date(Date.now() + leaseSeconds * 1000).toISOString();
       return w;
     });
   }
-  async complete(caller: Host, id: string, attemptId: string, generation: number, result: string, success = true) {
+  async complete(caller: Host, id: string, attemptId: string, generation: number, result: string, success = true, transport = false) {
     check(caller!==leaderHost(),'Only workers may complete delegated work');
     check(result.length <= 50000, 'Result too long');
     return this.write(d => {
@@ -912,15 +918,16 @@ export class MeshEngine {
       check(w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
       check(Date.parse(w.leaseUntil!) > Date.now(), 'Lease expired');
       w.state = success ? 'COMPLETED' : 'FAILED'; w.result = result; w.receiptDigest = digest;
-      w.completedAt = iso(); w.leaseUntil = null;
-      if (caller !== leaderHost()) {
+      w.completedAt = iso(); w.leaseUntil = null; delete w.transportClaim;
+      // A transport closing work it could not deliver is not a receipt from the worker.
+      if (caller !== leaderHost() && !transport) {
         const presence = (d.workforce ??= {})[caller as WorkerHost] ??= {};
         presence.lastReceiptAt = w.completedAt;
       }
       const revision = this.notify(d, leaderHost());
       // Only the receipt pointer enters the inbox, never worker result text.
       d.messages.push({ id: randomUUID(), missionId: w.missionId, from: caller, to: leaderHost(), workId: id, kind: 'RESULT', text: JSON.stringify({workId:id,state:w.state,receiptDigest:digest,resultAvailable:true}), createdAt: iso(), inboxRevision: revision });
-      if(caller!==leaderHost()&&!(d.rearmIntents??[]).some(x=>x.workId===id))
+      if(caller!==leaderHost()&&!transport&&!(d.rearmIntents??[]).some(x=>x.workId===id))
         (d.rearmIntents??=[]).push({workId:id,host:caller as WorkerHost,status:'PENDING',createdAt:iso()});
       // Compact terminal receipt: result remains in SQLite for GPT-A.
       return {workId:w.id,state:w.state,receiptDigest:w.receiptDigest,completedAt:w.completedAt,

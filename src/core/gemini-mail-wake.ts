@@ -38,7 +38,7 @@ export type MailMesh={
   pending(host:'gemini'):Promise<Array<{workId:string;role:string;createdAt:string}>>;
   claim(host:'gemini',workId:string,leaseSeconds:number,requireQueued:boolean,requireFree:boolean,transport:boolean):Promise<MailClaim>;
   requeueExpiredReadOnly(host:'gemini'):Promise<string[]>;
-  complete(host:'gemini',id:string,attemptId:string,generation:number,result:string,success:boolean):Promise<unknown>;
+  complete(host:'gemini',id:string,attemptId:string,generation:number,result:string,success:boolean,transport?:boolean):Promise<unknown>;
   releaseUnsentClaim(host:'gemini',id:string,attemptId:string,generation:number):Promise<unknown>;
 };
 export type RelaySender=(url:string,body:string,headers:Record<string,string>)=>Promise<number>;
@@ -134,7 +134,7 @@ export class GeminiMailWake{
     if(work.state!=='RUNNING'||!work.attemptId||!work.leaseUntil||work.role==='implementer')return false;
     if(attempt>MAX_ATTEMPTS){
       await this.mesh.complete('gemini',workId,work.attemptId,work.leaseGeneration,
-        `Gemini mail relay: no reply after ${MAX_ATTEMPTS} e-mailed attempts; Gemini did not complete this task.`,false);
+        `Gemini mail relay: ${MAX_ATTEMPTS} attempts to hand this task to Gemini by e-mail got no valid reply; Gemini did not complete it.`,false,true);
       return false;
     }
     const token=randomBytes(32).toString('base64url');
@@ -144,7 +144,9 @@ export class GeminiMailWake{
     const ticket:Ticket={workId,attemptId:work.attemptId,leaseGeneration:work.leaseGeneration,tokenHash:sha(token),
       instructionDigest:sha(work.instruction),envelopeDigest:sha(canonical(envelope)),validatedAt:null,
       expiresAt:work.leaseUntil,createdAt:iso(now),sentAt:null,usedAt:null,attempt};
-    this.db!.mutate('gemini_mail',seed,d=>{d.tickets.push(ticket);d.tickets=d.tickets.slice(-5000);});
+    // Keep tickets only while they can still matter (a late reply is answered with 409 for a week).
+    const horizon=now-7*24*3600_000;
+    this.db!.mutate('gemini_mail',seed,d=>{d.tickets=d.tickets.filter(t=>Date.parse(t.expiresAt)>horizon).slice(-4999);d.tickets.push(ticket);});
     let status=0;
     try{
       status=await this.sender(this.relayUrl,JSON.stringify({version:GEMINI_MAIL_ENVELOPE_VERSION,
@@ -164,7 +166,7 @@ export class GeminiMailWake{
     const refusals=((data:MailData)=>(data.backoff??[]).find(b=>b.workId===workId)?.attempts??0)(this.db!.read('gemini_mail',seed))+1;
     if(refusals>=REFUSAL_LIMIT){
       await this.mesh.complete('gemini',workId,work.attemptId,work.leaseGeneration,
-        `Gemini mail relay refused this task ${refusals} times (last HTTP ${status}); it was not delivered to Gemini.`,false).catch(()=>{});
+        `Gemini mail relay refused this task ${refusals} times (last HTTP ${status}); it was not delivered to Gemini.`,false,true).catch(()=>{});
       this.db!.mutate('gemini_mail',seed,d=>{d.backoff=(d.backoff??[]).filter(b=>b.workId!==workId);});
       return false;
     }

@@ -17,7 +17,8 @@ Reglas:
 - `PANTER_GEMINI_MAIL_RELAY_SECRET` es **obligatoria**: Panter y el Worker comparten esa clave en la cabecera `x-panter-relay-key`. El Worker la exige a quien le pide enviar y la manda a Panter; Panter rechaza (401) sin leer el cuerpo a quien no la tenga y registra una advertencia. Las peticiones sin clave pasan antes por un límite anónimo de 30/min por cliente (IPv6 agrupado por /64), así que tráfico basura no puede agotar el cupo del relay real. Si el cliente corta la conexión a mitad del cuerpo, Panter responde 400 y sigue vivo.
 - Detrás de un proxy o túnel, sin `PANTER_TRUSTED_PROXY_CIDRS` todos los clientes anónimos comparten la IP del proxy; la clave compartida hace que eso no afecte al relay. Si usas `docs/nginx-panter.conf.example`, `/a2a/gemini/` sale por `location /`.
 - La recuperación no depende de la contabilidad del relay: en cada pasada Panter devuelve a la cola toda tarea de solo lectura de Gemini cuyo lease venció (correo sin respuesta, caída a mitad del envío, error transitorio, chat que desapareció). Ninguna tarea queda RUNNING más allá de su lease.
-- Reclamar una tarea para mandarla por correo no cuenta como que Gemini esté presente.
+- Reclamar una tarea para mandarla por correo (o cerrarla como fallida porque no se pudo entregar) no cuenta como que Gemini esté presente ni crea un rearm.
+- Mientras una tarea está en vuelo por correo, ningún chat de Gemini puede tomarla ni renovar ese lease: una sola copia viva por tarea. Si el chat la quiere, la toma cuando el lease venza y vuelva a la cola.
 - Si el relay rechaza la misma tarea 8 veces seguidas, se cierra como fallida en vez de reintentar para siempre.
 - Si Panter se está reiniciando, el Worker reintenta entregar la respuesta de Gemini unos segundos antes de rebotarla.
 - Si un chat de Gemini está escuchando y una tarea enviada por correo venció, vuelve a la cola para que la tome ese chat.

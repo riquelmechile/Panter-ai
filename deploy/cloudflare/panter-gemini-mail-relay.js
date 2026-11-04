@@ -67,7 +67,8 @@ export default {
     if (request.method === "GET" && url.pathname === "/health")
       return json({ ok: true, service: "panter-gemini-mail-relay" });
     if (request.method !== "POST" || url.pathname !== "/wake") return json({ ok: false, error: "not_found" }, 404);
-    if (misconfigured(env)) return json({ ok: false, error: "relay_misconfigured" }, 503);
+    // 424: nothing was sent, so Panter treats it as a definitive refusal (backoff), not an unknown outcome.
+    if (misconfigured(env)) return json({ ok: false, error: "relay_misconfigured" }, 424);
     if (!sameKey(request.headers.get("x-panter-relay-key") || "", env.RELAY_SECRET))
       return json({ ok: false, error: "unauthorized" }, 401);
     const text = await request.text();
@@ -79,11 +80,12 @@ export default {
         typeof e !== "object" || !UUID.test(String(e.work_id)) || typeof e.instruction !== "string")
       return json({ ok: false, error: "invalid_envelope" }, 400);
     // Only Panter decides what may be mailed: it must recognise this exact envelope.
-    const check = await fetch(`${env.PANTER_BASE_URL}/a2a/gemini/email-validate`, {
+    let check;
+    try { check = await fetch(`${env.PANTER_BASE_URL}/a2a/gemini/email-validate`, {
       method: "POST", redirect: "manual",
       headers: panterHeaders(env),
       body: JSON.stringify({ envelope: e }),
-    });
+    }); } catch { return json({ ok: false, error: "panter_unreachable" }, 424); }
     let verdict = null;
     try { verdict = await check.json(); } catch { verdict = null; }
     if (!check.ok || verdict?.ok !== true || verdict?.work_id !== e.work_id)
@@ -117,6 +119,8 @@ export default {
         });
         if (response.ok) return;
         last = `HTTP ${response.status}`;
+        // A retry after a delivery that did get through: Panter already has this result.
+        if (response.status === 409 && /already accepted/i.test(await response.text().catch(() => ""))) return;
         if (response.status < 500) break; // a definitive refusal: do not retry
       } catch { last = "unreachable"; }
     }
