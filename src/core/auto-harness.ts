@@ -187,7 +187,25 @@ export class AutomaticHarness {
     const assigned=await this.mesh.specialistBindings();
     const hosts=reviewRoles(kind).map(id=>assigned.find(x=>x.agentId===id)?.host);
     if(!hosts.every(h=>!!h&&runtime.peerStates?.[h]==='CONNECTED'))return false;
-    return kind==='4r'||new Set(hosts).size===hosts.length;
+    // The mesh refuses a lens on a host without the reviewer role; that review must run native, not fail every tick.
+    const profiles=await this.mesh.profiles();
+    if(!hosts.every(h=>profiles.some(p=>p.host===h&&p.roles.includes('reviewer'))))return false;
+    if(kind==='4r')return true;
+    // Judgment Day can only pass with blind judges on distinct hosts, none of which wrote code (Panter-RDD attests
+    // neither); otherwise its native review, which the runner can sign, is the one that can pass.
+    if(new Set(hosts).size!==hosts.length)return false;
+    const authors=await this.mesh.authorHosts();
+    return !hosts.some(h=>authors.includes(h!));
+  }
+  /** Stop a remote review that will never be read (its candidate was corrected): withdraw its unstarted lenses and
+   * revoke what its lenses were granted. */
+  private async retireRemoteReview(reviewId:string){
+    const review=await this.mesh.reviewStatus(leaderHost(),reviewId).catch(()=>null);
+    for(const w of review?.work??[]){
+      if(w.state!=='QUEUED'&&w.state!=='RUNNING')continue;
+      if(w.state==='QUEUED')await this.mesh.withdrawUnstarted(leaderHost(),w.workId,'candidate corrected; this review is no longer read').catch(()=>null);
+      try{await this.hooks.abandoned?.({workId:w.workId,host:w.host});}catch{/* best effort */}
+    }
   }
   private async startRemoteReview(record:HarnessRun,phase:ReviewPhase,kind:ReviewKind){
     const slot=reviewSlots[phase];
@@ -385,7 +403,9 @@ export class AutomaticHarness {
     ensure(Array.isArray(payload.evidence)&&payload.evidence.length>0&&payload.evidence.length<=30&&
       payload.evidence.every(x=>typeof x==='string'&&x.trim()&&x.length<=1000),'Correction evidence required');
     if(!(await this.activeWriteGrant(runId,(await this.get(runId))?.paths??[])))throw new Error('Active operator grant required for correction');
-    return this.write(s=>{const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');
+    // Remote review sessions this correction drops: their lenses are stopped once the write succeeded.
+    let retired:string[]=[];
+    const corrected=await this.write(s=>{const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');
       ensure(r.revision===expectedRevision,'Stale correction revision');
       ensure(r.permission==='WRITE_APPROVED'&&r.paths.length>0,'Correction is not authorized within a scoped writable run');
       ensure((r.correctionAttempts??0)<2,'Correction attempt budget exhausted');
@@ -393,6 +413,7 @@ export class AutomaticHarness {
       const review=r.steps.find(st=>st.phase==='REVIEW');const judgment=r.steps.find(st=>st.phase==='JUDGMENT');
       ensure(review||judgment,'No review requiring correction');
       ensure(!review||review.status!=='COMPLETE'||(!!judgment&&judgment.status!=='COMPLETE'&&!!r.judgmentId),'Closed review cannot be silently rewritten');
+      retired=[r.reviewTransport==='REMOTE'?r.reviewId:null,r.judgmentTransport==='REMOTE'?r.judgmentId:null].filter((x):x is string=>!!x);
       r.previousReviewId=r.reviewId;
       r.candidateSha=payload.candidateSha;r.reviewId=null;r.reviewTransport=null;r.judgmentId=null;r.judgmentTransport=null;
       r.correctionAttempts=(r.correctionAttempts??0)+1;r.correctionRunId=payload.runId;r.reviewEvidenceRetries=0;r.judgmentEvidenceRetries=0;
@@ -401,6 +422,8 @@ export class AutomaticHarness {
         step.status='PENDING';step.execution=undefined;step.remoteWorkId=undefined;step.result=undefined;
       }
       r.revision++;return r;});
+    for(const id of retired)await this.retireRemoteReview(id);
+    return corrected;
   }
 
   /** GPT-A derives independent work units from the design; the user never picks agents.
