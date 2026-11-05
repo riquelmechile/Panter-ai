@@ -123,6 +123,9 @@ const REFUSED_TWICE = 'the server refused Panter\'s token (401), and a freshly i
 /** An access token Panter can redact without damaging a result's JSON. */
 const ACCESS_TOKEN = /^[\x21\x23-\x5b\x5d-\x7e]{16,8192}$/;
 const TOKEN_KEEP_MIN_MS = 86_400_000, MAX_ISSUED_TOKENS = 1000;
+/** A failed token request; `requestId` is the same for every caller that waited on that one request. */
+class TokenRequestError extends Error { constructor(message: string, readonly requestId: string) { super(message); } }
+const TOKEN_RETRY_MS = 10_000;
 /** An error whose message is already safe to show and store (cleaned, or withheld for a sensitive server). */
 class SafeError extends Error {}
 /** After a failed tool-list fetch, calls fail fast (closed) for this long before Panter asks again. */
@@ -211,7 +214,9 @@ type ServerState = {
   /** Calls inside guarded() right now. */
   activeCalls: Set<string>;
   /** OAuth: the current access token and when to renew it, and the request already getting one. */
-  oauthToken: { value: string; renewAt: number } | null; oauthFetch: Promise<string> | null;
+  oauthToken: { value: string; renewAt: number; expiresAt: number } | null; oauthFetch: Promise<string> | null;
+  /** After a failed renewal, when Panter asks again (meanwhile a still-valid token keeps being used). */
+  oauthRetryAt: number;
   /** Every token issued for this server and when it really expires: a call that started with an older token can
    * still echo it after a renewal, so it stays redacted until it is dead. */
   oauthIssued: Map<string, number>;
@@ -224,7 +229,7 @@ export class DownstreamGateway {
   private readonly servers = new Map<string, ServerState>();
   constructor(configs: DownstreamConfig[], private readonly db: SqliteLedger | null,
     private readonly env: Record<string, string | undefined> = process.env, private readonly now: () => number = Date.now) {
-    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null, refreshFailedMs: 0, refreshError: null, cutCalls: new Set(), readCalls: new Set(), callFailures: new Map(), countedCauses: new Set(), activeCalls: new Set(), oauthToken: null, oauthFetch: null, oauthIssued: new Map() });
+    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null, refreshFailedMs: 0, refreshError: null, cutCalls: new Set(), readCalls: new Set(), callFailures: new Map(), countedCauses: new Set(), activeCalls: new Set(), oauthToken: null, oauthFetch: null, oauthRetryAt: 0, oauthIssued: new Map() });
     // Load the sensitive missions now, so the checks other stores run inside their own transactions read no database.
     if (this.db) this.sensitiveSet();
   }
@@ -251,13 +256,29 @@ export class DownstreamGateway {
   }
   /** OAuth client credentials: a cached access token, renewed a minute before it expires (or when refused). */
   private async oauthToken(s: ServerState): Promise<string> {
+    const now = this.now(), current = s.oauthToken;
+    if (current && now < current.renewAt) return current.value;
+    // Renewing early must not cost a token that still works: while the last renewal failed recently, or if this one
+    // fails, the current token is used until it really expires.
+    const stillValid = () => !!s.oauthToken && s.oauthToken === current && this.now() < current.expiresAt;
+    if (stillValid() && now < s.oauthRetryAt) return current!.value;
+    try { return await this.requestToken(s); }
+    catch (error) {
+      s.oauthRetryAt = this.now() + TOKEN_RETRY_MS;
+      if (stillValid()) return current!.value;
+      throw error;
+    }
+  }
+  /** One token request shared by every caller that needs it. Its failure carries the request's id, so callers that
+   * failed on the same request count once toward the circuit breaker. */
+  private requestToken(s: ServerState): Promise<string> {
     const o = s.config.oauth!;
-    if (s.oauthToken && this.now() < s.oauthToken.renewAt) return s.oauthToken.value;
     if (s.oauthFetch) return s.oauthFetch;
     const id = this.env[o.clientIdEnv]!, secret = this.env[o.clientSecretEnv]!;
     for (const [t, until] of s.oauthIssued) if (until <= this.now()) s.oauthIssued.delete(t);
     // So many renewals mean something is wrong; refusing keeps every issued token redacted.
-    if (s.oauthIssued.size >= MAX_ISSUED_TOKENS) return Promise.reject(new Error(`${MAX_ISSUED_TOKENS} tokens issued are still alive; Panter asks for no more until some expire`));
+    if (s.oauthIssued.size >= MAX_ISSUED_TOKENS) return Promise.reject(new TokenRequestError(`${MAX_ISSUED_TOKENS} tokens issued are still alive; Panter asks for no more until some expire`, 'cap'));
+    const requestId = randomUUID();
     s.oauthFetch = (async () => {
       const body = new URLSearchParams({ grant_type: 'client_credentials' });
       if (o.scope) body.set('scope', o.scope);
@@ -279,13 +300,15 @@ export class DownstreamGateway {
       const told = Number.isFinite(expiresIn) && expiresIn > 0;
       const life = told ? expiresIn * 1000 : 300_000;
       const now = this.now();
-      s.oauthToken = { value: json.access_token, renewAt: now + Math.max(life - 60_000, life / 2) };
+      s.oauthToken = { value: json.access_token, renewAt: now + Math.max(life - 60_000, life / 2), expiresAt: now + life };
+      s.oauthRetryAt = 0;
       // Kept redacted until it expires plus the longest call (and a minute of clock leeway); when the server does not
       // say how long it lives, at least a day. A token is never forgotten early: the cap is checked before asking.
       const keep = told ? life + 60_000 : TOKEN_KEEP_MIN_MS;
       s.oauthIssued.set(json.access_token, now + keep + s.config.timeoutMs);
       return json.access_token as string;
-    })().finally(() => { s.oauthFetch = null; });
+    })().catch(error => { throw new TokenRequestError(error instanceof Error ? error.message : String(error), requestId); })
+      .finally(() => { s.oauthFetch = null; });
     return s.oauthFetch;
   }
   private connect(s: ServerState): Promise<Client> {
@@ -307,9 +330,12 @@ export class DownstreamGateway {
         const failCall = (message: string, cause: string) => { const id = callIdOf(init?.body); if (id && s.activeCalls.has(id)) s.callFailures.set(id, { message, cause }); };
         const send = async () => {
           let used: string;
-          const pending = s.oauthFetch;
           try { used = await this.oauthToken(s); }
-          catch (error) { failCall(`no OAuth token: ${clean(error, this.secrets(s))}`, `token-request:${pending ? 'shared' : randomUUID()}:${clean(error)}`); throw error; }
+          catch (error) {
+            const request = error instanceof TokenRequestError ? error.requestId : randomUUID();
+            failCall(`no OAuth token: ${clean(error, this.secrets(s))}`, `token-request:${request}`);
+            throw error;
+          }
           const headers = new Headers(init?.headers);
           headers.set('authorization', `Bearer ${used}`);
           return { used, res: await limited(url, { ...init, headers }) };

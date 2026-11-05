@@ -897,6 +897,29 @@ test('OAuth: a long-lived token stays redacted for its whole life, expires_in gi
   } finally { await w.done(); await te.close(); }
 });
 
+test('OAuth: a failed renewal keeps using the token that still works; one failed request counts once', async () => {
+  let down = false;
+  const te = await tokenEndpoint(() => down ? { status: 500 } : { access_token: TOKEN, expires_in: 3600 });
+  const w = await world({ tokenEnv: null, oauth: oauthOf(te.url) }, OAUTH_ENV);
+  try {
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok');
+    const st = (w.gw as any).servers.get('shop');
+    // Past the renewal time, before expiry, with the token endpoint down: calls keep working with the current token.
+    down = true;
+    w.advance(3_550_000);
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A2' })), 'lookup ok');
+    assert.equal(te.seen.length, 2, 'one renewal attempt');
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A3' })), 'lookup ok');
+    assert.equal(te.seen.length, 2, 'no new attempt right after a failed one');
+    // Once it has expired, calls that waited on one failed request count one failure together.
+    w.advance(60_000);
+    const failed = await Promise.all(['B1', 'B2', 'B3'].map(sku => w.gw.call(claude, 'shop', 'lookup', { sku })));
+    assert.ok(failed.every(r => /no OAuth token: token endpoint answered 500/.test(text(r))), failed.map(text).join(' | '));
+    assert.equal(te.seen.length, 3, 'one shared request');
+    assert.equal(st.failures, 1);
+  } finally { await w.done(); await te.close(); }
+});
+
 test('OAuth: an oversized token endpoint answer is refused without being buffered', async () => {
   const te = await tokenEndpoint(() => ({ access_token: TOKEN, pad: 200_000 }));
   const w = await world({ tokenEnv: null, oauth: oauthOf(te.url) }, OAUTH_ENV);
