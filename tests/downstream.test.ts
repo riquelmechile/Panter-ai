@@ -773,6 +773,56 @@ test('OAuth: issued tokens are never forgotten early; past the cap Panter asks f
   } finally { await w.done(); await te.close(); }
 });
 
+test('OAuth: a short-lived token is remembered only as long as it lives', async () => {
+  let n = 0;
+  const te = await tokenEndpoint(() => ({ access_token: `issued-token-${++n}-0123456789`, expires_in: 60 }));
+  const w = await world({ tokenEnv: null, oauth: oauthOf(te.url) }, OAUTH_ENV);
+  try {
+    w.ds.setAccepts(a => /^Bearer issued-token-\d+-0123456789$/.test(a));
+    const issued = (w.gw as any).servers.get('shop').oauthIssued as Map<string, number>;
+    for (let i = 0; i < 6; i++) {
+      assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: `A${i}` })), 'lookup ok');
+      w.advance(61_000);
+    }
+    assert.equal(te.seen.length, 6, 'renewed on schedule');
+    assert.ok(issued.size <= 3, `only tokens that may still be alive are kept (kept ${issued.size})`);
+  } finally { await w.done(); await te.close(); }
+});
+
+test('OAuth: repeated refused writes open the circuit instead of asking for tokens without end', async () => {
+  let n = 0;
+  const te = await tokenEndpoint(() => ({ access_token: `issued-token-${++n}-0123456789`, expires_in: 3600 }));
+  const w = await world({ tokenEnv: null, oauth: oauthOf(te.url) }, OAUTH_ENV);
+  try {
+    w.ds.setAccepts(a => /^Bearer issued-token-\d+-0123456789$/.test(a));
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok');
+    const g = w.gw.grant({ server: 'shop', tools: '*', host: 'claude', ttlSeconds: 600, uses: 10, reason: 'repricing' });
+    w.ds.setAccepts(() => false);
+    const out: string[] = [];
+    for (let i = 0; i < 5; i++) out.push(text(await w.gw.call(claude, 'shop', 'set_price', { sku: 'A1', price: i }, g.id)));
+    assert.equal(out.filter(x => /refused Panter's token/.test(x)).length, 3);
+    assert.ok(out.slice(3).every(x => /circuit open/.test(x)), out.join(' | '));
+    assert.ok(te.seen.length <= 4, `token requests stay bounded (${te.seen.length})`);
+    assert.notEqual(w.gw.status(claude)[0]!.state, 'OK');
+  } finally { await w.done(); await te.close(); }
+});
+
+test('OAuth: a 401 that arrives after its call timed out leaves nothing behind', async () => {
+  let n = 0;
+  const te = await tokenEndpoint(() => ({ access_token: `issued-token-${++n}-0123456789`, expires_in: 3600 }));
+  const w = await world({ tokenEnv: null, oauth: oauthOf(te.url), timeoutMs: 1000 }, OAUTH_ENV);
+  try {
+    w.ds.setAccepts(a => /^Bearer issued-token-\d+-0123456789$/.test(a));
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok');
+    const g = w.gw.grant({ server: 'shop', tools: '*', host: 'claude', ttlSeconds: 600, uses: 2, reason: 'repricing' });
+    w.ds.setAccepts(a => a !== 'Bearer issued-token-1-0123456789' && /^Bearer issued-token-\d+-0123456789$/.test(a), () => 1500);
+    assert.match(text(await w.gw.call(claude, 'shop', 'set_price', { sku: 'A1', price: 5 }, g.id)), /timed out/);
+    await new Promise(r => setTimeout(r, 800)); // the late 401 arrives
+    const st = (w.gw as any).servers.get('shop');
+    assert.deepEqual([st.authRefused.size, st.readCalls.size, st.cutCalls.size, st.activeCalls.size], [0, 0, 0, 0]);
+  } finally { await w.done(); await te.close(); }
+});
+
 test('OAuth: an oversized token endpoint answer is refused without being buffered', async () => {
   const te = await tokenEndpoint(() => ({ access_token: TOKEN, pad: 200_000 }));
   const w = await world({ tokenEnv: null, oauth: oauthOf(te.url) }, OAUTH_ENV);
