@@ -265,6 +265,23 @@ test('end to end: the built server mounts a downstream server for the hosts its 
     const st = JSON.parse(text(await lead.callTool({ name: 'panter_downstream_status', arguments: {} })));
     assert.equal(st.servers[0].state, 'OK');
     assert.equal(ds.seen.length, 1, 'only the allowed read reached the downstream server');
+    // The same calls through the panter_admin router, which every host lists (no connector reload after a new mount).
+    const viaAdmin = (h: Client, args: Record<string, unknown>) => h.callTool({ name: 'panter_admin', arguments: { operation: 'downstream_call', arguments: args } });
+    assert.equal(text(await viaAdmin(lead, { server: 'shop', operation: 'lookup', arguments: { sku: 'A2' } })), 'lookup ok');
+    assert.equal(JSON.parse(text(await viaAdmin(lead, { server: 'shop', operation: 'index' }))).server, 'shop');
+    assert.match(text(await viaAdmin(lead, { server: 'shop', operation: 'set_price', arguments: { sku: 'A1', price: 2 } })), /needs a grantId/);
+    assert.match(text(await viaAdmin(lead, { server: 'nope', operation: 'index' })), /No downstream server "nope" for you; you may use: shop/);
+    // For a host that may not use it, a configured server answers exactly like a missing one (no probing names).
+    const auditSize = async () => (JSON.parse(text(await lead.callTool({ name: 'panter_downstream_audit', arguments: {} }))).refusedWithoutAccess as any[])
+      .find(r => r.host === 'grok' && r.server === 'shop')?.refused ?? 0;
+    const before = await auditSize();
+    const refused = text(await viaAdmin(grokClient, { server: 'shop', operation: 'lookup', arguments: { sku: 'A1' } }));
+    const missing = text(await viaAdmin(grokClient, { server: 'nope', operation: 'lookup', arguments: { sku: 'A1' } }));
+    assert.equal(refused.replace('shop', 'X'), missing.replace('nope', 'X'));
+    assert.ok(!missing.includes('shop'), 'names only servers the caller may use');
+    assert.equal(await auditSize(), before + 1, 'the refused probe of a real server is still audited');
+    assert.ok((await grokClient.listTools()).tools.some(t => t.name === 'panter_downstream_call'), 'listed flat for workers; the leader reaches it through panter_admin');
+    assert.equal(ds.seen.length, 2, 'only the second allowed read reached the downstream server');
   } finally {
     for (const c of clients) await c.close().catch(() => undefined);
     proc.kill('SIGTERM'); await ds.close(); await rm(dir, { recursive: true, force: true });
