@@ -2,6 +2,8 @@ import { leaderHost, leaderLabel, appEventHosts, freezeLeaderHost, leaderPolicyP
 import { ExternalOAuthVerifier, staticBearerMatch } from './core/oauth.js';
 import { isAdminPrincipal, parseOwnerTrustedHosts } from './core/owner-trust.js';
 import { createToolSurface, type SurfaceRole } from './core/tool-surface.js';
+import { DownstreamGateway, parseDownstreamConfig, routerFor } from './core/downstream.js';
+import { SqliteLedger } from './core/sqlite-ledger.js';
 import { EmbeddedOAuth } from './core/embedded-oauth.js';
 import { openEngramBridge } from './core/engram-runtime.js';
 import { readFile, chmod, mkdir, lstat, unlink } from 'node:fs/promises';
@@ -104,6 +106,14 @@ for (const line of await adoptPendingLeaderPhases(mesh, agents)) console.error(l
 const workforceLongPoll = new WorkforceLongPoll(mesh);
 // GitHub for workers: the operator token stays server-side (PANTER_GITHUB_WORKFORCE_TOKEN), never in repo or packets.
 const githubWorkforce = new GitHubWorkforce(dataDir, mesh, leaderHost);
+// Downstream MCP servers mounted behind Panter (docs/DOWNSTREAM_MCP.md). Off unless PANTER_DOWNSTREAM_CONFIG names a file.
+const downstreamConfig = process.env.PANTER_DOWNSTREAM_CONFIG;
+const downstream = new DownstreamGateway(downstreamConfig ? parseDownstreamConfig(await readFile(downstreamConfig, 'utf8'), HOSTS) : [],
+  downstreamConfig ? SqliteLedger.open(dataDir) : null);
+if (downstream.configured) {
+  const refresh = () => downstream.refreshAll().then(r => { for (const x of r) if ('error' in x) console.error(`Downstream ${x.server}: ${x.error}`); });
+  void refresh(); setInterval(refresh, 10 * 60_000).unref();
+}
 const grokRoutineWake = new GrokRoutineWake();
 const claudeRoutineWake = new ClaudeRoutineWake();
 const workforceEvents = new WorkforceEvents(dataDir);
@@ -246,6 +256,7 @@ const handler = createMcpHandler(reqCtx => {
   const server = new McpServer({ name: 'panter-ai', version: packageVersion }, {
     capabilities: { resources: { subscribe: true }, events: {} } as any,
     instructions: `Panter-ai is a host-operated development harness with NO provider inference. ${leaderLabel()} is the coordinator. For a new user development request start with panter_harness_start (goal + permitted work and observed facts, NEVER ask the user to pick agents, roles, skills or review lenses). Then call panter_harness_tick and execute the returned phase automatically with host tools or native subagents; call panter_harness_report after observing actual results, and repeat until blocked by actual authorization/evidence or completed. The server automatically selects ODD discovery, planning, scoped implementation, independent verification and 4R by risk; Judgment Day only when explicitly requested. An initial Agent Studio preference may bind model/host but never requires per-task specialist selection. GPT_A_ONLY forbids remote delegation while preserving maximum requested model/effort, fast native worker processing, and maximum safe host-observed parallelism. If no remote peer is connected continue with ${leaderLabel()} native/inline. The host owns model selection and subagent execution; claims of model, effort, speed or children are REQUESTED, not verified. Do not misstate packet preparation as subagent execution. Panter-RDD is an independently implemented SHA-bound review gate, not the official Gentle AI Go controller; human delivery authorization remains separate. Do not merge or deploy without separately authorized tools and exact-candidate proof. Every Panter tool is also reachable through its domain router (panter_harness, panter_review, panter_mesh, panter_workforce, panter_github, panter_memory, panter_catalog, panter_admin): call it with operation "index" to see its operations. Tools not listed for your role are still callable, by name or through their router, with their usual authorization.`
+      + (downstream.configured ? ` Downstream MCP servers you may use appear as panter_ds_<name> routers (operation "index" first); see panter_downstream_status.` : '')
       + connectionContract(principal()),
 
   });
@@ -988,6 +999,49 @@ const handler = createMcpHandler(reqCtx => {
       return {contents:[{uri:uri.toString(),mimeType:'application/json',text:JSON.stringify(summary)}]};
     });
   }
+  // Downstream MCP servers: one router per server, listed for the hosts its config allows (and the operator).
+  const dsCaller = () => ({ id: principal(), operator: principal() === 'admin' });
+  const requireOperator = () => { if (principal() !== 'admin') throw new Error('Operator (admin socket or admin token) required'); };
+  const requireLeaderOrOperator = () => { if (principal() !== 'admin' && principal() !== leaderHost()) throw new Error(`${leaderLabel()} or operator required`); };
+  for (const name of downstream.names()) {
+    surface.external(routerFor(name), {
+      description: `Downstream MCP server "${name}" through Panter's gateway. Operation "index" lists its tools and whether each is read, write or destructive (arguments {"operation":"<tool>"} for one tool's input schema); then operation "<tool>" with that tool's arguments (a tool that is itself called "index" is operation "@index"). Write and destructive tools may need a grantId from the operator (panter_downstream_grant). Calls are audited.`,
+      inputSchema: z.object({ operation: z.string().trim().min(1).max(64), arguments: z.record(z.string(), z.unknown()).optional(), grantId: z.uuid().optional() }).strict(),
+      annotations: { readOnlyHint: false },
+    }, async (x: { operation: string; arguments?: Record<string, unknown>; grantId?: string }) => {
+      const caller = dsCaller();
+      // A caller that may not use this server is refused (and audited) by the gateway itself, index included.
+      if (!downstream.allowed(caller, name)) return downstream.call(caller, name, x.operation, {}, undefined);
+      if (x.operation === 'index') return execute(async () => {
+        if (!downstream.tools(name).length) await downstream.refresh(name);
+        const tools = downstream.tools(name);
+        const one = typeof x.arguments?.operation === 'string' ? tools.find(t => t.name === x.arguments!.operation) : undefined;
+        if (x.arguments?.operation !== undefined && !one) throw new Error(`Unknown tool on ${name}`);
+        return one ? { server: name, operation: one.name, class: one.cls, description: one.description, inputSchema: one.inputSchema }
+          : { server: name, status: downstream.status(caller).find(st => st.server === name), operations: tools.map(t => ({ operation: t.name, class: t.cls, description: t.description.slice(0, 240) })) };
+      });
+      return downstream.call(caller, name, x.operation.startsWith('@') ? x.operation.slice(1) : x.operation, x.arguments ?? {}, x.grantId);
+    }, () => downstream.allowed(dsCaller(), name));
+  }
+  server.registerTool('panter_downstream_status', { description: 'Downstream MCP servers you may use: state (OK, DEGRADED, CIRCUIT_OPEN, TOKEN_MISSING, NOT_CONTACTED), tool counts by class, write policy and router name.',
+    inputSchema: z.object({}).strict(), annotations: { readOnlyHint: true } },
+    async () => execute(async () => ({ configured: downstream.configured, servers: downstream.status(dsCaller()) })));
+  server.registerTool('panter_downstream_refresh', { description: `${leaderLabel()} or operator: fetch a downstream server's tools again (all servers when none is given).`,
+    inputSchema: z.object({ server: z.string().max(24).optional() }).strict(), annotations: { readOnlyHint: true } },
+    async x => execute(async () => { requireLeaderOrOperator();
+      if (x.server && !downstream.allowed(dsCaller(), x.server)) throw new Error(`${principal()} may not use downstream server "${x.server}"`);
+      return x.server ? [await downstream.refresh(x.server)] : Promise.all(downstream.names().filter(n => downstream.allowed(dsCaller(), n)).map(n => downstream.refresh(n).catch(e => ({ server: n, error: e instanceof Error ? e.message : 'failed' })))); }));
+  server.registerTool('panter_downstream_grant', { description: 'Operator only: let one host call write tools of one downstream server, for ttlSeconds and a number of calls. tools "*" covers write tools; destructive tools must be named. The downstream server still applies its own approvals.',
+    inputSchema: z.object({ server: z.string().max(24), host: z.enum(HOSTS), tools: z.union([z.literal('*'), z.array(z.string().min(1).max(64)).min(1).max(50)]),
+      ttlSeconds: z.number().int().min(60).max(604800).default(3600), uses: z.number().int().min(1).max(1000).default(1), reason: bounded(500) }).strict() },
+    async x => execute(async () => { requireOperator(); return downstream.grant(x); }));
+  server.registerTool('panter_downstream_revoke', { description: 'Operator only: revoke a downstream write grant.',
+    inputSchema: z.object({ grantId: z.uuid() }).strict() },
+    async x => execute(async () => { requireOperator(); return downstream.revoke(x.grantId); }));
+  server.registerTool('panter_downstream_audit', { description: `${leaderLabel()} or operator: grants and the audit of recent gateway calls (host, tool, class, grant, outcome, time; arguments only as a keyed hash) for the downstream servers you may use.`,
+    inputSchema: z.object({ server: z.string().max(24).optional(), limit: z.number().int().min(1).max(500).default(100) }).strict(), annotations: { readOnlyHint: true } },
+    async x => execute(async () => { requireLeaderOrOperator(); return { grants: downstream.grants(dsCaller()).filter(g => !x.server || g.server === x.server), audit: downstream.audit(dsCaller(), x),
+      refusedWithoutAccess: downstream.refusedOutsiders(dsCaller()) }; }));
   surface.finalize();
   return server;
 });
