@@ -24,7 +24,7 @@ async function downstreamServer() {
   let lastAuth = '';
   let delayMs = 0, down = false, flipDestructive = false, mode: 'ok' | 'echo500' | 'redirect' = 'ok', pad = 0;
   // Which bearer tokens are accepted, and how long the n-th refusal (from 1) takes to arrive.
-  let accepts = (auth: string): boolean => auth === `Bearer ${TOKEN}`, refusals = 0, refuseDelay = (_n: number) => 0;
+  let accepts = (auth: string): boolean => auth === `Bearer ${TOKEN}`, refusals = 0, refuseDelay = (_n: number) => 0, forbid = false;
   const handler = toNodeHandler(createMcpHandler(() => {
     const s = new McpServer({ name: 'shop', version: '1' });
     const record = (tool: string) => async (args: unknown, ctx: any) => {
@@ -55,12 +55,18 @@ async function downstreamServer() {
     if (mode === 'echo500') { res.writeHead(500, { 'content-type': 'text/plain' }).end('e'.repeat(pad) + ' echo ' + String(req.headers.authorization)); return; }
     if (!accepts(String(req.headers.authorization ?? ''))) { setTimeout(() => res.writeHead(401).end(), refuseDelay(++refusals)); return; }
     lastAuth = String(req.headers.authorization);
+    if (forbid && req.method === 'POST') {
+      let raw = ''; req.on('data', c => { raw += c; });
+      req.on('end', () => { if (/"tools\/call"/.test(raw)) res.writeHead(403, { 'www-authenticate': 'Bearer error="insufficient_scope", scope="write"' }).end(); else res.writeHead(400).end(); });
+      return;
+    }
     handler(req, res);
   });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', () => r()));
   const url = `http://127.0.0.1:${(http.address() as { port: number }).port}/mcp`;
   return { url, seen, setDelay: (ms: number) => { delayMs = ms; }, setDown: (v: boolean) => { down = v; }, setFlip: (v: boolean) => { flipDestructive = v; },
     setMode: (m: typeof mode, p = 0) => { mode = m; pad = p; },
+    setForbid: (v: boolean) => { forbid = v; },
     setAccepts: (f: (auth: string) => boolean, delay: (n: number) => number = () => 0) => { accepts = f; refusals = 0; refuseDelay = delay; }, close: () => new Promise(r => { http.closeAllConnections?.(); http.close(r); }) };
 }
 
@@ -849,6 +855,46 @@ test('OAuth: a read refused twice, or a call that gets no token, fails alone wit
     assert.match(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'B2' })), /no OAuth token: .*tokens issued are still alive/);
     assert.equal(text(await running), 'set_price ok');
   } finally { w.ds.setDelay(0); await w.done(); await te.close(); }
+});
+
+test('OAuth: refusals of one token count once; big calls and 403s fail alone too', async () => {
+  let n = 0;
+  const te = await tokenEndpoint(() => ({ access_token: `issued-token-${++n}-0123456789`, expires_in: 3600 }));
+  const w = await world({ tokenEnv: null, oauth: oauthOf(te.url) }, OAUTH_ENV);
+  try {
+    w.ds.setAccepts(a => /^Bearer issued-token-\d+-0123456789$/.test(a));
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok');
+    const st = (w.gw as any).servers.get('shop');
+    const client = st.client;
+    const g = w.gw.grant({ server: 'shop', tools: '*', host: 'claude', ttlSeconds: 600, uses: 10, reason: 'repricing' });
+    // Three writes in flight with a token that gets revoked: one cause, one failure, the circuit stays closed.
+    w.ds.setAccepts(a => /^Bearer issued-token-\d+-0123456789$/.test(a) && a !== 'Bearer issued-token-1-0123456789');
+    const refused = await Promise.all([1, 2, 3].map(p => w.gw.call(claude, 'shop', 'set_price', { sku: 'A1', price: p }, g.id)));
+    assert.ok(refused.every(r => /refused Panter's token/.test(text(r))));
+    assert.equal(st.failures, 1);
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A2' })), 'lookup ok');
+    // A write with more than 1 MB of arguments, refused: it fails alone like any other.
+    w.ds.setAccepts(a => /^Bearer issued-token-\d+-0123456789$/.test(a) && a !== 'Bearer issued-token-2-0123456789');
+    assert.match(text(await w.gw.call(claude, 'shop', 'set_price', { sku: 'x'.repeat(1_100_000), price: 1 }, g.id)), /may or may not have run/);
+    // A 403 for a call (a token without the scope it needs) fails that call only.
+    w.ds.setForbid(true);
+    assert.match(text(await w.gw.call(claude, 'shop', 'set_price', { sku: 'A3', price: 1 }, g.id)), /403/);
+    w.ds.setForbid(false);
+    assert.equal(st.client, client, 'the shared connection was never closed');
+  } finally { await w.done(); await te.close(); }
+});
+
+test('OAuth: a long-lived token stays redacted for its whole life, expires_in given as text too', async () => {
+  const te = await tokenEndpoint(() => ({ access_token: TOKEN, expires_in: '5184000' as unknown as number })); // 60 days
+  const w = await world({ tokenEnv: null, oauth: oauthOf(te.url) }, OAUTH_ENV);
+  try {
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok');
+    const st = (w.gw as any).servers.get('shop');
+    assert.ok(st.oauthIssued.get(TOKEN) >= w.now() + 5_184_000_000, 'kept for its whole life');
+    w.advance(31 * 86_400_000);
+    st.oauthToken = null;
+    assert.ok((w.gw as any).secrets(st).includes(TOKEN), 'still redacted on day 31');
+  } finally { await w.done(); await te.close(); }
 });
 
 test('OAuth: an oversized token endpoint answer is refused without being buffered', async () => {

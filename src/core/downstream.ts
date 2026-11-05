@@ -72,7 +72,8 @@ export const clean = (e: unknown, secrets: string[] = []) => {
 };
 /** The call a request belongs to: guarded() puts its own id in the request's _meta. */
 const callIdOf = (body: unknown): string | null => {
-  if (typeof body !== 'string' || body.length > 1_000_000) return null;
+  // Panter's own request bodies (bounded by what it accepts from hosts): no size cut, or a big call would lose its id.
+  if (typeof body !== 'string') return null;
   try { const id = JSON.parse(body)?.params?._meta?.['panter-ai/callId']; return typeof id === 'string' ? id : null; } catch { return null; }
 };
 /** fetch that refuses redirects and stops reading a response past MAX_RESPONSE_BYTES, telling `cut` which call it was. */
@@ -117,10 +118,11 @@ function replayable(body: unknown, readCalls: ReadonlySet<string>): boolean {
     || readCalls.has(m?.params?._meta?.['panter-ai/callId']));
 }
 const REFUSED_WRITE = 'the server refused Panter\'s token (401) and Panter does not send a call that is not a read twice. The call may or may not have run on the server: check before calling again (the next call goes out with a new token; a grant use is spent).';
+const FORBIDDEN = 'the server refused this call (403: the token may lack the scope it needs). Nothing else is affected.';
 const REFUSED_TWICE = 'the server refused Panter\'s token (401), and a freshly issued one too: check the OAuth client\'s scope and the server\'s audience settings.';
 /** An access token Panter can redact without damaging a result's JSON. */
 const ACCESS_TOKEN = /^[\x21\x23-\x5b\x5d-\x7e]{16,8192}$/;
-const TOKEN_KEEP_MIN_MS = 86_400_000, TOKEN_KEEP_MAX_MS = 30 * 86_400_000, MAX_ISSUED_TOKENS = 1000;
+const TOKEN_KEEP_MIN_MS = 86_400_000, MAX_ISSUED_TOKENS = 1000;
 /** An error whose message is already safe to show and store (cleaned, or withheld for a sensitive server). */
 class SafeError extends Error {}
 /** After a failed tool-list fetch, calls fail fast (closed) for this long before Panter asks again. */
@@ -202,7 +204,10 @@ type ServerState = {
   readCalls: Set<string>;
   /** Calls that failed for a reason of their own, not a broken connection (the token was refused, or no token could
    * be had): they fail alone with this message, count toward the circuit breaker, and the connection stays open. */
-  callFailures: Map<string, string>;
+  callFailures: Map<string, { message: string; cause: string }>;
+  /** Causes of call failures already counted toward the circuit breaker since the last success: calls refused for
+   * the same token (or the same failed token request) count once. */
+  countedCauses: Set<string>;
   /** Calls inside guarded() right now. */
   activeCalls: Set<string>;
   /** OAuth: the current access token and when to renew it, and the request already getting one. */
@@ -219,7 +224,7 @@ export class DownstreamGateway {
   private readonly servers = new Map<string, ServerState>();
   constructor(configs: DownstreamConfig[], private readonly db: SqliteLedger | null,
     private readonly env: Record<string, string | undefined> = process.env, private readonly now: () => number = Date.now) {
-    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null, refreshFailedMs: 0, refreshError: null, cutCalls: new Set(), readCalls: new Set(), callFailures: new Map(), activeCalls: new Set(), oauthToken: null, oauthFetch: null, oauthIssued: new Map() });
+    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null, refreshFailedMs: 0, refreshError: null, cutCalls: new Set(), readCalls: new Set(), callFailures: new Map(), countedCauses: new Set(), activeCalls: new Set(), oauthToken: null, oauthFetch: null, oauthIssued: new Map() });
     // Load the sensitive missions now, so the checks other stores run inside their own transactions read no database.
     if (this.db) this.sensitiveSet();
   }
@@ -269,13 +274,15 @@ export class DownstreamGateway {
         throw new Error('token endpoint gave no bearer access_token');
       // Redaction removes the token's text from results: a short one, or one with JSON quoting, would mangle them.
       if (!ACCESS_TOKEN.test(json.access_token)) throw new Error('token endpoint gave an access_token Panter cannot use safely (16 to 8192 printable characters, no quotes or backslashes)');
-      const told = Number.isFinite(json.expires_in) && json.expires_in > 0;
-      const life = told ? json.expires_in * 1000 : 300_000;
+      // Some servers send expires_in as a string.
+      const expiresIn = typeof json.expires_in === 'string' && /^\d+$/.test(json.expires_in) ? Number(json.expires_in) : json.expires_in;
+      const told = Number.isFinite(expiresIn) && expiresIn > 0;
+      const life = told ? expiresIn * 1000 : 300_000;
       const now = this.now();
       s.oauthToken = { value: json.access_token, renewAt: now + Math.max(life - 60_000, life / 2) };
       // Kept redacted until it expires plus the longest call (and a minute of clock leeway); when the server does not
       // say how long it lives, at least a day. A token is never forgotten early: the cap is checked before asking.
-      const keep = told ? Math.min(life, TOKEN_KEEP_MAX_MS) + 60_000 : TOKEN_KEEP_MIN_MS;
+      const keep = told ? life + 60_000 : TOKEN_KEEP_MIN_MS;
       s.oauthIssued.set(json.access_token, now + keep + s.config.timeoutMs);
       return json.access_token as string;
     })().finally(() => { s.oauthFetch = null; });
@@ -297,25 +304,28 @@ export class DownstreamGateway {
       // decides whether to call again, with the renewed token.
       const oauthFetch = async (url: string | URL, init?: RequestInit) => {
         // Recorded only for a call still waiting for its answer (a late one has no one to tell), so nothing leaks.
-        const failCall = (message: string) => { const id = callIdOf(init?.body); if (id && s.activeCalls.has(id)) s.callFailures.set(id, message); };
+        const failCall = (message: string, cause: string) => { const id = callIdOf(init?.body); if (id && s.activeCalls.has(id)) s.callFailures.set(id, { message, cause }); };
         const send = async () => {
           let used: string;
+          const pending = s.oauthFetch;
           try { used = await this.oauthToken(s); }
-          catch (error) { failCall(`no OAuth token: ${clean(error, this.secrets(s))}`); throw error; }
+          catch (error) { failCall(`no OAuth token: ${clean(error, this.secrets(s))}`, `token-request:${pending ? 'shared' : randomUUID()}:${clean(error)}`); throw error; }
           const headers = new Headers(init?.headers);
           headers.set('authorization', `Bearer ${used}`);
           return { used, res: await limited(url, { ...init, headers }) };
         };
         // Forget a refused token only if it is still the current one: a late 401 must not drop a newer token.
         const forget = (used: string) => { if (s.oauthToken?.value === used) s.oauthToken = null; };
+        // A 403 (say, a token without the scope for this one tool) is this call's answer, not a broken connection.
+        const forbidden = (r: { used: string; res: Response }) => { if (r.res.status === 403) failCall(FORBIDDEN, `403:${r.used}`); return r.res; };
         const first = await send();
-        if (first.res.status !== 401) return first.res;
+        if (first.res.status !== 401) return forbidden(first);
         forget(first.used);
-        if (!replayable(init?.body, s.readCalls)) { failCall(REFUSED_WRITE); return first.res; }
+        if (!replayable(init?.body, s.readCalls)) { failCall(REFUSED_WRITE, `401:${first.used}`); return first.res; }
         await first.res.body?.cancel().catch(() => undefined);
         const second = await send();
-        if (second.res.status === 401) { forget(second.used); failCall(REFUSED_TWICE); }
-        return second.res;
+        if (second.res.status === 401) { forget(second.used); failCall(REFUSED_TWICE, `401:${second.used}`); return second.res; }
+        return forbidden(second);
       };
       const transport = new StreamableHTTPClientTransport(new URL(s.config.url),
         s.config.oauth ? { fetch: oauthFetch as any }
@@ -368,7 +378,7 @@ export class DownstreamGateway {
     s.activeCalls.add(callId);
     try {
       const result = await op(await used, callId);
-      s.failures = 0; s.lastError = null; s.openUntil = 0;
+      s.failures = 0; s.lastError = null; s.openUntil = 0; s.countedCauses.clear();
       return result;
     } catch (error) {
       // An oversized response is the server's answer being refused, not a transport failure (the SDK only notices
@@ -379,9 +389,13 @@ export class DownstreamGateway {
       // connection stays open.
       const own = s.callFailures.get(callId);
       if (own !== undefined) {
-        s.failures++; s.lastError = own.slice(0, 300);
-        if (s.failures >= FAILURES_TO_OPEN) s.openUntil = this.now() + OPEN_MS;
-        throw new SafeError(own);
+        if (!s.countedCauses.has(own.cause)) {
+          if (s.countedCauses.size >= 256) s.countedCauses.clear();
+          s.countedCauses.add(own.cause);
+          s.failures++; s.lastError = own.message.slice(0, 300);
+          if (s.failures >= FAILURES_TO_OPEN) s.openUntil = this.now() + OPEN_MS;
+        }
+        throw new SafeError(own.message);
       }
       const message = this.describe(s, error);
       // A JSON-RPC error is the server answering: the connection is fine and nothing counts.
