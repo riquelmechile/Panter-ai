@@ -45,7 +45,7 @@ The mascot is a panther with a mouse's face. The panther is patient and precise 
 | **Mesh and workforce** | Durable delegation, claims with leases, heartbeats, results, wake signals and pickup timeouts with native fallback. Gemini works through a mail relay. |
 | **GitHub workforce** | Write access scoped to one work item, granted on dispatch and revoked when the work ends, with an audit trail. |
 | **Memory** | Optional Engram project memory, mirrored from the harness ledger. |
-| **Tool surface** | Each role sees a short list of tools (the leader sees 47, a worker 29) plus 8 domain routers. Every tool stays callable by name. See [docs/TOOL_SURFACE.md](docs/TOOL_SURFACE.md). |
+| **Tool surface** | Each role sees a short list: the leader 50 tools and a worker 29, the 8 domain routers included. Every tool stays callable by name. See [docs/TOOL_SURFACE.md](docs/TOOL_SURFACE.md). |
 | **Downstream gateway** | Register an MCP server once; its tools appear under a prefix, with timeouts, a circuit breaker, write grants and audit. See [docs/DOWNSTREAM_MCP.md](docs/DOWNSTREAM_MCP.md). |
 | **Operations** | One-command deploy of an exact commit with automatic rollback, a backup with a restore check before every deploy and every day, and a health check that restarts the service. See [docs/OPERATIONS.md](docs/OPERATIONS.md). |
 
