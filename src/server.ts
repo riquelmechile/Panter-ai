@@ -115,7 +115,7 @@ const downstream = new DownstreamGateway(downstreamConfig ? parseDownstreamConfi
 if (downstream.configured) {
   const refresh = () => downstream.refreshAll().then(r => { for (const x of r) if ('error' in x) console.error(`Downstream ${x.server}: ${x.error}`); });
   // Make the signing key now: the first unauthenticated request for the public keys never writes the ledger.
-  downstream.actorKeys();
+  try { downstream.actorKeys(); } catch (error) { console.error(`Downstream signing key unavailable: ${error instanceof Error ? error.message : 'error'}`); }
   void refresh(); setInterval(refresh, 10 * 60_000).unref();
 }
 /** A mission that called a sensitive downstream server keeps no personal identifiers in what hosts send Panter for it. */
