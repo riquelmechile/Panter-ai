@@ -62,6 +62,10 @@ export class MeshEngine {
   private standingListenerCheck:((host:WorkerHost)=>boolean)|null=null;
   setStandingListenerCheck(check:(host:WorkerHost)=>boolean){this.standingListenerCheck=check;}
   setWriteGuard(guard:(missionId:string,paths:string[])=>Promise<void>){this.writeGuard=guard;}
+  /** Checks text about to be stored for a mission (instructions, results, messages); throws to refuse it. Panter
+   * uses it to keep personal data out of missions that called a sensitive downstream server. */
+  private contentGuard:((missionId:string,texts:string[],where:string)=>void)|null=null;
+  setContentGuard(guard:(missionId:string,texts:string[],where:string)=>void){this.contentGuard=guard;}
   private constructor(dir: string) { this.sqlite = SqliteLedger.open(dir); }
   static async open(dir: string) {
     const x = new MeshEngine(dir);
@@ -479,6 +483,7 @@ export class MeshEngine {
     check(roles.has(input.role) && input.role !== 'orchestrator', 'Invalid role');
     check(input.instruction.trim().length > 0 && input.instruction.length <= 50000, 'Invalid instruction');
     check(input.idempotencyKey.length > 0 && input.idempotencyKey.length <= 160, 'Invalid idempotency');
+    this.contentGuard?.(input.missionId,[input.instruction],'This instruction');
     if(input.role==='implementer'&&this.writeGuard)
       await this.writeGuard(input.missionId,input.specialist?.allowedEditSurfaces??[]);
     return this.write(d => {
@@ -591,6 +596,7 @@ export class MeshEngine {
     check(roles.has(input.role)&&input.role!=='orchestrator','Invalid role');
     check(input.instruction.trim().length>0&&input.instruction.length<=50000,'Invalid instruction');
     check(input.idempotencyKey.trim().length>0&&input.idempotencyKey.length<=160,'Invalid idempotency');
+    this.contentGuard?.(input.missionId,[input.instruction],'This instruction');
     const choice=await this.read(d=>{
       const replay=d.works.find(w=>w.missionId===input.missionId&&w.idempotencyKey===input.idempotencyKey);
       if(replay)return {replay};
@@ -696,6 +702,7 @@ export class MeshEngine {
     check(roles.has(input.role)&&input.role!=='orchestrator','Invalid role');
     check(input.instruction.trim().length>0&&input.instruction.length<=50000,'Invalid instruction');
     check(input.idempotencyKey.length>0&&input.idempotencyKey.length<=160,'Invalid idempotency');
+    this.contentGuard?.(input.missionId,[input.instruction],'This instruction');
     const choice=await this.read(d=>{
       const replay=d.works.find(w=>w.missionId===input.missionId&&w.idempotencyKey===input.idempotencyKey);
       if(replay)return {replay};
@@ -749,6 +756,7 @@ export class MeshEngine {
     check(input.missionId.trim().length>0 && input.missionId.length<=120,'Invalid mission');
     check(input.objective.trim().length>0 && input.objective.length<=6000,'Invalid review objective');
     check(input.idempotencyKey.trim().length>0 && input.idempotencyKey.length<=160,'Invalid idempotency key');
+    this.contentGuard?.(input.missionId,[input.objective],'This review objective');
     const ids=input.kind==='4r'?REVIEW_4R:JUDGMENT_DAY.slice(0,2);
     const bindings=await this.specialistBindings();
     const configured=ids.map(id=>bindings.find(b=>b.agentId===id));
@@ -990,6 +998,7 @@ export class MeshEngine {
       }
       check(w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
       check(Date.parse(w.leaseUntil!) > Date.now(), 'Lease expired');
+      this.contentGuard?.(w.missionId,[result],'This result');
       w.state = success ? 'COMPLETED' : 'FAILED'; w.result = result; w.receiptDigest = digest;
       w.completedAt = iso(); w.leaseUntil = null; delete w.transportClaim; if (via) w.via = via;
       // A transport closing work it could not deliver is not a receipt from the worker.
@@ -1073,6 +1082,7 @@ export class MeshEngine {
     return this.write(d => {
       const w = input.workId ? d.works.find(x => x.id === input.workId) : null;
       check(w && w.missionId === input.missionId, 'Known work is required for peer messages');
+      this.contentGuard?.(input.missionId,[input.text],'This message');
       check((caller === leaderHost() && w.target === input.to) || (input.to === leaderHost() && w.target === caller), 'Not a member of this delegation');
       const revision = this.notify(d, input.to);
       const msg: MeshMessage = { id: randomUUID(), missionId: input.missionId, from: caller, to: input.to, workId: w.id, kind: input.kind, text: input.text, createdAt: iso(), inboxRevision: revision };

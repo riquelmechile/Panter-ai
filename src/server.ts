@@ -2,7 +2,8 @@ import { leaderHost, leaderLabel, appEventHosts, freezeLeaderHost, leaderPolicyP
 import { ExternalOAuthVerifier, staticBearerMatch } from './core/oauth.js';
 import { isAdminPrincipal, parseOwnerTrustedHosts } from './core/owner-trust.js';
 import { createToolSurface, type SurfaceRole } from './core/tool-surface.js';
-import { DownstreamGateway, parseDownstreamConfig, routerFor } from './core/downstream.js';
+import { DownstreamGateway, MISSION_ID, parseDownstreamConfig, routerFor } from './core/downstream.js';
+import { refuseSensitive } from './core/sensitive-content.js';
 import { SqliteLedger } from './core/sqlite-ledger.js';
 import { EmbeddedOAuth } from './core/embedded-oauth.js';
 import { openEngramBridge } from './core/engram-runtime.js';
@@ -114,6 +115,11 @@ if (downstream.configured) {
   const refresh = () => downstream.refreshAll().then(r => { for (const x of r) if ('error' in x) console.error(`Downstream ${x.server}: ${x.error}`); });
   void refresh(); setInterval(refresh, 10 * 60_000).unref();
 }
+/** A mission that called a sensitive downstream server keeps no personal or clinical data anywhere in Panter. */
+const guardSensitive = (missionId: string, texts: Array<string | undefined>, where: string) => {
+  if (downstream.isSensitiveMission(missionId)) refuseSensitive(texts, where);
+};
+mesh.setContentGuard(guardSensitive);
 const grokRoutineWake = new GrokRoutineWake();
 const claudeRoutineWake = new ClaudeRoutineWake();
 const workforceEvents = new WorkforceEvents(dataDir);
@@ -216,6 +222,8 @@ async function memoryFor(project?:string){
 async function checkpoint(runId:string){
   const run=await harness.get(runId);if(!run)return 'HARNESS_NOT_FOUND';
   if(!engramEnabled)return 'ENGRAM_DISABLED';
+  // A sensitive mission is never mirrored to Engram: the mirror is a second copy outside Panter's control.
+  if(downstream.isSensitiveMission(runId))return 'ENGRAM_SKIPPED_SENSITIVE';
   const document={project:run.project,objective:run.objective,revision:run.revision,
     candidateSha:run.candidateSha,steps:run.steps.map(s=>({id:s.id,phase:s.phase,status:s.status,evidence:s.result?.evidence??[],digest:s.result?.digest??null})),
     reviewId:run.reviewId,judgmentId:run.judgmentId,deliveryStrategy:run.deliveryStrategy??null};
@@ -448,6 +456,7 @@ const handler = createMcpHandler(reqCtx => {
     inputSchema:z.object({project:bounded(100).optional(),title:bounded(160),type:memoryTypes,topicKey:bounded(160),content:bounded(16000)}),
   }, async item => execute(async () => {
     requireLeader();const {project,...save}=item;
+    if(downstream.hasSensitive)refuseSensitive([save.title,save.topicKey,save.content],'This memory');
     return (await memoryFor(project)).save(hostPrincipal(),save);
   }));
   // Native, actor-scoped MCP Events wire; requires a client supporting events.
@@ -847,7 +856,8 @@ const handler = createMcpHandler(reqCtx => {
     inputSchema:z.object({runId:z.uuid(),stepId:z.uuid(),report:z.object({summary:bounded(6000),evidence:z.array(bounded(1000)).min(1).max(40),
       runId:z.string().max(160).optional(),candidateSha:z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/).optional(),
       discoveredPaths:z.array(z.string().min(1).max(256)).max(16).optional()}),capabilities:harnessRuntimeSchema})
-  },async x=>execute(async()=>{requireLeader();await harness.report(x.runId,x.stepId,x.report);const memoryCheckpoint=await checkpoint(x.runId);
+  },async x=>execute(async()=>{requireLeader();guardSensitive(x.runId,[x.report.summary,...x.report.evidence,...(x.report.discoveredPaths??[])],'This report');
+    await harness.report(x.runId,x.stepId,x.report);const memoryCheckpoint=await checkpoint(x.runId);
     return {...await harness.tick(x.runId,x.capabilities),memoryCheckpoint}}));
   server.registerTool('panter_harness_close',{
     description:`${leaderLabel()} closes an automatic ODD run that will not be finished (abandoned, superseded or stuck in an old format). The run never advances again; its queued remote work is withdrawn and its remote work's grants are revoked. It never touches GitHub branches or PRs.`,
@@ -862,7 +872,7 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_harness_correction_report',{
     description:`${leaderLabel()} registers an authorized bounded correction with a fresh real Git SHA. Automatically resets verifier, 4R and Judgment Day, and invalidates old review evidence.`,
     inputSchema:z.object({runId:z.uuid(),expectedRevision:z.number().int().positive(),report:z.object({candidateSha:z.string().regex(/^[a-f0-9]{40}$/),runId:bounded(160),evidence:z.array(bounded(1000)).min(1).max(30)})})
-  },async x=>execute(async()=>{requireLeader();return harness.recordCorrection(x.runId,x.report,x.expectedRevision)}));
+  },async x=>execute(async()=>{requireLeader();guardSensitive(x.runId,x.report.evidence,'This correction');return harness.recordCorrection(x.runId,x.report,x.expectedRevision)}));
   server.registerTool('panter_harness_units_set',{
     description:`${leaderLabel()} automatically decomposes completed design into disjoint, scoped implementation units. Requires actual separate host worktrees for parallel writers.`,
     inputSchema:z.object({runId:z.uuid(),expectedRevision:z.number().int().positive(),units:z.array(z.object({objective:bounded(3000),paths:z.array(bounded(256)).min(1).max(12)})).min(2).max(16)})
@@ -870,7 +880,7 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_harness_unit_report',{
     description:'Record one actually executed implementation child with unique run ID and concrete evidence; no fabricated invocation is permitted.',
     inputSchema:z.object({runId:z.uuid(),unitId:z.uuid(),result:z.object({runId:bounded(160),summary:bounded(3000),evidence:z.array(bounded(1000)).min(1).max(30)})})
-  },async x=>execute(async()=>{requireLeader();return harness.reportUnit(x.runId,x.unitId,x.result)}));
+  },async x=>execute(async()=>{requireLeader();guardSensitive(x.runId,[x.result.summary,...x.result.evidence],'This unit report');return harness.reportUnit(x.runId,x.unitId,x.result)}));
   server.registerTool('panter_harness_delivery_strategy_set',{
     description:'Operator-only, explicitly authorized GitHub delivery strategy; no merge/push/write authority. Persists the choice for automatic GitHub and RDD gates.',
     inputSchema:z.object({runId:z.uuid(),strategy:z.enum(['single-pr','feature-branch-chain','stacked-to-main']),expectedRevision:z.number().int().positive()})
@@ -1000,15 +1010,16 @@ const handler = createMcpHandler(reqCtx => {
     });
   }
   // Downstream MCP servers: one router per server, listed for the hosts its config allows (and the operator).
-  const dsCaller = () => ({ id: principal(), operator: principal() === 'admin' });
+  const dsCaller = () => ({ id: principal(), operator: principal() === 'admin', role: surfaceRole() });
   const requireOperator = () => { if (principal() !== 'admin') throw new Error('Operator (admin socket or admin token) required'); };
   const requireLeaderOrOperator = () => { if (principal() !== 'admin' && principal() !== leaderHost()) throw new Error(`${leaderLabel()} or operator required`); };
   for (const name of downstream.names()) {
     surface.external(routerFor(name), {
-      description: `Downstream MCP server "${name}" through Panter's gateway. Operation "index" lists its tools and whether each is read, write or destructive (arguments {"operation":"<tool>"} for one tool's input schema); then operation "<tool>" with that tool's arguments (a tool that is itself called "index" is operation "@index"). Write and destructive tools may need a grantId from the operator (panter_downstream_grant). Calls are audited.`,
-      inputSchema: z.object({ operation: z.string().trim().min(1).max(64), arguments: z.record(z.string(), z.unknown()).optional(), grantId: z.uuid().optional() }).strict(),
+      description: `Downstream MCP server "${name}" through Panter's gateway. Operation "index" lists its tools and whether each is read, write or destructive (arguments {"operation":"<tool>"} for one tool's input schema); then operation "<tool>" with that tool's arguments (a tool that is itself called "index" is operation "@index"). Write and destructive tools may need a grantId from the operator (panter_downstream_grant). missionId names the mission (harness run id) the call is for; the downstream server receives it in Panter's signed actor assertion with your host and role.${downstream.isSensitiveServer(name) ? ' This server is SENSITIVE: missionId is required, and that mission then keeps no personal or clinical data in Panter (reports, results, messages and memory containing it are refused).' : ''} Calls are audited.`,
+      inputSchema: z.object({ operation: z.string().trim().min(1).max(64), arguments: z.record(z.string(), z.unknown()).optional(), grantId: z.uuid().optional(),
+        missionId: z.string().regex(MISSION_ID).optional() }).strict(),
       annotations: { readOnlyHint: false },
-    }, async (x: { operation: string; arguments?: Record<string, unknown>; grantId?: string }) => {
+    }, async (x: { operation: string; arguments?: Record<string, unknown>; grantId?: string; missionId?: string }) => {
       const caller = dsCaller();
       // A caller that may not use this server is refused (and audited) by the gateway itself, index included.
       if (!downstream.allowed(caller, name)) return downstream.call(caller, name, x.operation, {}, undefined);
@@ -1020,12 +1031,13 @@ const handler = createMcpHandler(reqCtx => {
         return one ? { server: name, operation: one.name, class: one.cls, description: one.description, inputSchema: one.inputSchema }
           : { server: name, status: downstream.status(caller).find(st => st.server === name), operations: tools.map(t => ({ operation: t.name, class: t.cls, description: t.description.slice(0, 240) })) };
       });
-      return downstream.call(caller, name, x.operation.startsWith('@') ? x.operation.slice(1) : x.operation, x.arguments ?? {}, x.grantId);
+      return downstream.call(caller, name, x.operation.startsWith('@') ? x.operation.slice(1) : x.operation, x.arguments ?? {}, x.grantId, { missionId: x.missionId });
     }, () => downstream.allowed(dsCaller(), name));
   }
-  server.registerTool('panter_downstream_status', { description: 'Downstream MCP servers you may use: state (OK, DEGRADED, CIRCUIT_OPEN, TOKEN_MISSING, NOT_CONTACTED), tool counts by class, write policy and router name.',
+  server.registerTool('panter_downstream_status', { description: 'Downstream MCP servers you may use: state (OK, DEGRADED, CIRCUIT_OPEN, TOKEN_MISSING, NOT_CONTACTED), tool counts by class, write policy, whether it is sensitive, and router name; plus the public keys (JWK set, also at /.well-known/panter-downstream-keys) that verify the signed actor assertions downstream servers receive.',
     inputSchema: z.object({}).strict(), annotations: { readOnlyHint: true } },
-    async () => execute(async () => ({ configured: downstream.configured, servers: downstream.status(dsCaller()) })));
+    async () => execute(async () => ({ configured: downstream.configured, servers: downstream.status(dsCaller()),
+      actorKeys: downstream.configured ? downstream.actorKeys() : null })));
   server.registerTool('panter_downstream_refresh', { description: `${leaderLabel()} or operator: fetch a downstream server's tools again (all servers when none is given).`,
     inputSchema: z.object({ server: z.string().max(24).optional() }).strict(), annotations: { readOnlyHint: true } },
     async x => execute(async () => { requireLeaderOrOperator();
@@ -1038,10 +1050,10 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_downstream_revoke', { description: 'Operator only: revoke a downstream write grant.',
     inputSchema: z.object({ grantId: z.uuid() }).strict() },
     async x => execute(async () => { requireOperator(); return downstream.revoke(x.grantId); }));
-  server.registerTool('panter_downstream_audit', { description: `${leaderLabel()} or operator: grants and the audit of recent gateway calls (host, tool, class, grant, outcome, time; arguments only as a keyed hash) for the downstream servers you may use.`,
+  server.registerTool('panter_downstream_audit', { description: `${leaderLabel()} or operator: grants and the audit of recent gateway calls (host, role, mission, tool, class, grant, outcome, time; arguments only as a keyed hash, and not even that for sensitive servers) and the missions marked sensitive for the downstream servers you may use.`,
     inputSchema: z.object({ server: z.string().max(24).optional(), limit: z.number().int().min(1).max(500).default(100) }).strict(), annotations: { readOnlyHint: true } },
     async x => execute(async () => { requireLeaderOrOperator(); return { grants: downstream.grants(dsCaller()).filter(g => !x.server || g.server === x.server), audit: downstream.audit(dsCaller(), x),
-      refusedWithoutAccess: downstream.refusedOutsiders(dsCaller()) }; }));
+      refusedWithoutAccess: downstream.refusedOutsiders(dsCaller()), sensitiveMissions: downstream.sensitiveMissions(dsCaller()) }; }));
   surface.finalize();
   return server;
 });
@@ -1134,6 +1146,11 @@ const http = createServer(async (req, res) => {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
     res.end(JSON.stringify({ status: 'ok', name: 'panter-ai', version: packageVersion, revision: releaseRevision }));
     return;
+  }
+  // Public keys that verify the actor assertions downstream servers receive (public by nature).
+  if (downstream.configured && req.method === 'GET' && req.url === '/.well-known/panter-downstream-keys') {
+    res.writeHead(200, { 'content-type': 'application/jwk-set+json', 'cache-control': 'max-age=300' });
+    res.end(JSON.stringify(downstream.actorKeys())); return;
   }
   if (oauth && req.method === 'GET' && (req.url === '/.well-known/oauth-protected-resource' || req.url === '/.well-known/oauth-protected-resource/mcp')) {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });

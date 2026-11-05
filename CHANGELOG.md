@@ -2,6 +2,14 @@
 
 All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://semver.org/). Releases before 1.0 are described in [docs/HISTORY.md](docs/HISTORY.md).
 
+## 1.1.0 (2026-11-04)
+
+### Downstream gateway
+- Signed actor identity: every forwarded call carries `_meta["panter-ai/actor"]`, an Ed25519-signed assertion of the calling host, its role and mission, bound to the server, tool, arguments and a 120-second lifetime. Public keys at `/.well-known/panter-downstream-keys`; reference verifier in `src/core/actor-assertion.ts`.
+- `sensitive` servers: proxied without keeping content (no argument hash, no error text in audit, status or log), every call names its mission, answers are marked sensitive.
+- Sensitive missions: a mission that called a sensitive server is never mirrored to Engram, and Panter refuses to store personal or clinical data for it in reports, tasks, results, messages and memory (heuristic check: RUT, e-mail, +56 phone, clinical fields).
+- The audit records each call's role and mission.
+
 ## 1.0.0 (2026-11-04)
 
 The first stable release: the developer-preview features are now the supported product, deployed and running in production.
