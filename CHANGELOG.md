@@ -2,6 +2,10 @@
 
 All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://semver.org/). Releases before 1.0 are described in [docs/HISTORY.md](docs/HISTORY.md).
 
+## 1.2.1 (2026-11-05)
+
+- `panter_downstream_call`: reach a downstream server by name (same authorization, write policy, grants and audit as its `panter_ds_<name>` router), also through the `panter_admin` router, so a host whose connector's tool list predates a newly mounted server can use it without reloading.
+
 ## 1.2.0 (2026-11-05)
 
 ### Downstream gateway

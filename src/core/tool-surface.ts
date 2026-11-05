@@ -60,6 +60,7 @@ const WORKER = new Set([
   'workforce_task_bridge', 'workforce_schedule_pickup', 'workforce_rearm_status', 'workforce_app_turn', 'workforce_receipts',
   'mesh_claim', 'mesh_heartbeat', 'mesh_complete', 'mesh_pending', 'mesh_inbox', 'mesh_message',
   'github_read', 'github_commit', 'github_open_pr', 'github_comment', 'github_create_issue',
+  'downstream_status', 'downstream_call',
 ].map(x => `panter_${x}`));
 
 /** The workflow tools listed flat for a role (besides the routers). */

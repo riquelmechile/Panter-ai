@@ -1030,13 +1030,10 @@ const handler = createMcpHandler(reqCtx => {
   const dsCaller = () => ({ id: principal(), operator: principal() === 'admin', role: surfaceRole() });
   const requireOperator = () => { if (principal() !== 'admin') throw new Error('Operator (admin socket or admin token) required'); };
   const requireLeaderOrOperator = () => { if (principal() !== 'admin' && principal() !== leaderHost()) throw new Error(`${leaderLabel()} or operator required`); };
-  for (const name of downstream.names()) {
-    surface.external(routerFor(name), {
-      description: `Downstream MCP server "${name}" through Panter's gateway. Operation "index" lists its tools and whether each is read, write or destructive (arguments {"operation":"<tool>"} for one tool's input schema); then operation "<tool>" with that tool's arguments (a tool that is itself called "index" is operation "@index"). Write and destructive tools may need a grantId from the operator (panter_downstream_grant). missionId names the mission (harness run id) the call is for; the downstream server receives it in Panter's signed actor assertion with your host and role.${downstream.isSensitiveServer(name) ? ' This server is SENSITIVE: missionId is required, and that mission then is protected: reports, results, messages and memory with a personal identifier (RUT, e-mail, +56 phone) are refused for it; use pseudonymous ids.' : ''} Calls are audited.`,
-      inputSchema: z.object({ operation: z.string().trim().min(1).max(64), arguments: z.record(z.string(), z.unknown()).optional(), grantId: z.uuid().optional(),
-        missionId: z.string().regex(MISSION_ID).optional() }).strict(),
-      annotations: { readOnlyHint: false },
-    }, async (x: { operation: string; arguments?: Record<string, unknown>; grantId?: string; missionId?: string }) => {
+  type DsInput = { operation: string; arguments?: Record<string, unknown>; grantId?: string; missionId?: string };
+  const dsInput = { operation: z.string().trim().min(1).max(64), arguments: z.record(z.string(), z.unknown()).optional(), grantId: z.uuid().optional(),
+    missionId: z.string().regex(MISSION_ID).optional() };
+  const dsHandle = async (name: string, x: DsInput) => {
       const caller = dsCaller();
       // A caller that may not use this server is refused (and audited) by the gateway itself, index included.
       if (!downstream.allowed(caller, name)) return downstream.call(caller, name, x.operation, {}, undefined);
@@ -1049,8 +1046,28 @@ const handler = createMcpHandler(reqCtx => {
           : { server: name, status: downstream.status(caller).find(st => st.server === name), operations: tools.map(t => ({ operation: t.name, class: t.cls, description: t.description.slice(0, 240) })) };
       });
       return downstream.call(caller, name, x.operation.startsWith('@') ? x.operation.slice(1) : x.operation, x.arguments ?? {}, x.grantId, { missionId: x.missionId });
-    }, () => downstream.allowed(dsCaller(), name));
+  };
+  for (const name of downstream.names()) {
+    surface.external(routerFor(name), {
+      description: `Downstream MCP server "${name}" through Panter's gateway. Operation "index" lists its tools and whether each is read, write or destructive (arguments {"operation":"<tool>"} for one tool's input schema); then operation "<tool>" with that tool's arguments (a tool that is itself called "index" is operation "@index"). Write and destructive tools may need a grantId from the operator (panter_downstream_grant). missionId names the mission (harness run id) the call is for; the downstream server receives it in Panter's signed actor assertion with your host and role.${downstream.isSensitiveServer(name) ? ' This server is SENSITIVE: missionId is required, and that mission then is protected: reports, results, messages and memory with a personal identifier (RUT, e-mail, +56 phone) are refused for it; use pseudonymous ids.' : ''} Calls are audited.`,
+      inputSchema: z.object(dsInput).strict(),
+      annotations: { readOnlyHint: false },
+    }, (x: DsInput) => dsHandle(name, x), () => downstream.allowed(dsCaller(), name));
   }
+  // The same, with the server as an argument: reachable through the panter_admin router, which every host already
+  // lists, so a host whose tool list predates a newly mounted server can use it without reloading its connector.
+  server.registerTool('panter_downstream_call', {
+    description: 'Call a downstream MCP server through Panter\'s gateway (the same as its panter_ds_<server> router, for hosts that do not list that router yet). server: the downstream server name (see panter_downstream_status). operation "index" lists its tools; then operation "<tool>" with that tool\'s arguments. Same authorization, write policy, grants and audit as the router.',
+    inputSchema: z.object({ server: z.string().trim().min(2).max(24), ...dsInput }).strict(),
+    annotations: { readOnlyHint: false },
+  }, async (x: DsInput & { server: string }) => {
+    if (!downstream.names().includes(x.server)) return execute(async () => {
+      const mine = downstream.names().filter(n => downstream.allowed(dsCaller(), n));
+      throw new Error(`Unknown downstream server "${x.server}"${mine.length ? `; you may use: ${mine.join(', ')}` : ''}`);
+    });
+    const { server: name, ...rest } = x;
+    return dsHandle(name, rest);
+  });
   server.registerTool('panter_downstream_status', { description: 'Downstream MCP servers you may use: state (OK, DEGRADED, CIRCUIT_OPEN, TOKEN_MISSING, NOT_CONTACTED), tool counts by class, write policy, whether it is sensitive, and router name; plus the public keys (JWK set, also at /.well-known/panter-downstream-keys) that verify the signed actor assertions downstream servers receive.',
     inputSchema: z.object({}).strict(), annotations: { readOnlyHint: true } },
     async () => execute(async () => ({ configured: downstream.configured, servers: downstream.status(dsCaller()),
