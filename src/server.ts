@@ -112,10 +112,14 @@ const downstreamConfig = process.env.PANTER_DOWNSTREAM_CONFIG;
 // The ledger is opened even with no servers configured: missions marked sensitive stay protected after a config change.
 const downstream = new DownstreamGateway(downstreamConfig ? parseDownstreamConfig(await readFile(downstreamConfig, 'utf8'), HOSTS) : [],
   SqliteLedger.open(dataDir));
+// The surface announcement (announceSurface, below) is ready only once the MCP handler exists; a downstream refresh
+// that finishes earlier asks for it instead, and the handler setup announces then.
+let surfaceReady = false, surfaceAnnounceWanted = false;
+const requestSurfaceAnnounce = () => { if (surfaceReady) announceSurface(); else surfaceAnnounceWanted = true; };
+const bootedAt = Date.now();
 if (downstream.configured) {
   const refresh = () => downstream.refreshAll().then(r => { for (const x of r) if ('error' in x) console.error(`Downstream ${x.server}: ${x.error}`); })
-    // (before the MCP handler exists the announcement waits for the next refresh)
-    .then(() => { try { announceSurface(); } catch { /* not ready yet */ } });
+    .then(() => requestSurfaceAnnounce());
   // Make the signing key now: the first unauthenticated request for the public keys never writes the ledger.
   try { downstream.actorKeys(); } catch (error) { console.error(`Downstream signing key unavailable: ${error instanceof Error ? error.message : 'error'}`); }
   void refresh(); setInterval(refresh, 10 * 60_000).unref();
@@ -295,6 +299,9 @@ let notifyToolsChanged: () => void = () => {};
  * A host may still ignore it (ChatGPT and Gemini keep the list they read when the connector was added): every
  * response then carries the fingerprint, and panter_admin operation "surface_status" says what to do. */
 function announceSurface(): void {
+  // Right after a restart a downstream server that has not answered yet has no tools: wait for it (up to 15 minutes)
+  // rather than announce a surface without it and announce again when it answers.
+  if (Date.now() - bootedAt < 15 * 60_000 && downstream.names().some(n => downstream.tools(n).length === 0)) return;
   const fp = surfaceFingerprint();
   if (fp === announcedSurface) return;
   announcedSurface = fp;
@@ -522,7 +529,15 @@ const handler = createMcpHandler(reqCtx => {
     if(github)githubWorkforce.validateGrant(github); // fail before creating the work
     guardSensitive(input.missionId,[input.instruction],'This instruction');
     const work=await mesh.delegate(hostPrincipal(),input);
-    const granted=github?{github:await githubWorkforce.grant(hostPrincipal(),{workId:work.id,...github})}:{};
+    let granted={};
+    if(github){
+      try{granted={github:await githubWorkforce.grant(hostPrincipal(),{workId:work.id,...github})};}
+      catch(error){
+        // Never leave a work without the access it was delegated with: withdraw it before anyone runs it.
+        await mesh.withdrawUnstarted(hostPrincipal(),work.id,'GitHub grant failed').catch(()=>undefined);
+        throw error;
+      }
+    }
     // Grok is woken only by its routine webhook: a directed delegate rings it too (after any grant), oldest queued
     // Grok work first, one outstanding ring at a time. A ring is a pointer and does not prove Grok ran.
     if(input.target!=='grok'||!grokRoutineWake.configured)return {...work,...granted};
@@ -1122,7 +1137,9 @@ const handler = createMcpHandler(reqCtx => {
     inputSchema: z.object({ server: z.string().max(24).optional() }).strict(), annotations: { readOnlyHint: true } },
     async x => execute(async () => { requireLeaderOrOperator();
       if (x.server && !downstream.allowed(dsCaller(), x.server)) throw new Error(`${principal()} may not use downstream server "${x.server}"`);
-      return x.server ? [await downstream.refresh(x.server)] : Promise.all(downstream.names().filter(n => downstream.allowed(dsCaller(), n)).map(n => downstream.refresh(n).catch(e => ({ server: n, error: e instanceof Error ? e.message : 'failed' })))); }));
+      const out = x.server ? [await downstream.refresh(x.server)] : await Promise.all(downstream.names().filter(n => downstream.allowed(dsCaller(), n)).map(n => downstream.refresh(n).catch(e => ({ server: n, error: e instanceof Error ? e.message : 'failed' }))));
+      requestSurfaceAnnounce(); // a refresh that changed a server's tools tells hosts now, not at the next periodic refresh
+      return out; }));
   server.registerTool('panter_downstream_grant', { description: 'Operator only: let one host call write tools of one downstream server, for ttlSeconds and a number of calls. tools "*" covers write tools; destructive tools must be named. The downstream server still applies its own approvals.',
     inputSchema: z.object({ server: z.string().max(24), host: z.enum(HOSTS), tools: z.union([z.literal('*'), z.array(z.string().min(1).max(64)).min(1).max(50)]),
       ttlSeconds: z.number().int().min(60).max(604800).default(3600), uses: z.number().int().min(1).max(1000).default(1), reason: bounded(500) }).strict() },
@@ -1163,7 +1180,8 @@ if(geminiMailWake.configured){
 }
 eventRetry.unref();
 // Queued Grok work that could not be rung yet (Grok was busy) is rung once Grok is free.
-if (grokRoutineWake.configured) setInterval(() => { void ringNextGrokWork(mesh, grokRoutineWake).catch(() => undefined); }, 60_000).unref();
+// (work younger than 30 s is left to its creator, which may still be attaching a GitHub grant)
+if (grokRoutineWake.configured) setInterval(() => { void ringNextGrokWork(mesh, grokRoutineWake, 30_000).catch(() => undefined); }, 60_000).unref();
 reconcileEvents();
 
 // Publish only after atomic ledger persistence. SDK handles modern listen
@@ -1177,8 +1195,9 @@ mesh.events.on('changed', () => {
   } catch { console.error('MCP notification publication failed'); }
 });
 notifyToolsChanged = () => handler.notify.toolsChanged();
+surfaceReady = true;
 // Without downstream servers the surface is final now; with them, after their first refresh.
-if (!downstream.configured) announceSurface();
+if (!downstream.configured || surfaceAnnounceWanted) announceSurface();
 const nodeHandler = toNodeHandler(handler);
 // Unauthenticated relay endpoints: a small per-client budget (the real relay sends a few per task).
 const mailRelayHits = new Map<string, number[]>();

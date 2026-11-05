@@ -73,3 +73,38 @@ test('any queued Grok work is rung in order (directed delegates too), one at a t
     assert.equal((await ringNextGrokWork({ pending: async () => [] } as any, { configured: false, dispatch: bell.dispatch })).reason, 'NOT_CONFIGURED');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('a failed or unanswered ring never blocks Grok: other work is rung, and the lost one is rung again (bounded)', async () => {
+  const { ringNextGrokWork } = await import('../src/core/harness-wake.js');
+  const { GROK_RING_STALE_MS, GROK_MAX_RINGS } = await import('../src/core/mesh.js');
+  const dir = await mkdtemp(join(tmpdir(), 'panter-wake-'));
+  const realNow = Date.now;
+  try {
+    const m = await MeshEngine.open(dir);
+    await m.setProfile('gpt-a', { host: 'grok', actorId: 'actor-grok', modelRequest: 'm', effortRequest: 'max', roles: ['reviewer'] }, 0);
+    const rung: string[] = [];
+    let status = 503;
+    const bell = { configured: true, dispatch: async (id: string) => { rung.push(id); return { accepted: status < 300, statusCode: status }; } };
+    const a = await m.delegate('gpt-a', { missionId: 'm', target: 'grok', role: 'reviewer', instruction: 'a', idempotencyKey: 'a' });
+    const b = await m.delegate('gpt-a', { missionId: 'm', target: 'grok', role: 'reviewer', instruction: 'b', idempotencyKey: 'b' });
+    assert.equal((await ringNextGrokWork(m, bell)).workId, a.id);
+    assert.equal((await m.grokWakeStatus('gpt-a', a.id)).state, 'SIGNAL_FAILED');
+    // a's ring failed: Grok is not busy, b is rung (a is retried in order first, so ring once more to reach b).
+    status = 200;
+    const next = await ringNextGrokWork(m, bell);
+    assert.equal(next.reason, 'RUNG');
+    assert.equal(next.workId, a.id, 'the oldest work whose ring failed is rung again first');
+    assert.equal((await ringNextGrokWork(m, bell)).reason, 'PEER_BUSY', 'a ring that was accepted keeps Grok busy while fresh');
+    // Grok never picked a up: once stale, it no longer blocks, and it may be rung again up to the limit.
+    Date.now = () => realNow() + GROK_RING_STALE_MS + 1000;
+    const third = await ringNextGrokWork(m, bell);
+    assert.equal(third.workId, a.id);
+    Date.now = () => realNow() + 2 * (GROK_RING_STALE_MS + 1000);
+    const fourth = await ringNextGrokWork(m, bell);
+    assert.equal(fourth.workId, b.id, `a reached ${GROK_MAX_RINGS} rings and stops blocking; b is rung`);
+    assert.deepEqual(rung, [a.id, a.id, a.id, b.id]);
+    // The sweep leaves very young work to its creator.
+    Date.now = realNow;
+    await m.delegate('gpt-a', { missionId: 'm', target: 'grok', role: 'reviewer', instruction: 'c', idempotencyKey: 'c' });
+  } finally { Date.now = realNow; await rm(dir, { recursive: true, force: true }); }
+});

@@ -27,7 +27,11 @@ export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;ef
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
 export type WorkforceTaskBridge = {taskId:string;host:WorkerHost;protocolEra:'2025-11-25'|'2026-07-28';status:'ARMED'|'DELIVERED'|'CANCELLED'|'EXPIRED';createdAt:string;expiresAt:string;workId:string|null};
 export type WorkforceRearmIntent = {workId:string;host:WorkerHost;status:'PENDING'|'ACKED';createdAt:string;acknowledgedAt?:string};
-export type GrokWakeAttempt = {workId:string;state:'RESERVED'|'SIGNAL_ACCEPTED'|'SIGNAL_FAILED';reservedAt:string;statusCode:number|null;claimedAt?:string};
+export type GrokWakeAttempt = {workId:string;state:'RESERVED'|'SIGNAL_ACCEPTED'|'SIGNAL_FAILED';reservedAt:string;statusCode:number|null;claimedAt?:string;rings?:number};
+/** A ring that failed, or that Grok did not pick up within this long, no longer makes Grok busy and may be rung again
+ * (at most GROK_MAX_RINGS times): a lost ring must never block Grok for every other work. */
+export const GROK_RING_STALE_MS=15*60_000;
+export const GROK_MAX_RINGS=3;
 export type ClaudeWakeAttempt = GrokWakeAttempt & {sessionId:string|null};
 type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; claudeWakeAttempts?: ClaudeWakeAttempt[]; leader?: Host; formerLeaders?: Host[]; pendingPhaseAdoption?: Host[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
 const hosts = new Set<string>(HOSTS);
@@ -547,15 +551,30 @@ export class MeshEngine {
     return this.write(d=>{
       const w=d.works.find(w=>w.id===workId&&w.target==='grok');
       check(w,'Grok work not found');
+      const now=Date.now();
+      const live=(a:GrokWakeAttempt)=>a.state!=='SIGNAL_FAILED'&&now-Date.parse(a.reservedAt)<GROK_RING_STALE_MS;
       const existing=(d.grokWakeAttempts??[]).find(a=>a.workId===workId);
-      if(existing)return {send:false,attempt:existing};
+      // Exclusive callers (harness and sweep) may ring a still-queued work again when its ring failed or went stale.
+      const reRing=exclusive&&existing&&w.state==='QUEUED'&&!live(existing)&&(existing.rings??1)<GROK_MAX_RINGS;
+      if(existing&&!reRing)return {send:false,attempt:existing};
       check(w.state==='QUEUED','Only queued Grok work can receive wake');
       if(exclusive){
-        const rung=new Set((d.grokWakeAttempts??[]).map(a=>a.workId));
-        const busy=d.works.some(o=>o.target==='grok'&&o.id!==workId&&(o.state==='RUNNING'||o.state==='OUTCOME_UNKNOWN'||(o.state==='QUEUED'&&rung.has(o.id))));
+        const pending=new Map((d.grokWakeAttempts??[]).map(a=>[a.workId,a]));
+        const busy=d.works.some(o=>{
+          if(o.target!=='grok'||o.id===workId)return false;
+          if(o.state==='RUNNING'||o.state==='OUTCOME_UNKNOWN')return true;
+          const a=o.state==='QUEUED'?pending.get(o.id):undefined;
+          return Boolean(a&&live(a));
+        });
         if(busy)return {send:false,busy:true};
       }
-      const attempt:GrokWakeAttempt={workId,state:'RESERVED',reservedAt:iso(),statusCode:null};
+      if(existing){
+        Object.assign(existing,{state:'RESERVED',reservedAt:iso(),statusCode:null,rings:(existing.rings??1)+1});
+        delete existing.claimedAt;
+        this.notify(d,leaderHost());
+        return {send:true,attempt:existing};
+      }
+      const attempt:GrokWakeAttempt={workId,state:'RESERVED',reservedAt:iso(),statusCode:null,rings:1};
       (d.grokWakeAttempts??=[]).push(attempt);
       this.notify(d,leaderHost());
       return {send:true,attempt};

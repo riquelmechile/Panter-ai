@@ -27,9 +27,12 @@ export async function ringGrokForWork(mesh:MeshEngine,grok:RoutineDoorbell,workI
  * panter_mesh_delegate, delegate_auto or harness phases): before, directed work was never rung and waited forever,
  * and an earlier unrung work kept Grok looking busy. Called after a directed delegate and on a periodic sweep;
  * the exclusive reservation keeps it to one outstanding ring at a time. */
-export async function ringNextGrokWork(mesh:MeshEngine,grok:RoutineDoorbell):Promise<RingOutcome&{workId?:string}>{
+export async function ringNextGrokWork(mesh:MeshEngine,grok:RoutineDoorbell,minAgeMs=0):Promise<RingOutcome&{workId?:string}>{
   if(!grok.configured)return {rung:false,reason:'NOT_CONFIGURED'};
-  const queued=(await mesh.pending('grok')).sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
+  // The sweep skips work younger than minAgeMs: its creator may still be attaching a GitHub grant.
+  const now=Date.now();
+  const queued=(await mesh.pending('grok')).filter(w=>now-Date.parse(w.createdAt)>=minAgeMs)
+    .sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
   for(const w of queued){
     const r=await ringGrokForWork(mesh,grok,w.workId);
     if(r.reason==='ALREADY_RUNG'||r.reason==='NOT_QUEUED')continue;
