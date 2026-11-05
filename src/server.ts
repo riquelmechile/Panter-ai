@@ -1040,7 +1040,8 @@ const handler = createMcpHandler(reqCtx => {
     async x => execute(async () => { requireOperator(); return downstream.revoke(x.grantId); }));
   server.registerTool('panter_downstream_audit', { description: `${leaderLabel()} or operator: grants and the audit of recent gateway calls (host, tool, class, grant, outcome, time; arguments only as a keyed hash) for the downstream servers you may use.`,
     inputSchema: z.object({ server: z.string().max(24).optional(), limit: z.number().int().min(1).max(500).default(100) }).strict(), annotations: { readOnlyHint: true } },
-    async x => execute(async () => { requireLeaderOrOperator(); return { grants: downstream.grants(dsCaller()).filter(g => !x.server || g.server === x.server), audit: downstream.audit(dsCaller(), x) }; }));
+    async x => execute(async () => { requireLeaderOrOperator(); return { grants: downstream.grants(dsCaller()).filter(g => !x.server || g.server === x.server), audit: downstream.audit(dsCaller(), x),
+      refusedWithoutAccess: downstream.refusedOutsiders(dsCaller()) }; }));
   surface.finalize();
   return server;
 });

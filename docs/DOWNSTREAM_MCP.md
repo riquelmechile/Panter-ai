@@ -54,7 +54,7 @@ Create a JSON file and point `PANTER_DOWNSTREAM_CONFIG` at it (for example `~/pa
 | `timeoutMs` | Per call, 1000-300000. Default 30000. |
 | `description` | Shown in status. |
 
-A config that fails validation stops Panter from starting: a half-configured gateway is worse than none. Panter fetches each server's tools at start, every 10 minutes, on demand with `panter_downstream_refresh`, and before any call when the cached list is more than a minute old, so a tool whose annotations changed is classified by what the server says now.
+A config that fails validation stops Panter from starting: a half-configured gateway is worse than none. Panter fetches each server's tools at start, every 10 minutes, on demand with `panter_downstream_refresh`, and before any call when the cached list is more than a minute old, so a tool whose annotations changed is classified by what the server says now. If that fetch fails, the call fails too (fail closed), and calls fail fast for 10 seconds before Panter asks again.
 
 ## Using it
 
@@ -67,7 +67,7 @@ panter_ds_shop { "operation": "lookup", "arguments": { "sku": "A1" } }
 panter_ds_shop { "operation": "set_price", "arguments": { "sku": "A1", "price": 9990 }, "grantId": "…" }
 ```
 
-`index` lists each tool with its class; with `arguments.operation` it returns that tool's input schema. A downstream tool that is itself called `index` is reached as operation `@index`. A host not allowed on the server is refused, `index` included, and the refusal is audited.
+`index` lists each tool with its class; with `arguments.operation` it returns that tool's input schema. A downstream tool that is itself called `index` is reached as operation `@index`. A host not allowed on the server is refused, `index` included; those refusals are counted per host and server (`refusedWithoutAccess` in the audit tool) rather than written one by one, so they cannot push real calls out of the audit.
 
 ## Write grants
 
@@ -86,9 +86,9 @@ panter_downstream_revoke { "grantId": "…" }
 ## Health, failures and audit
 
 - `panter_downstream_status`: per server you may use, `OK`, `DEGRADED` (the last call failed), `CIRCUIT_OPEN`, `TOKEN_MISSING` or `NOT_CONTACTED`, with tool counts by class.
-- Three transport failures in a row (timeouts, broken connections) open the circuit for 30 seconds: calls fail fast instead of piling up. A slow call that times out fails alone and never closes the connection other calls are using; calls that fail together because one connection broke count once. Any success resets the count. Tool errors (`isError`) are not transport failures.
+- Three transport failures in a row (timeouts, broken connections) open the circuit for 30 seconds: calls fail fast instead of piling up. A slow call that times out fails alone and never closes the connection other calls are using; calls that fail together because one connection broke count once. Any success resets the count. Tool errors (`isError`) and JSON-RPC errors are the server answering, not transport failures: they count nothing and keep the connection. An answer over 4 MB fails its own call with that reason and counts nothing either.
 - `panter_downstream_audit` (leader or operator): for the servers the caller may use, the grants and the last 2000 calls with host, tool, class, grant, outcome (`OK`, `TOOL_ERROR`, `REFUSED`, `FAILED`), duration and error. Arguments are stored only as a keyed hash (HMAC-SHA-256 with a key kept in the ledger), so short values cannot be guessed back. The audit and the grants live in the SQLite ledger (`downstream`), so they are in every backup.
-- Error messages never include the token: it is removed from the whole text (also as `Bearer <token>`) before the text is shortened.
+- Neither error messages nor results include the token: it is removed from the whole error text (also as `Bearer <token>`) before the text is shortened, and from every string of a result before it reaches the host.
 
 ## Adding a project
 

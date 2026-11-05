@@ -7,7 +7,7 @@
  * says otherwise) and gated by the server's write policy and Panter's write grants, then forwarded with a timeout and
  * a circuit breaker, and audited. The downstream server keeps its own approvals on top (a double lock).
  */
-import { Client, StreamableHTTPClientTransport, SdkError, SdkErrorCode } from '@modelcontextprotocol/client';
+import { Client, StreamableHTTPClientTransport, SdkError, SdkErrorCode, ProtocolError } from '@modelcontextprotocol/client';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import type { SqliteLedger } from './sqlite-ledger.js';
@@ -44,17 +44,19 @@ export const clean = (e: unknown, secrets: string[] = []) => {
   for (const x of secrets) if (x) s = s.split(x).join('[redacted]');
   return s.replace(/\s+/g, ' ').slice(0, 300);
 };
-/** fetch that refuses redirects and stops reading a response past MAX_RESPONSE_BYTES. */
-const limitedFetch = async (url: string | URL, init?: RequestInit): Promise<Response> => {
+/** fetch that refuses redirects and stops reading a response past MAX_RESPONSE_BYTES (and says so through `cut`). */
+const limitedFetch = (cut: () => void) => async (url: string | URL, init?: RequestInit): Promise<Response> => {
   const res = await fetch(url, { ...init, redirect: 'error' });
   if (!res.body) return res;
   let seen = 0;
   const cap = new TransformStream<Uint8Array, Uint8Array>({ transform(chunk, ctl) {
     seen += chunk.byteLength;
-    if (seen > MAX_RESPONSE_BYTES) ctl.error(new Error(`response larger than ${MAX_RESPONSE_BYTES} bytes`)); else ctl.enqueue(chunk);
+    if (seen > MAX_RESPONSE_BYTES) { cut(); ctl.error(new Error(`response larger than ${MAX_RESPONSE_BYTES} bytes`)); } else ctl.enqueue(chunk);
   } });
   return new Response(res.body.pipeThrough(cap), { status: res.status, statusText: res.statusText, headers: res.headers });
 };
+/** After a failed tool-list fetch, calls fail fast (closed) for this long before Panter asks again. */
+const REFRESH_RETRY_MS = 10_000;
 
 /** http only to this machine or a private network; https anywhere. */
 function allowedUrl(raw: string): boolean {
@@ -113,6 +115,7 @@ export function classify(annotations: { readOnlyHint?: unknown; destructiveHint?
 type ServerState = {
   config: DownstreamConfig; tools: DownstreamTool[]; fetchedAt: string | null; fetchedMs: number; failures: number; openUntil: number;
   lastError: string | null; client: Promise<Client> | null; refreshing: Promise<{ server: string; tools: number }> | null;
+  refreshFailedMs: number; refreshError: string | null; cutMs: number;
 };
 export type Caller = { id: string; operator: boolean };
 
@@ -120,7 +123,7 @@ export class DownstreamGateway {
   private readonly servers = new Map<string, ServerState>();
   constructor(configs: DownstreamConfig[], private readonly db: SqliteLedger | null,
     private readonly env: Record<string, string | undefined> = process.env, private readonly now: () => number = Date.now) {
-    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null });
+    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null, refreshFailedMs: 0, refreshError: null, cutMs: 0 });
   }
   get configured(): boolean { return this.servers.size > 0; }
   names(): string[] { return [...this.servers.keys()]; }
@@ -143,7 +146,7 @@ export class DownstreamGateway {
       const client = new Client({ name: 'panter-ai-gateway', version: '1.0.0' });
       // No redirects (the token is only ever sent to the configured address) and bounded responses.
       const transport = new StreamableHTTPClientTransport(new URL(s.config.url),
-        { fetch: limitedFetch as any, requestInit: token ? { headers: { authorization: `Bearer ${token}` } } : {} });
+        { fetch: limitedFetch(() => { s.cutMs = this.now(); }) as any, requestInit: token ? { headers: { authorization: `Bearer ${token}` } } : {} });
       let timer: NodeJS.Timeout | undefined;
       try {
         await Promise.race([client.connect(transport), new Promise((_, no) => { timer = setTimeout(() => no(new Error('connect timed out')), s.config.timeoutMs); })]);
@@ -167,13 +170,18 @@ export class DownstreamGateway {
    * closed (and a failure counted) only for a broken connection, and only once per connection. */
   private async guarded<T>(s: ServerState, op: (c: Client) => Promise<T>): Promise<T> {
     if (this.now() < s.openUntil) throw new Error(`circuit open until ${iso(s.openUntil)} after ${s.failures} failures: ${s.lastError ?? ''}`);
-    const used = this.connect(s);
+    const used = this.connect(s), started = this.now();
     try {
       const result = await op(await used);
       s.failures = 0; s.lastError = null; s.openUntil = 0;
       return result;
     } catch (error) {
+      // An oversized response is the server's answer being refused, not a transport failure (the SDK only notices
+      // it at the timeout): it fails this call alone, says why, and counts nothing.
+      if (s.cutMs >= started) throw new Error(`response larger than ${MAX_RESPONSE_BYTES} bytes`);
       const message = clean(error, this.secrets(s));
+      // A JSON-RPC error is the server answering: the connection is fine and nothing counts.
+      if (error instanceof ProtocolError) throw new Error(message);
       const timeout = error instanceof SdkError && error.code === SdkErrorCode.RequestTimeout;
       // Calls that fail together because one connection broke count once (one failure per connection).
       if (timeout || !this.failedConnections.has(used)) {
@@ -190,7 +198,10 @@ export class DownstreamGateway {
     const s = this.state(name);
     // Concurrent refreshes of one server share a single tools/list.
     if (s.refreshing) return s.refreshing;
-    s.refreshing = this.fetchTools(s).finally(() => { s.refreshing = null; });
+    s.refreshing = this.fetchTools(s)
+      .then(r => { s.refreshFailedMs = 0; s.refreshError = null; return r; },
+        e => { s.refreshFailedMs = this.now(); s.refreshError = clean(e, this.secrets(s)); throw e; })
+      .finally(() => { s.refreshing = null; });
     return s.refreshing;
   }
   private async fetchTools(s: ServerState): Promise<{ server: string; tools: number }> {
@@ -261,6 +272,9 @@ export class DownstreamGateway {
       return !!g;
     }).result };
   }
+  /** Calls refused because the caller may not use the server at all (since start, in memory). */
+  private readonly outsiders = new Map<string, { host: string; server: string; refused: number; lastAt: string }>();
+  refusedOutsiders(caller: Caller) { return [...this.outsiders.values()].filter(x => this.allowed(caller, x.server)); }
   /** Grants and audit of the servers this caller may use (the operator sees all). */
   grants(caller: Caller): DownstreamGrant[] { return this.db ? this.db.read<Data>('downstream', seed).grants.filter(g => this.allowed(caller, g.server)) : []; }
   audit(caller: Caller, filter: { server?: string; limit?: number } = {}): DownstreamAudit[] {
@@ -307,13 +321,22 @@ export class DownstreamGateway {
     const finish = (outcome: DownstreamAudit['outcome'], error: string | null) =>
       this.record({ at: iso(started), host: caller.id, server, tool, cls, grantId: usedGrant, outcome, ms: this.now() - started, argsSha256, error });
     const refuse = (message: string) => { finish('REFUSED', message); return { isError: true, content: [{ type: 'text' as const, text: message }] }; };
-    if (!s || !this.allowed(caller, server)) return refuse(`${caller.id} may not use downstream server "${server}"`);
-    // A stale list is fetched again first: the class of a tool is read from what the server says now.
+    // A caller with no access is counted, not written to the audit one call at a time (it could flood it).
+    if (!s || !this.allowed(caller, server)) {
+      const key = `${caller.id} ${server}`, c = this.outsiders.get(key);
+      this.outsiders.set(key, { host: caller.id, server, refused: (c?.refused ?? 0) + 1, lastAt: iso(started) });
+      if (this.outsiders.size > 200) this.outsiders.delete(this.outsiders.keys().next().value!);
+      return { isError: true, content: [{ type: 'text' as const, text: `${caller.id} may not use downstream server "${server}"` }] };
+    }
+    // A stale list is fetched again first: the class of a tool is read from what the server says now. If that fails
+    // the call fails too (fail closed): an old "read" must never let a tool that became destructive through.
     if (!s.fetchedAt || this.now() - s.fetchedMs > FRESH_MS) {
-      try { await this.refresh(server); }
-      catch (error) {
-        if (!s.fetchedAt) { const message = clean(error, this.secrets(s)); finish('FAILED', message); return { isError: true, content: [{ type: 'text' as const, text: `${server} is unreachable: ${message}` }] }; }
+      // Right after a failed fetch, fail fast instead of making every call wait for another one.
+      if (s.refreshFailedMs && this.now() - s.refreshFailedMs < REFRESH_RETRY_MS) {
+        finish('FAILED', s.refreshError); return { isError: true, content: [{ type: 'text' as const, text: `${server}: could not read its tool list: ${s.refreshError ?? ''}` }] };
       }
+      try { await this.refresh(server); }
+      catch (error) { const message = clean(error, this.secrets(s)); finish('FAILED', message); return { isError: true, content: [{ type: 'text' as const, text: `${server}: could not read its tool list: ${message}` }] }; }
     }
     const known = s.tools.find(t => t.name === tool);
     if (!known) return refuse(`Unknown tool "${tool}" on ${server}; call operation "index"`);
@@ -331,7 +354,8 @@ export class DownstreamGateway {
         { timeout: s.config.timeoutMs } as any));
       if (Buffer.byteLength(JSON.stringify(result)) > MAX_RESULT_BYTES) { finish('FAILED', 'result too large'); return { isError: true, content: [{ type: 'text' as const, text: `${server}.${tool} returned more than ${MAX_RESULT_BYTES} bytes` }] }; }
       finish(result.isError ? 'TOOL_ERROR' : 'OK', null);
-      return result;
+      // Whatever the server sends back (an error echoing headers included) reaches the host without the token.
+      return redactDeep(result, this.secrets(s)) as typeof result;
     } catch (error) {
       const message = clean(error, this.secrets(s));
       finish('FAILED', message);
@@ -342,3 +366,12 @@ export class DownstreamGateway {
 }
 
 export const routerFor = (name: string) => `panter_ds_${name}`;
+
+/** Every string inside a value with the secrets replaced (bounded depth; other values unchanged). */
+export function redactDeep(value: unknown, secrets: string[], depth = 0): unknown {
+  if (!secrets.length) return value;
+  if (typeof value === 'string') { let s = value; for (const x of secrets) if (x) s = s.split(x).join('[redacted]'); return s; }
+  if (depth > 32 || !value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(v => redactDeep(v, secrets, depth + 1));
+  return Object.fromEntries(Object.entries(value).map(([k, v]) => [redactDeep(k, secrets, depth + 1) as string, redactDeep(v, secrets, depth + 1)]));
+}
