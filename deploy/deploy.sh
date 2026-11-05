@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Deploy one exact commit of main: build and test it in its own release directory, back up the live state, switch the
-# `current` symlink, restart, and roll back automatically if /health does not report that commit.
+# Deploy one exact commit of main: build and test it in its own release directory, stop the service, back up the
+# state, switch the `current` symlink, start it, and roll back automatically if /health does not report that commit.
 #
 #   PANTER_SOURCE_REPO=~/panter-ai/src-clone deploy/deploy.sh <full-40-hex-sha>
 #
@@ -32,7 +32,8 @@ if [ -L "$BASE/current" ]; then
   [ -n "$live" ] && [ "$(dirname "$live")" = "$(readlink -f "$RELEASES")" ] && PREV=$(basename "$live")
 fi
 [ "$PREV" = "$S" ] && { echo "deploy: $S is already live" >&2; exit 2; }
-# A leftover directory from a failed attempt of this same commit is replaced; a live or kept one never is.
+# A directory for this same commit (a failed attempt, or an older kept release being deployed again) is rebuilt; the
+# live one never is (checked above).
 [ -e "$REL" ] && { echo "deploy: removing leftover $REL from an earlier attempt"; rm -rf -- "$REL"; }
 
 git -C "$SRC" fetch -q origin
@@ -44,18 +45,28 @@ mkdir -p "$REL"
 git -C "$SRC" archive "$SHA" | tar -x -C "$REL"
 echo "$SHA" > "$REL/REVISION"
 # Build and test with a clean environment, so a shell with the production env loaded never points tests at real data.
-if ! (cd "$REL" && env -i PATH="$PATH" HOME="$HOME" npm ci >"$REL.ci.log" 2>&1 \
-      && env -i PATH="$PATH" HOME="$HOME" npm run build >"$REL.build.log" 2>&1 \
-      && env -i PATH="$PATH" HOME="$HOME" npm test >"$REL.test.log" 2>&1); then
+# (9>&-: a process left behind by the tests must not keep holding the deploy lock.)
+if ! (cd "$REL" && env -i PATH="$PATH" HOME="$HOME" npm ci >"$REL.ci.log" 2>&1 9>&- \
+      && env -i PATH="$PATH" HOME="$HOME" npm run build >"$REL.build.log" 2>&1 9>&- \
+      && env -i PATH="$PATH" HOME="$HOME" npm test >"$REL.test.log" 2>&1 9>&-); then
   echo "deploy: build or tests failed (see $REL.*.log); nothing switched" >&2
   rm -rf -- "$REL"; exit 1
 fi
 grep -E '^# (tests|pass|fail) ' "$REL.test.log" || true
 
-node "$REL/deploy/backup.mjs" --base "$BASE" --label "pre-$S-$(date -u +%Y%m%d%H%M%S)-$$" --release "$SHA"
-
 switch() { ln -sfn "releases/$1" "$BASE/current.new" && mv -Tf "$BASE/current.new" "$BASE/current"; }
 restart() { systemctl --user reset-failed "$UNIT" >/dev/null 2>&1 || true; systemctl --user restart "$UNIT" || true; }
+
+# The JSON stores are only consistent while the service is stopped, so the backup is taken with it stopped (a few
+# seconds; the restart below was going to interrupt it anyway). etc/quiesce keeps the health check from restarting it
+# meanwhile.
+mkdir -p "$BASE/etc"; touch "$BASE/etc/quiesce"; trap 'rm -f "$BASE/etc/quiesce"' EXIT
+echo "deploy: stopping $UNIT for a consistent backup"
+systemctl --user stop "$UNIT"
+if ! node "$REL/deploy/backup.mjs" --base "$BASE" --label "pre-$S-$(date -u +%Y%m%d%H%M%S)-$$" --release "$SHA" --stopped; then
+  echo "deploy: backup failed; nothing switched, starting ${PREV:-the current release} again" >&2
+  restart; rm -rf -- "$REL"; exit 1
+fi
 healthy() { # healthy <revision|any>: poll /health for about a minute
   for _ in $(seq 1 20); do
     sleep 3
@@ -74,9 +85,8 @@ if ! healthy "$SHA"; then
   echo "deploy: rolling back to $PREV" >&2
   switch "$PREV"
   restart
-  if healthy any; then echo "deploy: rolled back to $PREV, which is healthy" >&2
-  else echo "deploy: ROLLBACK FAILED: $PREV is live but /health does not answer; act now" >&2; fi
-  rm -rf -- "$REL"
+  if healthy any; then echo "deploy: rolled back to $PREV, which is healthy" >&2; rm -rf -- "$REL"
+  else echo "deploy: ROLLBACK FAILED: $PREV is live but /health does not answer; act now ($REL is kept: it may be the only release that runs on the current data)" >&2; fi
   exit 1
 fi
 echo "deploy: $S is live"
@@ -84,7 +94,7 @@ echo "deploy: $S is live"
 # Keep the newest $KEEP releases, always including the live one and the one just replaced.
 keep=" $S $PREV "
 kept=$(wc -w <<<"$keep")
-for d in $(cd "$RELEASES" && ls -1td -- */ 2>/dev/null | sed 's#/$##'); do
+for d in $(cd "$RELEASES" && ls -1td -- */ 2>/dev/null | sed 's#/$##' | grep -E '^[0-9a-f]{7}$'); do
   case "$keep" in *" $d "*) continue;; esac
   if [ "$kept" -lt "$KEEP" ]; then keep="$keep$d "; kept=$((kept + 1)); continue; fi
   rm -rf -- "${RELEASES:?}/$d" "$RELEASES/$d".ci.log "$RELEASES/$d".build.log "$RELEASES/$d".test.log "$RELEASES/$d".done

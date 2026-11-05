@@ -3,12 +3,15 @@
 // environment and the legacy JSON state, with a restore check of the copy. Used before every deploy
 // (deploy/deploy.sh) and daily (deploy/systemd/panter-backup.timer).
 //
-//   node deploy/backup.mjs --base ~/panter-ai --label pre-abc1234-202611041200 [--release <sha>]
-//   node deploy/backup.mjs --base ~/panter-ai --daily [--keep-daily 14]
+//   node deploy/backup.mjs --base ~/panter-ai --label pre-abc1234-202611041200 [--release <sha>] [--stopped]
+//   node deploy/backup.mjs --base ~/panter-ai --daily [--keep-daily 14] [--stopped]
+//
+// The SQLite copy is consistent at any time; the JSON stores (native reviews, Panter-RDD) are only consistent with each
+// other and with the ledger while the service is stopped. --stopped records that the caller stopped it (deploy.sh and
+// daily-backup.sh do); without it the manifest marks the backup as taken online.
 //
 // Never overwrites a backup; prunes only daily-* backups beyond --keep-daily, never deploy backups.
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { createHash } from 'node:crypto';
@@ -26,6 +29,8 @@ process.on('exit', code => {
   if (scratch) fs.rmSync(scratch, { recursive: true, force: true });
   if (code !== 0 && created) fs.rmSync(created, { recursive: true, force: true });
 });
+// Interrupted (a timeout, Ctrl-C): clean up the same way.
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => process.exit(1));
 
 const base = path.resolve(opt('base') ?? fail('--base required'));
 const daily = flag('daily');
@@ -34,6 +39,7 @@ if (!/^[a-z0-9][a-z0-9.-]{0,80}$/.test(label)) fail('invalid label');
 const keepDaily = Number(opt('keep-daily') ?? '14');
 if (!Number.isInteger(keepDaily) || keepDaily < 1 || keepDaily > 365) fail('invalid --keep-daily');
 const release = opt('release');
+const stopped = flag('stopped');
 if (release !== undefined && !/^[0-9a-f]{40}$/.test(release)) fail('invalid --release');
 
 const data = path.join(base, 'data');
@@ -50,7 +56,8 @@ fs.mkdirSync(destination, { mode: 0o700 }); created = destination;
 
 const input = new DatabaseSync(path.join(data, 'panter.sqlite'), { readOnly: true });
 const copy = path.join(destination, 'panter.sqlite');
-await backup(input, copy); input.close(); fs.chmodSync(copy, 0o600);
+// rate -1: one step, one read snapshot (with the default batches a busy writer can keep restarting the copy).
+await backup(input, copy, { rate: -1 }); input.close(); fs.chmodSync(copy, 0o600);
 // Everything below is read from the copy itself, so writes to the live ledger meanwhile cannot make it fail.
 const readLedger = file => { const db = new DatabaseSync(file, { readOnly: true });
   try { const integrity = db.prepare('PRAGMA integrity_check').get().integrity_check;
@@ -64,7 +71,8 @@ const oauth = oauthRow ? JSON.parse(oauthRow.payload) : null;
 if (oauthRow && (!Array.isArray(oauth?.clients) || !Array.isArray(oauth?.grants) || !Array.isArray(oauth?.tokens))) fail('OAuth ledger is malformed');
 
 // Restore check: open a copy of the backup elsewhere, as a restore would, and compare every ledger row with the backup.
-scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'panter-restore-check-'));
+// Inside the 0700 backups directory, never in a shared /tmp.
+scratch = fs.mkdtempSync(path.join(backupRoot, '.restore-check-'));
 const restoredPath = path.join(scratch, 'panter.sqlite');
 fs.copyFileSync(copy, restoredPath);
 const restored = readLedger(restoredPath);
@@ -76,7 +84,7 @@ fs.rmSync(scratch, { recursive: true, force: true }); scratch = null;
 // The environment is required; every JSON store in data/ (native reviews and Panter-RDD still live there, plus the
 // pre-SQLite copies) is copied too, so a restore puts back a consistent set.
 const files = [['etc/panter.env', 'panter.env', true], ['etc/operator.token', 'operator.token', false],
-  ...fs.readdirSync(data).filter(n => /^[a-z0-9-]+\.json$/.test(n)).sort().map(n => [`data/${n}`, n, false])];
+  ...fs.readdirSync(data).filter(n => /^[a-z0-9_-]+\.json$/.test(n)).sort().map(n => [`data/${n}`, n, false])];
 const copied = [], missing = [];
 for (const [from, to, required] of files) {
   const abs = path.join(base, from);
@@ -89,7 +97,7 @@ let currentRelease = null;
 try { currentRelease = fs.readlinkSync(path.join(base, 'current')); } catch { /* fresh install */ }
 const manifest = { createdAt: new Date().toISOString(), label, releaseToBeInstalled: release ?? null, currentRelease,
   ledgerFingerprint: fingerprint, oauthCounts: oauth ? { clients: oauth.clients.length, grants: oauth.grants.length, tokens: oauth.tokens.length } : null,
-  copied, missing, restoreCheck: 'ok' };
+  copied, missing, restoreCheck: 'ok', consistency: stopped ? 'service stopped' : 'online: JSON stores may be mid-update' };
 fs.writeFileSync(path.join(destination, 'manifest.json'), JSON.stringify(manifest, null, 2), { mode: 0o600 });
 created = null; // finished: keep it
 
@@ -98,5 +106,5 @@ if (daily) {
   const dailies = fs.readdirSync(backupRoot).filter(n => /^daily-\d{8}$/.test(n)).sort().reverse();
   for (const old of dailies.slice(keepDaily)) { fs.rmSync(path.join(backupRoot, old), { recursive: true, force: true }); pruned.push(old); }
 }
-console.log(JSON.stringify({ backupPath: destination, dbIntegrity: 'ok', restoreCheck: 'ok', ledgers: fingerprint.map(x => x.name),
+console.log(JSON.stringify({ backupPath: destination, dbIntegrity: 'ok', restoreCheck: 'ok', consistency: manifest.consistency, ledgers: fingerprint.map(x => x.name),
   oauthCounts: manifest.oauthCounts, copied, missing, currentRelease, pruned }));

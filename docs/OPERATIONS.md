@@ -26,14 +26,16 @@ Solo se despliegan commits que ya estén en `main` (mergeados con CI verde y apr
 PANTER_SOURCE_REPO=<clon del repo> ~/panter-ai/current/deploy/deploy.sh <sha completo de 40 caracteres>
 ```
 
+La primera vez (cuando el release activo todavía no trae `deploy/`), se corre el script del clon: `PANTER_SOURCE_REPO=<clon> <clon>/deploy/deploy.sh <sha>`. Debe correr en una shell que llegue al bus de usuario de systemd (`systemctl --user status panter-ai` tiene que funcionar ahí); si no, el reinicio no ocurre, el poll de `/health` falla y el script vuelve al release anterior.
+
 El script:
 1. Toma un lock (no corren dos deploys a la vez) y comprueba que el SHA exista y esté en `origin/main`.
 2. Lo extrae en su propio `releases/<sha7>` y escribe ahí `REVISION`.
 3. Corre `npm ci`, `npm run build` y `npm test` con un entorno limpio (sin las variables `PANTER_*` de producción). Si algo falla, no cambia nada y borra ese release; el mismo commit se puede reintentar.
-4. Hace el backup `pre-<sha7>-<fecha>-<pid>`.
-5. Cambia `current`, reinicia el servicio y espera hasta un minuto (20 intentos) a que `/health` reporte **ese mismo SHA** en `revision`.
-6. Si no responde, **vuelve solo al release anterior**, lo reinicia y comprueba que responda. Si el anterior tampoco responde, lo avisa con `ROLLBACK FAILED`. El release malo se borra.
-7. Deja los 3 releases más nuevos (siempre el activo y el anterior, aunque `current` se haya escrito a mano con ruta absoluta) y borra el resto.
+4. Detiene el servicio y hace el backup `pre-<sha7>-<fecha>-<pid>` (los JSON solo quedan consistentes con el servicio detenido; son unos segundos y el reinicio igual lo iba a cortar). Si el backup falla, vuelve a levantar el release actual sin cambiar nada.
+5. Cambia `current`, levanta el servicio y espera hasta un minuto (20 intentos) a que `/health` reporte **ese mismo SHA** en `revision`.
+6. Si no responde, **vuelve solo al release anterior**, lo reinicia y comprueba que responda, y borra el release malo. Si el anterior tampoco responde, lo avisa con `ROLLBACK FAILED` y deja el release nuevo en su lugar (puede ser el único que corre con los datos actuales).
+7. Deja los 3 releases más nuevos (siempre el activo y el anterior, aunque `current` se haya escrito a mano con ruta absoluta) y borra el resto. Solo toca directorios con nombre de 7 hex.
 
 El rollback automático es del código. Los datos no se devuelven solos: si un release cambió el estado, se restauran a mano desde el backup `pre-…` (ver más abajo).
 
@@ -41,10 +43,10 @@ El rollback automático es del código. Los datos no se devuelven solos: si un r
 
 ## Backups
 
-`deploy/backup.mjs` copia en línea el SQLite (una copia consistente aunque el servicio esté escribiendo), `etc/panter.env` y todos los `data/*.json` (las revisiones nativas y Panter-RDD todavía guardan su estado ahí), con permisos 0700/0600. Después **prueba la restauración**: abre en otro lugar una copia del backup, corre `integrity_check` y compara cada ledger con el backup. La huella de cada ledger se calcula sobre el backup mismo, así que las escrituras en vivo no hacen fallar el chequeo. Si algo falla, no deja un backup a medias ni la copia temporal. Requiere Node 22.16 o más.
+`deploy/backup.mjs` copia el SQLite, `etc/panter.env` y todos los `data/*.json` (las revisiones nativas y Panter-RDD todavía guardan su estado ahí), con permisos 0700/0600. La copia del SQLite es consistente aunque el servicio esté escribiendo, pero los JSON solo son consistentes entre sí y con el ledger con el servicio **detenido**: por eso el deploy y el backup diario lo detienen unos segundos y pasan `--stopped`. El manifest anota `consistency` (`service stopped` u `online: …`). Después **prueba la restauración**: abre en otro lugar una copia del backup, corre `integrity_check` y compara cada ledger con el backup. La huella de cada ledger se calcula sobre el backup mismo, así que las escrituras en vivo no hacen fallar el chequeo. Si algo falla, no deja un backup a medias ni la copia temporal. Requiere Node 22.16 o más.
 
 - Antes de cada deploy: `--label pre-<sha7>-<fecha> --release <sha>` (nunca se sobrescribe).
-- Diario: `--daily --keep-daily 14` desde `panter-backup.timer`. Si ya se tomó el del día, lo salta; si quedó a medias, lo rehace. Solo borra diarios viejos, nunca backups de deploy.
+- Diario: `panter-backup.timer` corre `deploy/daily-backup.sh`, que espera el lock de deploy, detiene el servicio (solo si estaba corriendo), hace `--daily --keep-daily 14 --stopped` y lo vuelve a levantar. Si ya se tomó el del día, lo salta; si quedó a medias, lo rehace. Solo borra diarios viejos, nunca backups de deploy.
 
 ### Restaurar
 
@@ -64,9 +66,11 @@ rm ~/panter-ai/etc/maintenance
 
 ## Healthcheck
 
-`panter-healthcheck.timer` corre `deploy/healthcheck.sh` cada 5 minutos. Con dos fallos seguidos de `/health`, reinicia `panter-ai.service`. Mientras exista `etc/maintenance` no hace nada. Si `etc/ops.env` define `PANTER_ALERT_WEBHOOK`, avisa ahí en cada fallo; el JSON incluye `text` y `content`, así que sirve para webhooks de Slack o Discord.
+`panter-healthcheck.timer` corre `deploy/healthcheck.sh` cada 5 minutos. Con dos fallos seguidos de `/health`, reinicia `panter-ai.service`. Mientras exista `etc/maintenance` no hace nada; tampoco mientras exista `etc/quiesce` (lo crean el deploy y el backup diario mientras detienen el servicio; si tiene más de 30 minutos se ignora). Si `etc/ops.env` define `PANTER_ALERT_WEBHOOK`, avisa ahí en cada fallo; el JSON incluye `text` y `content`, así que sirve para webhooks de Slack o Discord.
 
 ## Instalar los timers
+
+Los timers corren los scripts de `current/deploy/`, así que siguen al release activo. Si se vuelve a un release anterior a estos scripts, dejan de correr hasta el siguiente deploy.
 
 ```sh
 cp ~/panter-ai/current/deploy/systemd/panter-{backup,healthcheck}.{service,timer} ~/.config/systemd/user/

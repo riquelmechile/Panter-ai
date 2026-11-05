@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Run by panter-healthcheck.timer: restart the service after two failed /health checks in a row, and post to an
 # optional alert webhook (PANTER_ALERT_WEBHOOK, e.g. a Slack/Discord-compatible incoming webhook) on every failure.
-# While $PANTER_BASE/etc/maintenance exists (e.g. during a restore) it does nothing.
+# While $PANTER_BASE/etc/maintenance exists (e.g. during a restore) it does nothing; nor while etc/quiesce is fresh.
 set -uo pipefail
 BASE=${PANTER_BASE:-$HOME/panter-ai}
 HEALTH=${PANTER_HEALTH_URL:-http://127.0.0.1:18080/health}
 UNIT=${PANTER_UNIT:-panter-ai.service}
 [ -e "$BASE/etc/maintenance" ] && exit 0
+# A deploy or the daily backup stopped the service on purpose (a marker older than 30 minutes is stale and ignored).
+[ -n "$(find "$BASE/etc/quiesce" -mmin -30 2>/dev/null)" ] && exit 0
 STATE_DIR=${XDG_RUNTIME_DIR:-$BASE/etc}
 STATE="$STATE_DIR/panter-healthcheck.failures"
 if curl -fsS --max-time 5 "$HEALTH" 2>/dev/null | grep -q '"status":"ok"'; then rm -f "$STATE"; exit 0; fi

@@ -22,7 +22,8 @@ async function install(withEnv = true) {
   if (withEnv) await writeFile(join(base, 'etc', 'panter.env'), 'PANTER_PORT=18080\n');
   return base;
 }
-const backup = (base: string, ...args: string[]) => run(process.execPath, [script, '--base', base, ...args]);
+// A busy writer must not stretch a backup: one copy that keeps restarting would hold the deploy lock.
+const backup = (base: string, ...args: string[]) => run(process.execPath, [script, '--base', base, ...args], { timeout: 10_000 });
 
 test('a labelled backup copies the ledger and env, passes its restore check and is never overwritten', async () => {
   const base = await install();
@@ -76,17 +77,21 @@ test('a backup taken while the ledger is being written passes, copies every JSON
   try {
     await writeFile(join(base, 'data', 'native-reviews.json'), '{"version":1}');
     await writeFile(join(base, 'data', 'panter-rdd.json'), '{"version":1}');
+    await writeFile(join(base, 'data', 'gemini_mail.json'), '{"version":1}');
     const writer = new DatabaseSync(join(base, 'data', 'panter.sqlite'));
     writer.exec('PRAGMA journal_mode=WAL');
+    // Big enough (~8 MB) that a copy made in small batches would keep restarting under these writes.
+    writer.exec('CREATE TABLE filler (x TEXT)');
+    const fill = writer.prepare('INSERT INTO filler VALUES (?)'); writer.exec('BEGIN');
+    for (let i = 0; i < 4000; i++) fill.run('x'.repeat(2000)); writer.exec('COMMIT');
     let n = 0; const timer = setInterval(() => { writer.prepare('UPDATE ledger SET revision=? WHERE name=?').run(++n, 'harness'); }, 2);
-    const before = (await readdir(tmpdir())).filter(x => x.startsWith('panter-restore-check-')).length;
     try {
       for (let i = 0; i < 4; i++) {
         const out = JSON.parse((await backup(base, '--label', `pre-busy-${i}`)).stdout);
         assert.equal(out.restoreCheck, 'ok');
-        assert.ok(out.copied.includes('native-reviews.json') && out.copied.includes('panter-rdd.json'));
+        assert.ok(['native-reviews.json', 'panter-rdd.json', 'gemini_mail.json'].every(f => out.copied.includes(f)), out.copied.join());
       }
     } finally { clearInterval(timer); writer.close(); }
-    assert.equal((await readdir(tmpdir())).filter(x => x.startsWith('panter-restore-check-')).length, before, 'no scratch copy left behind');
+    assert.deepEqual((await readdir(join(base, 'backups'))).filter(x => x.startsWith('.restore-check-')), [], 'no scratch copy left behind');
   } finally { await rm(base, { recursive: true, force: true }); }
 });
