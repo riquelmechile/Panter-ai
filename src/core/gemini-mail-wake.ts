@@ -277,7 +277,7 @@ export function mimeTexts(raw:string):string[]{
 const MAX_WRAP_WIDTH=80;
 /** Rejoin a hard-wrapped JSON block. Only a break inside a JSON string matters (elsewhere a break is whitespace, or cuts
  * a literal that joins back with nothing), and a raw newline can never be part of a JSON string, so every such break is
- * the mailer's. Two or more of them all at one width (counted in characters, or in bytes where a cut stops short
+ * the mailer's. Two or more of them all at one width (counted in UTF-16 units, in code points, or in bytes where a cut stops short
  * only of a UTF-8 character that would not fit, with `firstLineOffset` for the part of the first line before the block) are a fixed-width cut, which may land anywhere: they join with nothing.
  * Breaks at varying widths are a word wrap, which dropped the space it broke at: they join with a space, except a
  * no-space line at least as wide as every line with spaces and within mailer widths (~76-80), a piece of a long word
@@ -299,7 +299,9 @@ export function unwrap(text:string,firstLineOffset=0):string{
   const chars=(i:number)=>lines[i]!.length+(i===0?firstLineOffset:0);
   const bytes=(i:number)=>Buffer.byteLength(lines[i]!)+(i===0?firstLineOffset:0);
   const cuts=inString.flatMap((inside,i)=>inside?[i]:[]);
-  const sameChars=cuts.every(i=>chars(i)===chars(cuts[0]!));
+  // Cutters count UTF-16 units, code points (an emoji is one) or bytes; a cut uniform in any of them is fixed.
+  const points=(i:number)=>[...lines[i]!].length+(i===0?firstLineOffset:0);
+  const sameChars=cuts.every(i=>chars(i)===chars(cuts[0]!))||cuts.every(i=>points(i)===points(cuts[0]!));
   // A byte-counting cutter stops short of the width only when the next character would not fit whole.
   let full=0;for(const i of cuts)if(bytes(i)>full)full=bytes(i);
   const sameBytes=cuts.every(i=>{const next=lines[i+1]!.codePointAt(0);

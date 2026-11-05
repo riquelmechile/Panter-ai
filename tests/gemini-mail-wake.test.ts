@@ -374,6 +374,7 @@ test('a fixed-width or byte-width cut never changes the result, and a word wrap 
   const results = [
     JSON.stringify({ lens: 'risk', candidateSha: sha, findings: [{ severity: 'low', claim: 'a small thing in the code worth a second look later on' }] }),
     'Read the diff and found nothing to change in the work. Revisión completa: sin hallazgos críticos en el código de la función.',
+    'Revisé la función principal 🐆🐭 y el módulo de pagos 🧾: todo en orden, sin hallazgos críticos ni advertencias pendientes en este cambio.',
     JSON.stringify({ agentId: 'jd-judge-b', candidateSha: sha, evidence: [`Read leader-supplied diff main...${sha} in riquelmechile/panter-e2e (2 files modified).`, 'Verified add(a, b) remains unchanged and multiply(a, b) returns a * b.'] }),
   ];
   const cutChars = (w: number) => (s: string) => s.split('\n').flatMap(l => l.match(new RegExp(`.{1,${w}}`, 'g')) ?? ['']).join('\r\n');
@@ -388,7 +389,8 @@ test('a fixed-width or byte-width cut never changes the result, and a word wrap 
   let wrapped = 0, wrappedExact = 0;
   for (const result of results) for (const indent of [undefined, 2]) for (const sep of ['\r\n', ' ']) for (let w = 60; w <= 80; w++) {
     const body = JSON.stringify({ work_id: '7e31e313-7f6e-4fce-8cb7-9397bbbd9393', token, success: true, result }, null, indent);
-    for (const [kind, cut] of [['chars', cutChars], ['bytes', cutBytes], ['words', wordWrap]] as const) {
+    const cutPoints = (w: number) => (s: string) => s.split('\n').flatMap(l => { const p = [...l], o: string[] = []; for (let i = 0; i < p.length; i += w) o.push(p.slice(i, i + w).join('')); return o.length ? o : ['']; }).join('\r\n');
+    for (const [kind, cut] of [['chars', cutChars], ['points', cutPoints], ['bytes', cutBytes], ['words', wordWrap]] as const) {
       const text = cut(w)(GEMINI_MAIL_RESULT_MARKER + sep + body);
       const first = (markedJson(text) as any[]).find(r => r.token === token);
       assert.ok(first, `${kind} w${w}: the token survives`);

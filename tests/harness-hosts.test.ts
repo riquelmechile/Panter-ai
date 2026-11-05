@@ -919,8 +919,9 @@ test('a close landing while a tick prepares native or inline work hands the host
   const after = (await h.get(s.id))!;
   assert.ok(after.closedAt);
   assert.ok(after.steps.every(x => x.status !== 'ISSUED'), 'no phase was issued on the closed run');
-  assert.equal(after.revision, (await h.get(s.id))!.revision);
+  const closedRevision = after.revision;
   assert.equal((await h.tick(s.id, { ...all, peerStates: {} })).status, 'HARNESS_CLOSED');
+  assert.equal((await h.get(s.id))!.revision, closedRevision, 'ticking a closed run changes nothing');
 }));
 
 test('a closed run no longer authorizes writers, units or delivery strategy', async () => {
