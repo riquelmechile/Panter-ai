@@ -18,22 +18,29 @@ function rutCheckDigit(body: string): string {
   return dv === 11 ? '0' : dv === 10 ? 'K' : String(dv);
 }
 const RUT = /(?<![\w.-])(\d{1,2}(?:\.\d{3}){2}|\d{7,8})-([\dkK])(?![\w-])/g;
-const hasRut = (text: string) => [...text.matchAll(RUT)].some(m => rutCheckDigit(m[1]!.replace(/\./g, '')) === m[2]!.toUpperCase());
+/** An undotted 8-digit body that is a calendar date (a build or run stamp such as 20261105-2) is not taken as a RUT. */
+const DATE_STAMP = /^(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])$/;
+const hasRut = (text: string) => [...text.matchAll(RUT)].some(m => !DATE_STAMP.test(m[1]!) &&
+  rutCheckDigit(m[1]!.replace(/\./g, '')) === m[2]!.toUpperCase());
 
-/** Machine addresses that identify no one (commit trailers, git remotes). */
-const NOREPLY = /^(?:[^@]*\+)?(?:no-?reply|noreply)@|@users\.noreply\.github\.com$|^git@/i;
+/** Addresses that identify no one: no-reply senders, GitHub's no-reply users, git remotes, and the domains reserved for
+ * examples and tests (RFC 2606 and 6761) or private names (.internal). */
+const NOREPLY = /^(?:no-?reply|noreply)@|@users\.noreply\.github\.com$|^git@|@(?:[\w-]+\.)*(?:example\.(?:com|net|org)|example|test|invalid|localhost|local|internal)$/i;
 const LOCAL = /[A-Za-z0-9._%+-]{1,64}$/, DOMAIN = /^[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,8}\.[A-Za-z]{2,24}/;
 /** E-mail addresses, found from each "@" outwards over bounded windows, so the scan stays linear on any input. */
 function hasEmail(text: string): boolean {
   for (let at = text.indexOf('@'); at !== -1; at = text.indexOf('@', at + 1)) {
-    const local = LOCAL.exec(text.slice(Math.max(0, at - 64), at))?.[0];
+    const before = text.slice(Math.max(0, at - 64), at);
+    // user@host right after "scheme://" is a URL's user, not a mailbox.
+    if (/:\/\/[^\s/@]*$/.test(before)) continue;
+    const local = LOCAL.exec(before)?.[0];
     const domain = local && DOMAIN.exec(text.slice(at + 1, at + 1 + 300))?.[0];
     if (local && domain && !NOREPLY.test(`${local}@${domain}`)) return true;
   }
   return false;
 }
 
-const PHONE = /(?<![\w+])\+56[\s.-]?(?:9[\s.-]?\d{4}[\s.-]?\d{4}|[2-8]\d?[\s.-]?\d{3,4}[\s.-]?\d{4})(?![\w])/;
+const PHONE = /(?<![\w+(])(?:\+56|\(\+56\))[\s.-]?(?:9[\s.-]?\d{4}[\s.-]?\d{4}|[2-8]\d?[\s.-]?\d{3,4}[\s.-]?\d{4})(?![\w])/;
 /** What kind of personal identifier the text seems to hold, or null. */
 export function findSensitive(text: string): string | null {
   if (hasRut(text)) return 'a Chilean RUT';

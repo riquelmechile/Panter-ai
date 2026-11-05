@@ -114,6 +114,8 @@ const downstream = new DownstreamGateway(downstreamConfig ? parseDownstreamConfi
   SqliteLedger.open(dataDir));
 if (downstream.configured) {
   const refresh = () => downstream.refreshAll().then(r => { for (const x of r) if ('error' in x) console.error(`Downstream ${x.server}: ${x.error}`); });
+  // Make the signing key now: the first unauthenticated request for the public keys never writes the ledger.
+  downstream.actorKeys();
   void refresh(); setInterval(refresh, 10 * 60_000).unref();
 }
 /** A mission that called a sensitive downstream server keeps no personal identifiers in what hosts send Panter for it. */
@@ -1167,8 +1169,11 @@ const http = createServer(async (req, res) => {
   }
   // Public keys that verify the actor assertions downstream servers receive (public by nature).
   if (downstream.configured && req.method === 'GET' && req.url === '/.well-known/panter-downstream-keys') {
-    res.writeHead(200, { 'content-type': 'application/jwk-set+json', 'cache-control': 'max-age=300' });
-    res.end(JSON.stringify(downstream.actorKeys())); return;
+    try {
+      const keys = JSON.stringify(downstream.actorKeys());
+      res.writeHead(200, { 'content-type': 'application/jwk-set+json', 'cache-control': 'max-age=300' }); res.end(keys);
+    } catch { res.writeHead(503, { 'content-type': 'application/json' }); res.end('{"error":"keys unavailable"}'); }
+    return;
   }
   if (oauth && req.method === 'GET' && (req.url === '/.well-known/oauth-protected-resource' || req.url === '/.well-known/oauth-protected-resource/mcp')) {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });

@@ -10,7 +10,7 @@ import { MeshEngine } from '../src/core/mesh.js';
 test('personal identifiers are found in their usual shapes', () => {
   for (const [t, kind] of [
     ['Paciente 12.345.678-5 llegó', /RUT/], ['rut 12345678-5', /RUT/], ['Found record:\n12.345.678-5', /RUT/], ['contacto: ana.perez@clinica.cl', /e-mail/],
-    ['llamar al +56 9 1234 5678', /phone/], ['+56912345678', /phone/], ['fijo +56 2 2345 6789', /phone/],
+    ['llamar al +56 9 1234 5678', /phone/], ['+56912345678', /phone/], ['fijo +56 2 2345 6789', /phone/], ['(+56) 9 1234 5678', /phone/], ['jane+noreply@gmail.com', /e-mail/], ['RUT 20.261.105-2', /RUT/],
   ] as const) assert.match(findSensitive(t) ?? 'none', kind, t);
 });
 
@@ -22,6 +22,8 @@ test('ordinary engineering text passes', () => {
     'the RUT validator rejects 12.345.678-4', 'git clone git@github.com:org/clinic.git',
     // Field names in code and pseudonymous ids are not personal data.
     'interface Visit { patient: Patient; diagnosis: string }', 'patient: P-0042, rut: rutSchema', 'Diagnosis: the parser drops a field',
+    'fixture alice@example.com and x@y.test', 'postgres://user:pass@db.example.org/app', 'redis://default@redis.railway.app:6379',
+    'ssh panter@vm.internal', 'build 20261105-2 passed',
   ]) assert.equal(findSensitive(t), null, t);
 });
 

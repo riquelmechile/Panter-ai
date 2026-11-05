@@ -306,6 +306,11 @@ test('end to end: a sensitive server signs who calls and keeps its mission free 
     assert.equal(report.isError, true); assert.match(text(report), /This report seems to contain an e-mail/);
     const review = await lead.callTool({ name: 'panter_native_review_create', arguments: { missionId: RUN, kind: '4r', objective: 'Review triage for ana@clinica.cl', candidateSha: 'a'.repeat(40), idempotencyKey: 'r1' } });
     assert.match(text(review), /This review objective seems to contain an e-mail/);
+    for (const [name, args] of [
+      ['panter_mesh_delegate_auto', { missionId: RUN, role: 'reviewer', instruction: 'Ping 12.345.678-5', idempotencyKey: 'a1' }],
+      ['panter_review_start', { missionId: RUN, kind: '4r', objective: 'Ask ana@clinica.cl', candidateSha: 'a'.repeat(40), idempotencyKey: 'a2' }],
+      ['panter_harness_close', { runId: RUN, reason: 'call +56 9 1234 5678', expectedRevision: 1 }],
+    ] as const) assert.match(text(await lead.callTool({ name, arguments: args as any })), /seems to contain/, name);
     const created = JSON.parse(text(await lead.callTool({ name: 'panter_native_review_create', arguments: { missionId: RUN, kind: '4r', objective: 'Review the triage screen', candidateSha: 'a'.repeat(40), idempotencyKey: 'r2' } })));
     const solo = await lead.callTool({ name: 'panter_native_review_submit_solo', arguments: { reviewId: created.reviewId, slotId: '0b6f8f0e-8b39-4f3c-9d4f-2a7e7c1d5b22',
       report: { agentId: 'lens', candidateSha: 'a'.repeat(40), packetDigest: 'b'.repeat(64), evidence: ['ok'],
