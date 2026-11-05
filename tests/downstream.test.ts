@@ -800,7 +800,7 @@ test('OAuth: repeated refused writes open the circuit instead of asking for toke
     w.ds.setAccepts(() => false);
     const out: string[] = [];
     for (let i = 0; i < 5; i++) out.push(text(await w.gw.call(claude, 'shop', 'set_price', { sku: 'A1', price: i }, g.id)));
-    assert.equal(out.filter(x => /refused Panter's token/.test(x)).length, 3);
+    assert.ok(out.slice(0, 3).every(x => /failed: the server refused Panter's token/.test(x)), out.join(' | '));
     assert.ok(out.slice(3).every(x => /circuit open/.test(x)), out.join(' | '));
     assert.ok(te.seen.length <= 4, `token requests stay bounded (${te.seen.length})`);
     assert.notEqual(w.gw.status(claude)[0]!.state, 'OK');
@@ -819,8 +819,36 @@ test('OAuth: a 401 that arrives after its call timed out leaves nothing behind',
     assert.match(text(await w.gw.call(claude, 'shop', 'set_price', { sku: 'A1', price: 5 }, g.id)), /timed out/);
     await new Promise(r => setTimeout(r, 800)); // the late 401 arrives
     const st = (w.gw as any).servers.get('shop');
-    assert.deepEqual([st.authRefused.size, st.readCalls.size, st.cutCalls.size, st.activeCalls.size], [0, 0, 0, 0]);
+    assert.deepEqual([st.callFailures.size, st.readCalls.size, st.cutCalls.size, st.activeCalls.size], [0, 0, 0, 0]);
   } finally { await w.done(); await te.close(); }
+});
+
+test('OAuth: a read refused twice, or a call that gets no token, fails alone without cutting a running write', async () => {
+  let n = 0;
+  const te = await tokenEndpoint(() => ({ access_token: `issued-token-${++n}-0123456789`, expires_in: 3600 }));
+  const w = await world({ tokenEnv: null, oauth: oauthOf(te.url) }, OAUTH_ENV);
+  try {
+    w.ds.setAccepts(a => /^Bearer issued-token-\d+-0123456789$/.test(a));
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok');
+    const g = w.gw.grant({ server: 'shop', tools: '*', host: 'claude', ttlSeconds: 600, uses: 3, reason: 'repricing' });
+    w.ds.setDelay(600);
+    // 1. Every token is refused now (say, a wrong scope): the read is renewed once, refused again, and fails alone.
+    let running = w.gw.call(claude, 'shop', 'set_price', { sku: 'A1', price: 5 }, g.id);
+    await new Promise(r => setTimeout(r, 150));
+    w.ds.setAccepts(() => false);
+    assert.match(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'B1' })), /a freshly issued one too/);
+    assert.equal(text(await running), 'set_price ok');
+    // 2. No token can be had (the cap on live tokens): the call fails alone too.
+    w.ds.setAccepts(a => /^Bearer issued-token-\d+-0123456789$/.test(a));
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A2' })), 'lookup ok');
+    running = w.gw.call(claude, 'shop', 'set_price', { sku: 'A2', price: 6 }, g.id);
+    await new Promise(r => setTimeout(r, 150));
+    const st = (w.gw as any).servers.get('shop');
+    for (let i = 0; i < 1000; i++) st.oauthIssued.set(`live-token-${i}-0123456789`, w.now() + 86_400_000);
+    st.oauthToken = null;
+    assert.match(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'B2' })), /no OAuth token: .*tokens issued are still alive/);
+    assert.equal(text(await running), 'set_price ok');
+  } finally { w.ds.setDelay(0); await w.done(); await te.close(); }
 });
 
 test('OAuth: an oversized token endpoint answer is refused without being buffered', async () => {

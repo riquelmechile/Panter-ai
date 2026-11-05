@@ -116,6 +116,8 @@ function replayable(body: unknown, readCalls: ReadonlySet<string>): boolean {
   return (Array.isArray(msg) ? msg : [msg]).every((m: any) => m?.method !== 'tools/call'
     || readCalls.has(m?.params?._meta?.['panter-ai/callId']));
 }
+const REFUSED_WRITE = 'the server refused Panter\'s token (401) and Panter does not send a call that is not a read twice. The call may or may not have run on the server: check before calling again (the next call goes out with a new token; a grant use is spent).';
+const REFUSED_TWICE = 'the server refused Panter\'s token (401), and a freshly issued one too: check the OAuth client\'s scope and the server\'s audience settings.';
 /** An access token Panter can redact without damaging a result's JSON. */
 const ACCESS_TOKEN = /^[\x21\x23-\x5b\x5d-\x7e]{16,8192}$/;
 const TOKEN_KEEP_MIN_MS = 86_400_000, TOKEN_KEEP_MAX_MS = 30 * 86_400_000, MAX_ISSUED_TOKENS = 1000;
@@ -198,8 +200,9 @@ type ServerState = {
   refreshFailedMs: number; refreshError: string | null; cutCalls: Set<string>;
   /** Calls in flight to a tool classified read when the call was authorized: only these may be replayed after a 401. */
   readCalls: Set<string>;
-  /** Calls whose token was refused (401) and that were not replayed: they fail alone, the connection is fine. */
-  authRefused: Set<string>;
+  /** Calls that failed for a reason of their own, not a broken connection (the token was refused, or no token could
+   * be had): they fail alone with this message, count toward the circuit breaker, and the connection stays open. */
+  callFailures: Map<string, string>;
   /** Calls inside guarded() right now. */
   activeCalls: Set<string>;
   /** OAuth: the current access token and when to renew it, and the request already getting one. */
@@ -216,7 +219,7 @@ export class DownstreamGateway {
   private readonly servers = new Map<string, ServerState>();
   constructor(configs: DownstreamConfig[], private readonly db: SqliteLedger | null,
     private readonly env: Record<string, string | undefined> = process.env, private readonly now: () => number = Date.now) {
-    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null, refreshFailedMs: 0, refreshError: null, cutCalls: new Set(), readCalls: new Set(), authRefused: new Set(), activeCalls: new Set(), oauthToken: null, oauthFetch: null, oauthIssued: new Map() });
+    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null, refreshFailedMs: 0, refreshError: null, cutCalls: new Set(), readCalls: new Set(), callFailures: new Map(), activeCalls: new Set(), oauthToken: null, oauthFetch: null, oauthIssued: new Map() });
     // Load the sensitive missions now, so the checks other stores run inside their own transactions read no database.
     if (this.db) this.sensitiveSet();
   }
@@ -293,25 +296,26 @@ export class DownstreamGateway {
       // did nothing (a proxy can answer it after the call ran), so a write is never replayed: it fails and the host
       // decides whether to call again, with the renewed token.
       const oauthFetch = async (url: string | URL, init?: RequestInit) => {
+        // Recorded only for a call still waiting for its answer (a late one has no one to tell), so nothing leaks.
+        const failCall = (message: string) => { const id = callIdOf(init?.body); if (id && s.activeCalls.has(id)) s.callFailures.set(id, message); };
         const send = async () => {
-          const used = await this.oauthToken(s);
+          let used: string;
+          try { used = await this.oauthToken(s); }
+          catch (error) { failCall(`no OAuth token: ${clean(error, this.secrets(s))}`); throw error; }
           const headers = new Headers(init?.headers);
           headers.set('authorization', `Bearer ${used}`);
           return { used, res: await limited(url, { ...init, headers }) };
         };
+        // Forget a refused token only if it is still the current one: a late 401 must not drop a newer token.
+        const forget = (used: string) => { if (s.oauthToken?.value === used) s.oauthToken = null; };
         const first = await send();
         if (first.res.status !== 401) return first.res;
-        if (!replayable(init?.body, s.readCalls)) {
-          if (s.oauthToken?.value === first.used) s.oauthToken = null;
-          // Recorded only for a call still waiting for its answer (a late 401 has no one to tell), so nothing leaks.
-          const id = callIdOf(init?.body);
-          if (id && s.activeCalls.has(id)) s.authRefused.add(id);
-          return first.res;
-        }
+        forget(first.used);
+        if (!replayable(init?.body, s.readCalls)) { failCall(REFUSED_WRITE); return first.res; }
         await first.res.body?.cancel().catch(() => undefined);
-        // Forget the refused token only if it is still the current one: a late 401 must not drop a newer token.
-        if (s.oauthToken?.value === first.used) s.oauthToken = null;
-        return (await send()).res;
+        const second = await send();
+        if (second.res.status === 401) { forget(second.used); failCall(REFUSED_TWICE); }
+        return second.res;
       };
       const transport = new StreamableHTTPClientTransport(new URL(s.config.url),
         s.config.oauth ? { fetch: oauthFetch as any }
@@ -373,11 +377,11 @@ export class DownstreamGateway {
       // A refused token is not a broken connection: this call fails alone and other calls keep running. It counts
       // toward the circuit breaker (repeated refusals mean something is wrong, and each asks for a new token), but the
       // connection stays open.
-      if (s.authRefused.delete(callId)) {
-        const message = 'the server refused Panter\'s token (401) and Panter does not send a call that is not a read twice. The call may or may not have run on the server: check before calling again (the next call goes out with a new token; a grant use is spent).';
-        s.failures++; s.lastError = 'the server refused the token (401)';
+      const own = s.callFailures.get(callId);
+      if (own !== undefined) {
+        s.failures++; s.lastError = own.slice(0, 300);
         if (s.failures >= FAILURES_TO_OPEN) s.openUntil = this.now() + OPEN_MS;
-        throw new SafeError(message);
+        throw new SafeError(own);
       }
       const message = this.describe(s, error);
       // A JSON-RPC error is the server answering: the connection is fine and nothing counts.
@@ -392,7 +396,7 @@ export class DownstreamGateway {
       if (!timeout) this.drop(s, used);
       throw new SafeError(message);
     } finally {
-      s.activeCalls.delete(callId); s.cutCalls.delete(callId); s.authRefused.delete(callId);
+      s.activeCalls.delete(callId); s.cutCalls.delete(callId); s.callFailures.delete(callId);
     }
   }
   /** Fetch and cache a server's tools (all pages, bounded). */
