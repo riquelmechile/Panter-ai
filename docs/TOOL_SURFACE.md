@@ -35,6 +35,6 @@ Hay dos niveles: dominio → operación. A propósito no es un árbol más profu
 
 `PANTER_TOOL_SURFACE=all` vuelve a listar todas las herramientas para todos los roles. El valor por defecto es `role`.
 
-## Downstream (próximo paso)
+## Servidores MCP downstream
 
-Los routers son el punto donde se montarán los MCP downstream, empezando por commerce-control (MercadoLibre). Cada downstream aparecerá como sus propios routers por dominio, con su propia aprobación, y Panter pondrá encima identidad, permisos y auditoría. El código del downstream no se copia dentro de Panter.
+Cada servidor MCP montado detrás de Panter ([DOWNSTREAM_MCP.md](DOWNSTREAM_MCP.md)) aparece como un router propio, `panter_ds_<nombre>`, fuera de los ocho routers de dominio. Solo se lista para los hosts que su configuración permite (y para el operador). Los hosts no permitidos pueden llamarlo por nombre, pero el gateway lo rechaza y queda en el audit. `panter_downstream_status` y `panter_downstream_audit` están en la lista del líder; `panter_downstream_grant` y `panter_downstream_revoke` son solo del operador.

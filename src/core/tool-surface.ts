@@ -50,6 +50,7 @@ const LEADER = new Set([
   'memory_status', 'memory_context', 'memory_search', 'memory_save',
   // Agent Studio's UI calls these by their exact names (it cannot fall back to a router).
   'agent_studio', 'gentle_catalog',
+  'downstream_status', 'downstream_audit',
 ].map(x => `panter_${x}`));
 
 /** Tools a worker host uses in its normal workflow (listed flat for workers). Kept wide on purpose: a host such as
@@ -88,6 +89,8 @@ const text = (value: unknown, isError = false) => ({ content: [{ type: 'text' as
  */
 export function createToolSurface(server: any, opts: { role: () => SurfaceRole; listAll?: boolean }) {
   const catalog = new Map<string, Entry>();
+  // Tools that are not part of any domain (downstream routers): listed only where `listed()` says so.
+  const external = new Map<string, () => boolean>();
   const register = server.registerTool.bind(server);
   server.registerTool = (name: string, config: Entry['config'], cb: Entry['cb']) => {
     catalog.set(name, { config, cb });
@@ -104,6 +107,12 @@ export function createToolSurface(server: any, opts: { role: () => SurfaceRole; 
     return { ...base, description: e.config.description ?? '', inputSchema };
   };
   return {
+    /** Register a tool outside the domain routers, listed for a caller only when `listed()` is true (the operator sees
+     * every tool). It stays callable by name like any other tool; its callback does its own authorization. */
+    external(name: string, config: Entry["config"], cb: (...args: any[]) => unknown, listed: () => boolean) {
+      external.set(name, listed);
+      return register(name, config, cb);
+    },
     finalize() {
       for (const d of DOMAINS) {
         register(routerName(d), {
@@ -138,7 +147,10 @@ export function createToolSurface(server: any, opts: { role: () => SurfaceRole; 
       server.server.setRequestHandler('tools/list', async (request: unknown, ctx: unknown) => {
         const result = await inner(request, ctx);
         const role = opts.role();
-        return { ...result, tools: (result.tools ?? []).filter((t: { name: string }) => listedFor(t.name, role)) };
+        return { ...result, tools: (result.tools ?? []).filter((t: { name: string }) => {
+          const extra = external.get(t.name);
+          return extra ? role === 'operator' || extra() : listedFor(t.name, role);
+        }) };
       });
     },
   };
