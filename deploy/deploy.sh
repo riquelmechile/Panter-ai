@@ -63,19 +63,32 @@ restart() { systemctl --user reset-failed "$UNIT" >/dev/null 2>&1 || true; syste
 # The JSON stores are only consistent while the service is stopped, so the backup is taken with it stopped (a few
 # seconds; the restart below was going to interrupt it anyway). etc/quiesce keeps the health check from restarting it
 # meanwhile.
-# From the stop until the service is started again, any exit (an error, Ctrl-C, a dropped SSH session) starts
-# whatever `current` points to, so production is never left stopped.
-must_start=0
-on_exit() { if [ "$must_start" = 1 ]; then echo "deploy: interrupted; starting $UNIT again" >&2; restart; fi; rm -f "$BASE/etc/quiesce"; }
+# Whatever ends the script from the stop on (an error, Ctrl-C, a dropped SSH session, a closed terminal), the exit
+# handler leaves a running service: stopped for the backup -> started again; switched but not yet confirmed healthy
+# -> back to the previous release; rolling back -> the previous release started. It ignores further signals and
+# errors (a dead terminal makes every echo fail) so it always gets to the restart.
+phase=none
+say() { echo "$@" >&2 2>/dev/null || true; }
+on_exit() {
+  trap '' INT TERM HUP PIPE; set +e
+  case "$phase" in
+    stopped) say "deploy: interrupted; starting $UNIT again"; restart;;
+    verdict) if [ -n "$PREV" ]; then say "deploy: interrupted before $S was confirmed healthy; back to $PREV"; switch "$PREV"; fi; restart;;
+    rollback) switch "$PREV"; restart;;
+  esac
+  rm -f "$BASE/etc/quiesce"
+}
 trap on_exit EXIT
-trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP; trap '' PIPE
 mkdir -p "$BASE/etc"; touch "$BASE/etc/quiesce"
 echo "deploy: stopping $UNIT for a consistent backup"
-must_start=1
+phase=stopped
 systemctl --user stop "$UNIT"
-if ! timeout --foreground 600 node "$REL/deploy/backup.mjs" --base "$BASE" --label "pre-$S-$(date -u +%Y%m%d%H%M%S)-$$" --release "$SHA" --stopped; then
-  echo "deploy: backup failed; nothing switched, starting ${PREV:-the current release} again" >&2
-  restart; must_start=0; rm -rf -- "$REL"; exit 1
+if ! timeout --foreground -k 30 600 node "$REL/deploy/backup.mjs" --base "$BASE" --label "pre-$S-$(date -u +%Y%m%d%H%M%S)-$$" --release "$SHA" --stopped; then
+  say "deploy: backup failed; nothing switched, starting ${PREV:-the current release} again"
+  restart; phase=none; rm -rf -- "$REL"
+  systemctl --user is-active --quiet "$UNIT" || say "deploy: WARNING: $UNIT is not active after the restart; check it now"
+  exit 1
 fi
 healthy() { # healthy <revision|any>: poll /health for about a minute
   for _ in $(seq 1 20); do
@@ -87,18 +100,21 @@ healthy() { # healthy <revision|any>: poll /health for about a minute
   return 1
 }
 
+phase=verdict
 switch "$S"
-restart; must_start=0
+restart
 if ! healthy "$SHA"; then
-  echo "deploy: $S did not come up healthy" >&2
-  if [ -z "$PREV" ]; then echo "deploy: ROLLBACK IMPOSSIBLE: there was no previous release; $S stays live and unhealthy" >&2; exit 1; fi
-  echo "deploy: rolling back to $PREV" >&2
+  say "deploy: $S did not come up healthy"
+  if [ -z "$PREV" ]; then phase=none; say "deploy: ROLLBACK IMPOSSIBLE: there was no previous release; $S stays live and unhealthy"; exit 1; fi
+  say "deploy: rolling back to $PREV"
+  phase=rollback
   switch "$PREV"
   restart
-  if healthy any; then echo "deploy: rolled back to $PREV, which is healthy" >&2; rm -rf -- "$REL"
-  else echo "deploy: ROLLBACK FAILED: $PREV is live but /health does not answer; act now ($REL is kept: it may be the only release that runs on the current data)" >&2; fi
+  if healthy any; then phase=none; say "deploy: rolled back to $PREV, which is healthy"; rm -rf -- "$REL"
+  else phase=none; say "deploy: ROLLBACK FAILED: $PREV is live but /health does not answer; act now ($REL is kept: it may be the only release that runs on the current data)"; fi
   exit 1
 fi
+phase=none
 echo "deploy: $S is live"
 
 # Keep the newest $KEEP releases, always including the live one and the one just replaced.

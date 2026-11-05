@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink, readlink, copyFile, chmod } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, openSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -35,6 +35,7 @@ esac
 exit 0
 `);
   await writeFile(join(bin, 'curl'), `#!/bin/sh
+if [ -f "${root}/hang-curl" ]; then touch "${root}/curl-hanging"; exec /bin/sleep 300; fi
 [ -f "${root}/up" ] || exit 7
 printf '{"status":"ok","name":"panter-ai","version":"0","revision":"%s"}' "$(cat "${root}/up")"
 `);
@@ -64,7 +65,7 @@ exec "${process.execPath}" "$@"
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, PANTER_BASE: base, PANTER_SOURCE_REPO: src, HOME: root };
   const outcome = (p: Promise<{ stdout: string; stderr: string }>) => p.then(r => ({ ok: true, out: r.stdout + r.stderr }), e => ({ ok: false, out: String(e.stdout) + String(e.stderr) }));
   const deploy = (sha: string) => outcome(run('bash', [deploySh, sha], { env }));
-  const spawnDeploy = (sha: string) => spawn('bash', [deploySh, sha], { env, detached: true, stdio: 'ignore' });
+  const spawnDeploy = (sha: string, stderr: 'ignore' | number = 'ignore') => spawn('bash', [deploySh, sha], { env, detached: true, stdio: ['ignore', 'ignore', stderr] });
   const daily = () => outcome(run('bash', [join(base, 'current', 'deploy', 'daily-backup.sh')], { env }));
   const calls = async () => { const c = existsSync(join(root, 'calls')) ? (await readFile(join(root, 'calls'), 'utf8')).trim().split('\n') : []; await rm(join(root, 'calls'), { force: true }); return c; };
   return { root, base, commits, deploy, daily, calls, spawnDeploy };
@@ -211,5 +212,39 @@ test('deploy refuses a real current directory and maintenance; the daily backup 
     const b = await w.daily();
     assert.ok(b.ok); assert.match(b.out, /skipped/);
     assert.deepEqual(await w.calls(), [], 'nothing stopped');
+  } finally { await rm(w.root, { recursive: true, force: true }); }
+});
+
+const waitFor = async (file: string) => { for (let i = 0; i < 300 && !existsSync(file); i++) await new Promise(r => setTimeout(r, 50)); return existsSync(file); };
+
+test('a dead terminal does not stop the exit handler from starting the service again', async () => {
+  const w = await world();
+  try {
+    assert.ok((await w.deploy(w.commits[0]!)).ok);
+    // stderr is /dev/full: every message fails to write, and systemctl stop reports a failure.
+    await writeFile(join(w.root, 'stop-fails'), '');
+    const full = openSync('/dev/full', 'w');
+    const child = w.spawnDeploy(w.commits[1]!, full);
+    await new Promise(done => child.on('exit', done)); closeSync(full);
+    assert.equal((await readFile(join(w.root, 'up'), 'utf8')).trim(), w.commits[0], 'the old release is running again');
+    assert.equal(existsSync(join(w.base, 'etc', 'quiesce')), false);
+  } finally { await rm(w.root, { recursive: true, force: true }); }
+});
+
+test('a deploy interrupted while waiting for /health goes back to the previous release', async () => {
+  const w = await world();
+  try {
+    assert.ok((await w.deploy(w.commits[0]!)).ok);
+    await writeFile(join(w.root, 'bad-revisions'), w.commits[1]!);
+    await writeFile(join(w.root, 'hang-curl'), '');
+    const child = w.spawnDeploy(w.commits[1]!);
+    const exited = new Promise(done => child.on('exit', done));
+    assert.ok(await waitFor(join(w.root, 'curl-hanging')), 'reached the health poll');
+    await rm(join(w.root, 'hang-curl'));
+    process.kill(-child.pid!, 'SIGHUP');
+    await exited;
+    assert.equal(await live(w.base), w.commits[0], 'current points to the previous release again');
+    assert.equal((await readFile(join(w.root, 'up'), 'utf8')).trim(), w.commits[0], 'and it is running');
+    assert.equal(existsSync(join(w.base, 'etc', 'quiesce')), false);
   } finally { await rm(w.root, { recursive: true, force: true }); }
 });

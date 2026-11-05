@@ -15,10 +15,11 @@ was_active=no
 case "$(systemctl --user is-active "$UNIT" || true)" in active|activating|reloading) was_active=yes;; esac
 touch "$BASE/etc/quiesce"
 finish() {
+  trap '' INT TERM HUP PIPE; set +e
   if [ "$was_active" = yes ]; then systemctl --user reset-failed "$UNIT" >/dev/null 2>&1 || true; systemctl --user start "$UNIT" || true; fi
   rm -f "$BASE/etc/quiesce"
 }
 trap finish EXIT
-trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP; trap '' PIPE
 if [ "$was_active" = yes ]; then systemctl --user stop "$UNIT"; fi
-timeout --foreground 600 node "$BASE/current/deploy/backup.mjs" --base "$BASE" --daily --keep-daily "$KEEP" --stopped
+timeout --foreground -k 30 600 node "$BASE/current/deploy/backup.mjs" --base "$BASE" --daily --keep-daily "$KEEP" --stopped
