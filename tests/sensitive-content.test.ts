@@ -82,3 +82,14 @@ test('the mesh refuses personal data in worker results and messages of a guarded
     assert.equal((await m.resultGet('gpt-a', other.id)).result, 'mailed ana@example.com', 'other missions are not checked');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("Panter's own mailboxes are not personal data; anyone else's still is", async () => {
+  const { allowSystemAddresses } = await import('../src/core/sensitive-content.js');
+  const quote = 'Gemini wakes when gemini-panter@plasticov.cl writes to Gemini-Inbox@gmail.com';
+  assert.match(findSensitive(quote) ?? 'none', /e-mail/);
+  allowSystemAddresses(['gemini-panter@plasticov.cl', ' gemini-inbox@gmail.com ', 'not an address', undefined]);
+  assert.equal(findSensitive(quote), null);
+  assert.match(findSensitive('paciente ana@plasticov.cl') ?? 'none', /e-mail/, 'only the exact addresses, never the domain');
+  allowSystemAddresses([]);
+  assert.match(findSensitive(quote) ?? 'none', /e-mail/);
+});

@@ -24,6 +24,13 @@ const hasRut = (text: string) => [...text.matchAll(RUT)].some(m => rutCheckDigit
 /** Addresses that identify no one: no-reply senders, GitHub's no-reply users, git remotes, and the domains reserved for
  * examples and tests (RFC 2606 and 6761). Private names (.local, .internal) can be real mailboxes, so they count. */
 const NOREPLY = /^no-?reply@|@users\.noreply\.github\.com$|^git@|@(?:[\w-]+\.)*(?:example\.(?:com|net|org)|example|test|invalid|localhost)$/i;
+/** Panter's own mailboxes (its relay and the inbox a worker watches, set by the operator): they identify no one, and
+ * a worker explaining how it is woken quotes them. Exact addresses only, never whole domains. */
+const allowed = new Set<string>();
+export function allowSystemAddresses(addresses: Array<string | undefined | null>): void {
+  allowed.clear();
+  for (const a of addresses) { const x = (a ?? '').trim().toLowerCase(); if (/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x)) allowed.add(x); }
+}
 /** The user part of a URL right before "@": a scheme, "://", then only user and password characters. */
 const URL_USER = /[A-Za-z][\w+.-]*:\/\/[\w.~%+-]+(?::[\w.~%+-]*)?$/;
 const LOCAL = /[A-Za-z0-9._%+-]{1,64}$/, DOMAIN = /^[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,8}\.[A-Za-z]{2,24}/;
@@ -35,7 +42,7 @@ function hasEmail(text: string): boolean {
     if (URL_USER.test(before)) continue;
     const local = LOCAL.exec(before)?.[0];
     const domain = local && DOMAIN.exec(text.slice(at + 1, at + 1 + 300))?.[0];
-    if (local && domain && !NOREPLY.test(`${local}@${domain}`)) return true;
+    if (local && domain && !NOREPLY.test(`${local}@${domain}`) && !allowed.has(`${local}@${domain}`.toLowerCase())) return true;
   }
   return false;
 }

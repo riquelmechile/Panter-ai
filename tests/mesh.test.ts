@@ -99,3 +99,11 @@ test('operator can inspect uncertain attempt fences without unlocking the writer
   assert.equal((await m.uncertainWriters()).length,1);
  }finally{Date.now=original;}
 }));
+
+test('hasDelegation reports whether a delegate call would replay existing work', () => withMesh(async m => {
+  await m.setProfile('gpt-a', profile, 0);
+  assert.equal(await m.hasDelegation('m', 'k'), false);
+  await m.delegate('gpt-a', { missionId: 'm', target: 'grok', role: 'reviewer', instruction: 'x', idempotencyKey: 'k' });
+  assert.equal(await m.hasDelegation('m', 'k'), true);
+  assert.equal(await m.hasDelegation('m', 'other'), false);
+}));

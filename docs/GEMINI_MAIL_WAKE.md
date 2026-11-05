@@ -37,3 +37,7 @@ PANTER_GEMINI_MAIL_RELAY_SECRET=<obligatoria: 32+ caracteres URL-safe, igual al 
 El código del Worker está en `deploy/cloudflare/panter-gemini-mail-relay.js` (bindings `PANTER_BASE_URL` en https, `RECIPIENT`, `RELAY_ADDRESS`, `RELAY_SECRET` y `EMAIL`; sin clave o sin https el Worker no opera). El Worker acepta correos de respuesta de hasta 300 KB. La dirección de relay necesita una regla de Email Routing hacia ese Worker.
 
 En Gemini se crea una vez una tarea con monitor de Gmail: correos de la dirección de relay con asunto `[PANTER_GEMINI]`.
+
+## Misiones sensibles
+
+El trabajo de una misión que usó un servidor downstream `sensitive` nunca se manda por correo: la tarea saldría de Panter en un e-mail y el runtime de correo de Gemini no tiene tools de Panter. Ese trabajo espera a un chat de Gemini conectado. Las direcciones del propio sistema (`PANTER_GEMINI_MAIL_RECIPIENT` y `PANTER_SENSITIVE_ALLOWED_ADDRESSES`) no cuentan como dato personal. Si Panter rechaza un resultado, el rebote del relay dice el motivo.

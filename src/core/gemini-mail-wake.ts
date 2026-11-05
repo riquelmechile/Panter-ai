@@ -35,7 +35,7 @@ const REFUSAL_LIMIT=8;
 export type MailClaim={id:string;state:string;attemptId:string|null;leaseGeneration:number;leaseUntil:string|null;
   instruction:string;role:string;missionId:string};
 export type MailMesh={
-  pending(host:'gemini'):Promise<Array<{workId:string;role:string;createdAt:string}>>;
+  pending(host:'gemini'):Promise<Array<{workId:string;role:string;createdAt:string;missionId?:string}>>;
   claim(host:'gemini',workId:string,leaseSeconds:number,requireQueued:boolean,requireFree:boolean,transport:boolean):Promise<MailClaim>;
   requeueExpiredReadOnly(host:'gemini'):Promise<string[]>;
   complete(host:'gemini',id:string,attemptId:string,generation:number,result:string,success:boolean,transport?:boolean,via?:'gmail-relay'):Promise<unknown>;
@@ -87,6 +87,11 @@ export class GeminiMailWake{
     this.relayKeyHash=key?sha(key):null;
     this.db=this.configured?SqliteLedger.open(dir):null;
   }
+  /** Missions whose work never travels by e-mail (a sensitive downstream mission: its task would leave Panter in a
+   * mail, and Gemini's mail runtime has no Panter tools to reach that server anyway). Such work waits for a live
+   * Gemini chat. */
+  private skipMission:(missionId:string)=>boolean=()=>false;
+  setSkipMission(fn:(missionId:string)=>boolean){this.skipMission=fn;}
   describe(){return {configured:this.configured,adapter:this.configured?'GEMINI_GMAIL_RELAY':'NONE',recipient:this.recipient||null,
     relayKey:Boolean(this.relayKeyHash)};}
   /** True when a shared relay key is configured: callers without it are refused. */
@@ -110,7 +115,7 @@ export class GeminiMailWake{
     try{
       await this.mesh.requeueExpiredReadOnly('gemini').catch(()=>[]);
       if(this.isListening())return out; // an open Gemini chat takes queued work directly
-      const pending=(await this.mesh.pending('gemini')).filter(w=>w.role!=='implementer');
+      const pending=(await this.mesh.pending('gemini')).filter(w=>w.role!=='implementer'&&!(w.missionId&&this.skipMission(w.missionId)));
       const data=this.db!.read('gemini_mail',seed);
       const blocked=(id:string)=>(data.backoff??[]).some(b=>b.workId===id&&b.nextAt>now);
       // Forget backoff of works that are no longer waiting, so the list cannot grow forever.
@@ -133,6 +138,12 @@ export class GeminiMailWake{
     try{work=await this.mesh.claim('gemini',workId,LEASE_SECONDS,true,true,true);}
     catch{return false;} // taken, finished or a transient error: the queue and lease expiry decide what's next
     if(work.state!=='RUNNING'||!work.attemptId||!work.leaseUntil||work.role==='implementer')return false;
+    // The mission may have turned sensitive since the pending list was read (another host reached a sensitive
+    // downstream server meanwhile): hand the unsent claim back so the work waits for a live Gemini chat.
+    if(work.missionId&&this.skipMission(work.missionId)){
+      await this.mesh.releaseUnsentClaim('gemini',workId,work.attemptId,work.leaseGeneration).catch(()=>{});
+      return false;
+    }
     if(attempt>MAX_ATTEMPTS){
       await this.mesh.complete('gemini',workId,work.attemptId,work.leaseGeneration,
         `Gemini mail relay: ${MAX_ATTEMPTS} attempts to hand this task to Gemini by e-mail got no valid reply; Gemini did not complete it.`,false,true);
@@ -195,6 +206,10 @@ export class GeminiMailWake{
     if(!t||t.validatedAt||Date.parse(t.expiresAt)<=Date.now()||!sameHash(t.instructionDigest,sha(e.instruction as string))||
       e.lease_generation!==t.leaseGeneration||(t.envelopeDigest&&!sameHash(t.envelopeDigest,sha(canonical(e)))))
       throw new MailError(403,'Envelope is not an outstanding Panter ticket');
+    // Last check before the relay e-mails it: a mission that became sensitive after the ticket was issued is
+    // refused here, so its task never leaves Panter in a mail.
+    if(typeof e.mission_id==='string'&&this.skipMission(e.mission_id))
+      throw new MailError(409,'Mission is sensitive: its work waits for a live Gemini chat');
     // One relay send per ticket: a copied envelope cannot be replayed through /wake.
     this.db!.mutate('gemini_mail',seed,d=>{const x=d.tickets.find(y=>y.workId===t.workId&&y.attempt===t.attempt);if(x)x.validatedAt=iso();});
     return {ok:true,work_id:t.workId,lease_generation:t.leaseGeneration};

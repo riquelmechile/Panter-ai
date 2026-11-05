@@ -281,6 +281,14 @@ test('end to end: the built server mounts a downstream server for the hosts its 
     assert.ok(!missing.includes('shop'), 'names only servers the caller may use');
     assert.equal(await auditSize(), before + 1, 'the refused probe of a real server is still audited');
     assert.ok((await grokClient.listTools()).tools.some(t => t.name === 'panter_downstream_call'), 'listed flat for workers; the leader reaches it through panter_admin');
+    // What a host's tool list should contain, with a fingerprint that tells it when its cached list is stale.
+    const surface = JSON.parse(text(await lead.callTool({ name: 'panter_admin', arguments: { operation: 'surface_status', arguments: { knownFingerprint: 'old' } } })));
+    assert.match(surface.fingerprint, /^[0-9a-f]{16}$/);
+    assert.equal(surface.stale, true);
+    assert.ok(surface.listed.includes('panter_admin') && surface.listed.includes('panter_harness_tick'));
+    assert.deepEqual(surface.downstream.map((d: any) => d.server), ['shop']);
+    const again = JSON.parse(text(await lead.callTool({ name: 'panter_admin', arguments: { operation: 'surface_status', arguments: { knownFingerprint: surface.fingerprint } } })));
+    assert.equal(again.stale, false);
     assert.equal(ds.seen.length, 2, 'only the second allowed read reached the downstream server');
   } finally {
     for (const c of clients) await c.close().catch(() => undefined);
