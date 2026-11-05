@@ -726,6 +726,36 @@ test('OAuth: a refused write is never sent again by itself', async () => {
   } finally { await w.done(); await te.close(); }
 });
 
+test('OAuth: a refused write fails alone; a write already running on the same connection completes', async () => {
+  let n = 0;
+  const te = await tokenEndpoint(() => ({ access_token: `issued-token-${++n}-0123456789`, expires_in: 3600 }));
+  const w = await world({ tokenEnv: null, oauth: oauthOf(te.url) }, OAUTH_ENV);
+  try {
+    w.ds.setAccepts(a => /^Bearer issued-token-\d+-0123456789$/.test(a));
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok');
+    const g = w.gw.grant({ server: 'shop', tools: '*', host: 'claude', ttlSeconds: 600, uses: 3, reason: 'repricing' });
+    w.ds.setDelay(600);
+    const running = w.gw.call(claude, 'shop', 'set_price', { sku: 'A1', price: 5 }, g.id);
+    await new Promise(r => setTimeout(r, 150));
+    w.ds.setAccepts(a => /^Bearer issued-token-\d+-0123456789$/.test(a) && a !== 'Bearer issued-token-1-0123456789');
+    const refused = text(await w.gw.call(claude, 'shop', 'set_price', { sku: 'B1', price: 7 }, g.id));
+    assert.match(refused, /refused Panter's token \(401\).*may or may not have run/);
+    assert.equal(text(await running), 'set_price ok', 'the running write was not cut by the other call\'s refusal');
+    const st = w.gw.status(claude)[0]!;
+    assert.equal(st.state, 'OK');
+  } finally { w.ds.setDelay(0); await w.done(); await te.close(); }
+});
+
+test('OAuth: an access token that redaction could not handle safely is refused', async () => {
+  for (const bad of ['short', 'a"quoted"token-0123456789', 'back\\slash-token-0123456789', 'space in token 0123456789']) {
+    const te = await tokenEndpoint(() => ({ access_token: bad }));
+    const w = await world({ tokenEnv: null, oauth: oauthOf(te.url) }, OAUTH_ENV);
+    try {
+      assert.match(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), /cannot use safely/, bad);
+    } finally { await w.done(); await te.close(); }
+  }
+});
+
 test('OAuth: an oversized token endpoint answer is refused without being buffered', async () => {
   const te = await tokenEndpoint(() => ({ access_token: TOKEN, pad: 200_000 }));
   const w = await world({ tokenEnv: null, oauth: oauthOf(te.url) }, OAUTH_ENV);

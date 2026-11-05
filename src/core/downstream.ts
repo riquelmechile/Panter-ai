@@ -106,16 +106,19 @@ async function readCapped(res: Response, max: number): Promise<string> {
 /** HTTP Basic client credentials (RFC 6749 2.3.1: id and secret form-encoded, then base64). */
 const formEncode = (v: string) => new URLSearchParams({ v }).toString().slice(2);
 const basicCredentials = (id: string, secret: string) => Buffer.from(`${formEncode(id)}:${formEncode(secret)}`).toString('base64');
-/** Whether a refused request may be sent again: no body (GET, DELETE) or JSON-RPC text with no `tools/call` to a tool
- * other than a known read. */
-function replayable(body: unknown, tools: readonly DownstreamTool[]): boolean {
+/** Whether a refused request may be sent again: no body (GET, DELETE) or JSON-RPC text whose every `tools/call` is a
+ * call Panter authorized as a read (by its call id, so a tool list refreshed meanwhile changes nothing). */
+function replayable(body: unknown, readCalls: ReadonlySet<string>): boolean {
   if (body == null) return true;
   if (typeof body !== 'string') return false;
   let msg: unknown;
   try { msg = JSON.parse(body); } catch { return false; }
   return (Array.isArray(msg) ? msg : [msg]).every((m: any) => m?.method !== 'tools/call'
-    || tools.some(t => t.name === m?.params?.name && t.cls === 'read'));
+    || readCalls.has(m?.params?._meta?.['panter-ai/callId']));
 }
+/** An access token Panter can redact without damaging a result's JSON. */
+const ACCESS_TOKEN = /^[\x21\x23-\x5b\x5d-\x7e]{16,8192}$/;
+const TOKEN_KEEP_MIN_MS = 86_400_000, TOKEN_KEEP_MAX_MS = 30 * 86_400_000, MAX_ISSUED_TOKENS = 1000;
 /** An error whose message is already safe to show and store (cleaned, or withheld for a sensitive server). */
 class SafeError extends Error {}
 /** After a failed tool-list fetch, calls fail fast (closed) for this long before Panter asks again. */
@@ -193,6 +196,10 @@ type ServerState = {
   config: DownstreamConfig; tools: DownstreamTool[]; fetchedAt: string | null; fetchedMs: number; failures: number; openUntil: number;
   lastError: string | null; client: Promise<Client> | null; refreshing: Promise<{ server: string; tools: number }> | null;
   refreshFailedMs: number; refreshError: string | null; cutCalls: Set<string>;
+  /** Calls in flight to a tool classified read when the call was authorized: only these may be replayed after a 401. */
+  readCalls: Set<string>;
+  /** Calls whose token was refused (401) and that were not replayed: they fail alone, the connection is fine. */
+  authRefused: Set<string>;
   /** OAuth: the current access token and when to renew it, and the request already getting one. */
   oauthToken: { value: string; renewAt: number } | null; oauthFetch: Promise<string> | null;
   /** Every token issued for this server and when it really expires: a call that started with an older token can
@@ -207,7 +214,7 @@ export class DownstreamGateway {
   private readonly servers = new Map<string, ServerState>();
   constructor(configs: DownstreamConfig[], private readonly db: SqliteLedger | null,
     private readonly env: Record<string, string | undefined> = process.env, private readonly now: () => number = Date.now) {
-    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null, refreshFailedMs: 0, refreshError: null, cutCalls: new Set(), oauthToken: null, oauthFetch: null, oauthIssued: new Map() });
+    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null, refreshFailedMs: 0, refreshError: null, cutCalls: new Set(), readCalls: new Set(), authRefused: new Set(), oauthToken: null, oauthFetch: null, oauthIssued: new Map() });
     // Load the sensitive missions now, so the checks other stores run inside their own transactions read no database.
     if (this.db) this.sensitiveSet();
   }
@@ -252,13 +259,20 @@ export class DownstreamGateway {
       try { json = JSON.parse(text); } catch { throw new Error('token endpoint answered without JSON'); }
       if (typeof json?.access_token !== 'string' || !json.access_token || String(json.token_type ?? 'bearer').toLowerCase() !== 'bearer')
         throw new Error('token endpoint gave no bearer access_token');
+      // Redaction removes the token's text from results: a short one, or one with JSON quoting, would mangle them.
+      if (!ACCESS_TOKEN.test(json.access_token)) throw new Error('token endpoint gave an access_token Panter cannot use safely (16 to 8192 printable characters, no quotes or backslashes)');
       const life = Number.isFinite(json.expires_in) && json.expires_in > 0 ? json.expires_in * 1000 : 300_000;
       const now = this.now();
       s.oauthToken = { value: json.access_token, renewAt: now + Math.max(life - 60_000, life / 2) };
-      // Kept until it expires (plus the longest call), whatever the server claimed; at most the last 32 tokens.
+      // Kept redacted until it expires plus the longest call, and at least a day (the server may not say how long it
+      // lives). Bounded: past the cap, the token that expires first goes.
       for (const [t, until] of s.oauthIssued) if (until <= now) s.oauthIssued.delete(t);
-      s.oauthIssued.set(json.access_token, now + Math.min(life, 86_400_000) + s.config.timeoutMs);
-      while (s.oauthIssued.size > 32) s.oauthIssued.delete(s.oauthIssued.keys().next().value!);
+      s.oauthIssued.set(json.access_token, now + Math.min(Math.max(life, TOKEN_KEEP_MIN_MS), TOKEN_KEEP_MAX_MS) + s.config.timeoutMs);
+      while (s.oauthIssued.size > MAX_ISSUED_TOKENS) {
+        let first: string | null = null, at = Infinity;
+        for (const [t, until] of s.oauthIssued) if (until < at) { first = t; at = until; }
+        s.oauthIssued.delete(first!);
+      }
       return json.access_token as string;
     })().finally(() => { s.oauthFetch = null; });
     return s.oauthFetch;
@@ -286,7 +300,12 @@ export class DownstreamGateway {
         };
         const first = await send();
         if (first.res.status !== 401) return first.res;
-        if (!replayable(init?.body, s.tools)) { if (s.oauthToken?.value === first.used) s.oauthToken = null; return first.res; }
+        if (!replayable(init?.body, s.readCalls)) {
+          if (s.oauthToken?.value === first.used) s.oauthToken = null;
+          const id = callIdOf(init?.body);
+          if (id && s.authRefused.size < 1000) s.authRefused.add(id);
+          return first.res;
+        }
         await first.res.body?.cancel().catch(() => undefined);
         // Forget the refused token only if it is still the current one: a late 401 must not drop a newer token.
         if (s.oauthToken?.value === first.used) s.oauthToken = null;
@@ -349,6 +368,8 @@ export class DownstreamGateway {
       // An oversized response is the server's answer being refused, not a transport failure (the SDK only notices
       // it at the timeout): it fails this call alone, says why, and counts nothing.
       if (s.cutCalls.delete(callId)) throw new SafeError(`response larger than ${MAX_RESPONSE_BYTES} bytes`);
+      // A refused token is not a broken connection: this call fails alone, other calls keep running, nothing counts.
+      if (s.authRefused.delete(callId)) throw new SafeError('the server refused Panter\'s token (401) and Panter does not send a call that is not a read twice. The call may or may not have run on the server: check before calling again (the next call goes out with a new token; a grant use is spent).');
       const message = this.describe(s, error);
       // A JSON-RPC error is the server answering: the connection is fine and nothing counts.
       if (error instanceof ProtocolError) throw new SafeError(message);
@@ -585,10 +606,11 @@ export class DownstreamGateway {
         const iat = Math.floor(this.now() / 1000);
         const actor = signer.sign({ iss: 'panter-ai', aud: server, sub: caller.id, role, ...(missionId ? { mission: missionId } : {}),
           jti: callId, tool, args: digest, iat, exp: iat + ACTOR_TTL_SECONDS });
+        if (cls === 'read') s.readCalls.add(callId);
         return c.callTool({ name: tool, arguments: args,
           _meta: { 'panter-ai/callId': callId, 'panter-ai/host': caller.id, 'panter-ai/role': role, 'panter-ai/actor': actor,
             ...(missionId ? { 'panter-ai/missionId': missionId } : {}), ...(usedGrant ? { 'panter-ai/grantId': usedGrant } : {}) } } as any,
-          { timeout: s.config.timeoutMs } as any);
+          { timeout: s.config.timeoutMs } as any).finally(() => { s.readCalls.delete(callId); });
       });
       if (Buffer.byteLength(JSON.stringify(result)) > MAX_RESULT_BYTES) { finish('FAILED', 'result too large'); return fail(`${server}.${tool} returned more than ${MAX_RESULT_BYTES} bytes`); }
       finish(result.isError ? 'TOOL_ERROR' : 'OK', null);

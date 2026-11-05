@@ -6,7 +6,7 @@ All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://
 
 ### Downstream gateway
 - OAuth client credentials for downstream servers (`oauth` in the config): cached token, renewed before expiry and once on a 401, never shown. Needed to mount servers that only accept OAuth, such as commerce-control.
-  A refused write is never replayed (only reads and protocol requests are retried with the new token). A token replaced while a call runs stays redacted until it expires, a late 401 for an older token does not discard the newer one, the token endpoint's answer is limited to 64 KB, and Basic credentials are form-encoded (RFC 6749).
+  A refused write is never replayed (only calls authorized as reads and protocol requests are retried with the new token); it fails alone, without breaking the connection or counting toward the circuit breaker. A token replaced while a call runs stays redacted until it expires, a late 401 for an older token does not discard the newer one, the token endpoint's answer is limited to 64 KB, and Basic credentials are form-encoded (RFC 6749).
 
 ## 1.1.0 (2026-11-04)
 
