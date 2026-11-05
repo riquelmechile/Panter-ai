@@ -118,9 +118,14 @@ export default {
           method: "POST", redirect: "manual", headers: panterHeaders(env), body,
         });
         if (response.ok) return;
-        last = `HTTP ${response.status}`;
+        const text = await response.text().catch(() => "");
+        // Panter's reason (e.g. which kind of personal data a sensitive mission refused), so the bounce says why.
+        let reason = "";
+        try { reason = String(JSON.parse(text).error || ""); } catch { /* not JSON */ }
+        reason = reason.replace(/[\r\n\t]+/g, " ").replace(/[^\x20-\x7E]/g, "").slice(0, 300);
+        last = reason ? `HTTP ${response.status}: ${reason}` : `HTTP ${response.status}`;
         // A retry after a delivery that did get through: Panter already has this result.
-        if (response.status === 409 && /already accepted/i.test(await response.text().catch(() => ""))) return;
+        if (response.status === 409 && /already accepted/i.test(text)) return;
         if (response.status < 500) break; // a definitive refusal: do not retry
       } catch { last = "unreachable"; }
     }

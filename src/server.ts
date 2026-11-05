@@ -1,13 +1,13 @@
 import { leaderHost, leaderLabel, appEventHosts, freezeLeaderHost, leaderPolicyProfile, adoptPendingLeaderPhases } from './core/leadership.js';
 import { ExternalOAuthVerifier, staticBearerMatch } from './core/oauth.js';
 import { isAdminPrincipal, parseOwnerTrustedHosts } from './core/owner-trust.js';
-import { createToolSurface, type SurfaceRole } from './core/tool-surface.js';
+import { createToolSurface, DOMAINS, routerName, workflowTools, type SurfaceRole } from './core/tool-surface.js';
 import { DownstreamGateway, MISSION_ID, parseDownstreamConfig, routerFor } from './core/downstream.js';
-import { refuseSensitive } from './core/sensitive-content.js';
+import { allowSystemAddresses, refuseSensitive } from './core/sensitive-content.js';
 import { SqliteLedger } from './core/sqlite-ledger.js';
 import { EmbeddedOAuth } from './core/embedded-oauth.js';
 import { openEngramBridge } from './core/engram-runtime.js';
-import { readFile, chmod, mkdir, lstat, unlink } from 'node:fs/promises';
+import { readFile, writeFile, chmod, mkdir, lstat, unlink } from 'node:fs/promises';
 import { connect as connectUnix } from 'node:net';
 import { createHash } from 'node:crypto';
 import type { EngramMemory } from './core/engram-memory.js';
@@ -20,7 +20,7 @@ import { GitHubWorkforce, GITHUB_WRITE_OPS } from './core/github-workforce.js';
 import { registerTaskWire } from './core/workforce-task-wire.js';
 import { WorkforceLongPoll, withListenHint } from './core/workforce-long-poll.js';
 import { GrokRoutineWake } from './core/grok-routine-wake.js';
-import { ringGrokForWork, pickupClockStart } from './core/harness-wake.js';
+import { ringGrokForWork, ringNextGrokWork, pickupClockStart } from './core/harness-wake.js';
 import { GeminiMailWake, MailError } from './core/gemini-mail-wake.js';
 import { WorkforceEvents, reconcileWorkforceEventOutbox } from './core/workforce-events.js';
 import { registerWorkforceEventWire } from './core/workforce-event-wire.js';
@@ -113,11 +113,15 @@ const downstreamConfig = process.env.PANTER_DOWNSTREAM_CONFIG;
 const downstream = new DownstreamGateway(downstreamConfig ? parseDownstreamConfig(await readFile(downstreamConfig, 'utf8'), HOSTS) : [],
   SqliteLedger.open(dataDir));
 if (downstream.configured) {
-  const refresh = () => downstream.refreshAll().then(r => { for (const x of r) if ('error' in x) console.error(`Downstream ${x.server}: ${x.error}`); });
+  const refresh = () => downstream.refreshAll().then(r => { for (const x of r) if ('error' in x) console.error(`Downstream ${x.server}: ${x.error}`); })
+    // (before the MCP handler exists the announcement waits for the next refresh)
+    .then(() => { try { announceSurface(); } catch { /* not ready yet */ } });
   // Make the signing key now: the first unauthenticated request for the public keys never writes the ledger.
   try { downstream.actorKeys(); } catch (error) { console.error(`Downstream signing key unavailable: ${error instanceof Error ? error.message : 'error'}`); }
   void refresh(); setInterval(refresh, 10 * 60_000).unref();
 }
+// Panter's own mailboxes never count as personal data (a worker quotes them when it explains how it is woken).
+allowSystemAddresses([process.env.PANTER_GEMINI_MAIL_RECIPIENT, ...(process.env.PANTER_SENSITIVE_ALLOWED_ADDRESSES ?? '').split(',')]);
 /** A mission that called a sensitive downstream server keeps no personal identifiers in what hosts send Panter for it. */
 const guardSensitive = (missionId: string, texts: Array<string | undefined>, where: string) => {
   if (downstream.isSensitiveMission(missionId)) refuseSensitive(texts, where);
@@ -142,6 +146,8 @@ mesh.setStandingListenerCheck(host=>workforceLongPoll.isListening(host));
 // Gemini's only event trigger is a Gmail monitor: wake it by e-mail through the operator's relay.
 const geminiMailWake = new GeminiMailWake(dataDir, mesh, ()=>workforceLongPoll.isListening('gemini'),
   leaderHost()==='gemini' ? {} : process.env);
+// Sensitive-mission work is never mailed: it waits for a live Gemini chat with Panter's tools.
+geminiMailWake.setSkipMission(missionId => downstream.isSensitiveMission(missionId));
 const nativeSubagentReview = await NativeSubagentReview.open(dataDir);
 const githubGate = new GitHubDeliveryGate({
   allowedRepositories:(process.env.PANTER_GITHUB_ALLOWED_REPOS??'').split(',').map(x=>x.trim()).filter(Boolean),
@@ -275,12 +281,35 @@ function surfaceRole(): SurfaceRole { const p = principal(); return !isHost(p) ?
 const packageVersion: string = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
 const releaseRevision: string | null = await readFile(new URL('../REVISION', import.meta.url), 'utf8')
   .then(x => /^[0-9a-f]{7,64}$/.test(x.trim()) ? x.trim() : null).catch(() => null);
+/** What every host's tool list is made of: this release and the downstream servers' tools. It changes on a deploy, a
+ * new downstream server or a downstream server whose tools changed. */
+function surfaceFingerprint(): string {
+  const ds = downstream.names().sort().map(n => `${n}:${downstream.tools(n).map(t => t.name).sort().join(',')}`);
+  return createHash('sha256').update([packageVersion, releaseRevision ?? '', ...ds].join('|')).digest('hex').slice(0, 16);
+}
+const surfaceFile = join(dataDir, 'surface-fingerprint');
+let announcedSurface = await readFile(surfaceFile, 'utf8').then(x => x.trim()).catch(() => '');
+let notifyToolsChanged: () => void = () => {};
+/** Tell connected hosts their tool list is stale (MCP notifications/tools/list_changed) when the surface changed since
+ * the last announcement, including across restarts; repeated a little later for hosts that reconnect after a deploy.
+ * A host may still ignore it (ChatGPT and Gemini keep the list they read when the connector was added): every
+ * response then carries the fingerprint, and panter_admin operation "surface_status" says what to do. */
+function announceSurface(): void {
+  const fp = surfaceFingerprint();
+  if (fp === announcedSurface) return;
+  announcedSurface = fp;
+  void writeFile(surfaceFile, fp).catch(() => undefined);
+  const send = () => { try { notifyToolsChanged(); } catch { console.error('tools/list_changed publication failed'); } };
+  send();
+  for (const ms of [60_000, 5 * 60_000]) setTimeout(send, ms).unref();
+}
 const handler = createMcpHandler(reqCtx => {
   const server = new McpServer({ name: 'panter-ai', version: packageVersion }, {
-    capabilities: { resources: { subscribe: true }, events: {} } as any,
+    capabilities: { resources: { subscribe: true }, tools: { listChanged: true }, events: {} } as any,
     instructions: `Panter-ai is a host-operated development harness with NO provider inference. ${leaderLabel()} is the coordinator. For a new user development request start with panter_harness_start (goal + permitted work and observed facts, NEVER ask the user to pick agents, roles, skills or review lenses). Then call panter_harness_tick and execute the returned phase automatically with host tools or native subagents; call panter_harness_report after observing actual results, and repeat until blocked by actual authorization/evidence or completed. The server automatically selects ODD discovery, planning, scoped implementation, independent verification and 4R by risk; Judgment Day only when explicitly requested. An initial Agent Studio preference may bind model/host but never requires per-task specialist selection. GPT_A_ONLY forbids remote delegation while preserving maximum requested model/effort, fast native worker processing, and maximum safe host-observed parallelism. If no remote peer is connected continue with ${leaderLabel()} native/inline. The host owns model selection and subagent execution; claims of model, effort, speed or children are REQUESTED, not verified. Do not misstate packet preparation as subagent execution. Panter-RDD is an independently implemented SHA-bound review gate, not the official Gentle AI Go controller; human delivery authorization remains separate. Do not merge or deploy without separately authorized tools and exact-candidate proof. Every Panter tool is also reachable through its domain router (panter_harness, panter_review, panter_mesh, panter_workforce, panter_github, panter_memory, panter_catalog, panter_admin): call it with operation "index" to see its operations. Tools not listed for your role are still callable, by name or through their router, with their usual authorization.`
       + (downstream.configured ? ` Downstream MCP servers you may use appear as panter_ds_<name> routers (operation "index" first); see panter_downstream_status.` : '')
-      + connectionContract(principal()),
+      + connectionContract(principal())
+      + ` Tool surface ${surfaceFingerprint()} (Panter ${packageVersion}${releaseRevision ? ` ${releaseRevision.slice(0, 7)}` : ''}). If a Panter tool you need is not in your list, call panter_admin with operation "surface_status".`,
 
   });
   const surface = createToolSurface(server, { role: surfaceRole, listAll: toolSurfaceAll });
@@ -493,8 +522,12 @@ const handler = createMcpHandler(reqCtx => {
     if(github)githubWorkforce.validateGrant(github); // fail before creating the work
     guardSensitive(input.missionId,[input.instruction],'This instruction');
     const work=await mesh.delegate(hostPrincipal(),input);
-    if(!github)return work;
-    return {...work,github:await githubWorkforce.grant(hostPrincipal(),{workId:work.id,...github})};
+    const granted=github?{github:await githubWorkforce.grant(hostPrincipal(),{workId:work.id,...github})}:{};
+    // Grok is woken only by its routine webhook: a directed delegate rings it too (after any grant), oldest queued
+    // Grok work first, one outstanding ring at a time. A ring is a pointer and does not prove Grok ran.
+    if(input.target!=='grok'||!grokRoutineWake.configured)return {...work,...granted};
+    const ring=await ringNextGrokWork(mesh,grokRoutineWake).catch(()=>({rung:false,reason:'ERROR' as const}));
+    return {...work,...granted,grokWake:{...ring,status:await mesh.grokWakeStatus(hostPrincipal(),work.id).catch(()=>null)}};
   }));
   // ---- GitHub for the workforce (operator token held by Panter; narrow, work-scoped, audited) ----
   server.registerTool('panter_github_grant',{description:`${leaderLabel()} lets the worker of one delegated work use GitHub in ONE repository: always read; plus the listed write operations. commit = commits to a NEW branch Panter creates for this work (under panter/, default panter/<host>-<work8>; never an existing, default or protected branch; never CI, CODEOWNERS or git config files; never forced); pr = open a pull request from that branch; comment = comment on the listed numbers and on issues/PRs this work opens (no bot/slash commands); issue = open issues. There is NO merge, approve, delete, label, release or settings operation. Note: pushing a branch runs the repository's existing CI on the worker's code. The grant dies with the work's lease.`,
@@ -1075,6 +1108,16 @@ const handler = createMcpHandler(reqCtx => {
     inputSchema: z.object({}).strict(), annotations: { readOnlyHint: true } },
     async () => execute(async () => ({ configured: downstream.configured, servers: downstream.status(dsCaller()),
       actorKeys: downstream.configured ? downstream.actorKeys() : null })));
+  server.registerTool('panter_surface_status', { description: 'What your Panter tool list should contain now: release, tool-surface fingerprint (it changes on a deploy or when a downstream MCP server or its tools change), the tools listed for your role and the downstream servers you may use. If your host shows an older list, refresh or reconnect the Panter connector; until then every tool stays callable through its router, and downstream servers through panter_admin operation "downstream_call".',
+    inputSchema: z.object({ knownFingerprint: z.string().max(64).optional() }).strict(), annotations: { readOnlyHint: true } },
+    async x => execute(async () => {
+      const role = surfaceRole(), fingerprint = surfaceFingerprint();
+      const listed = role === 'operator' ? 'all' : [...DOMAINS.map(routerName), ...workflowTools(role)].sort();
+      return { version: packageVersion, revision: releaseRevision, fingerprint, role, listed,
+        downstream: downstream.status(dsCaller()).map(s => ({ server: s.server, router: s.router, state: s.state })),
+        ...(x.knownFingerprint ? { stale: x.knownFingerprint !== fingerprint } : {}),
+        advice: 'If your tool list lacks any of these tools or routers, refresh or reconnect the Panter connector in your app (ChatGPT, Gemini and some others keep the list they read when the connector was added). Meanwhile call any tool through its router, and downstream servers through panter_admin operation "downstream_call".' };
+    }));
   server.registerTool('panter_downstream_refresh', { description: `${leaderLabel()} or operator: fetch a downstream server's tools again (all servers when none is given).`,
     inputSchema: z.object({ server: z.string().max(24).optional() }).strict(), annotations: { readOnlyHint: true } },
     async x => execute(async () => { requireLeaderOrOperator();
@@ -1119,6 +1162,8 @@ if(geminiMailWake.configured){
   setInterval(mailGemini,30_000).unref();
 }
 eventRetry.unref();
+// Queued Grok work that could not be rung yet (Grok was busy) is rung once Grok is free.
+if (grokRoutineWake.configured) setInterval(() => { void ringNextGrokWork(mesh, grokRoutineWake).catch(() => undefined); }, 60_000).unref();
 reconcileEvents();
 
 // Publish only after atomic ledger persistence. SDK handles modern listen
@@ -1131,6 +1176,9 @@ mesh.events.on('changed', () => {
     });
   } catch { console.error('MCP notification publication failed'); }
 });
+notifyToolsChanged = () => handler.notify.toolsChanged();
+// Without downstream servers the surface is final now; with them, after their first refresh.
+if (!downstream.configured) announceSurface();
 const nodeHandler = toNodeHandler(handler);
 // Unauthenticated relay endpoints: a small per-client budget (the real relay sends a few per task).
 const mailRelayHits = new Map<string, number[]>();

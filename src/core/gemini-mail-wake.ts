@@ -35,7 +35,7 @@ const REFUSAL_LIMIT=8;
 export type MailClaim={id:string;state:string;attemptId:string|null;leaseGeneration:number;leaseUntil:string|null;
   instruction:string;role:string;missionId:string};
 export type MailMesh={
-  pending(host:'gemini'):Promise<Array<{workId:string;role:string;createdAt:string}>>;
+  pending(host:'gemini'):Promise<Array<{workId:string;role:string;createdAt:string;missionId?:string}>>;
   claim(host:'gemini',workId:string,leaseSeconds:number,requireQueued:boolean,requireFree:boolean,transport:boolean):Promise<MailClaim>;
   requeueExpiredReadOnly(host:'gemini'):Promise<string[]>;
   complete(host:'gemini',id:string,attemptId:string,generation:number,result:string,success:boolean,transport?:boolean,via?:'gmail-relay'):Promise<unknown>;
@@ -87,6 +87,11 @@ export class GeminiMailWake{
     this.relayKeyHash=key?sha(key):null;
     this.db=this.configured?SqliteLedger.open(dir):null;
   }
+  /** Missions whose work never travels by e-mail (a sensitive downstream mission: its task would leave Panter in a
+   * mail, and Gemini's mail runtime has no Panter tools to reach that server anyway). Such work waits for a live
+   * Gemini chat. */
+  private skipMission:(missionId:string)=>boolean=()=>false;
+  setSkipMission(fn:(missionId:string)=>boolean){this.skipMission=fn;}
   describe(){return {configured:this.configured,adapter:this.configured?'GEMINI_GMAIL_RELAY':'NONE',recipient:this.recipient||null,
     relayKey:Boolean(this.relayKeyHash)};}
   /** True when a shared relay key is configured: callers without it are refused. */
@@ -110,7 +115,7 @@ export class GeminiMailWake{
     try{
       await this.mesh.requeueExpiredReadOnly('gemini').catch(()=>[]);
       if(this.isListening())return out; // an open Gemini chat takes queued work directly
-      const pending=(await this.mesh.pending('gemini')).filter(w=>w.role!=='implementer');
+      const pending=(await this.mesh.pending('gemini')).filter(w=>w.role!=='implementer'&&!(w.missionId&&this.skipMission(w.missionId)));
       const data=this.db!.read('gemini_mail',seed);
       const blocked=(id:string)=>(data.backoff??[]).some(b=>b.workId===id&&b.nextAt>now);
       // Forget backoff of works that are no longer waiting, so the list cannot grow forever.

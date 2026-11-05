@@ -2,6 +2,16 @@
 
 All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://semver.org/). Releases before 1.0 are described in [docs/HISTORY.md](docs/HISTORY.md).
 
+## 1.3.0 (2026-11-05)
+
+### Workforce
+- Grok is rung for every queued work, not only `panter_mesh_delegate_auto`: a directed `panter_mesh_delegate` rings it too (after any GitHub grant; the answer carries `grokWake`), and a one-minute sweep rings the oldest queued Grok work that was never rung once Grok is free. Before, directed work waited forever and an earlier unrung work kept Grok looking busy.
+- Gemini by e-mail: work of a sensitive mission is never mailed (its task would leave Panter in a mail, and Gemini's mail runtime has no Panter tools); it waits for a live Gemini chat. The mail relay's bounce now says why Panter refused a result (e.g. which kind of personal data a sensitive mission refused).
+- Sensitive missions: Panter's own mailboxes (`PANTER_GEMINI_MAIL_RECIPIENT` and `PANTER_SENSITIVE_ALLOWED_ADDRESSES`, exact addresses) no longer count as personal data, so a worker quoting how it is woken is not refused.
+
+### Tool surface
+- `notifications/tools/list_changed` when the tool surface changes (a deploy, a new downstream server, or a downstream server whose tools changed), including across restarts, repeated after one and five minutes for hosts that reconnect. The surface fingerprint is in the server instructions; `panter_admin` operation `surface_status` (tool `panter_surface_status`) says what the caller's list should contain and whether a known fingerprint is stale. Hosts that keep the list read when the connector was added (ChatGPT, Gemini) still need a connector refresh; meanwhile every tool stays callable through its router and downstream servers through `downstream_call`.
+
 ## 1.2.1 (2026-11-05)
 
 - `panter_downstream_call`: reach a downstream server by name (same authorization, write policy, grants and audit as its `panter_ds_<name>` router), also through the `panter_admin` router, so a host whose connector's tool list predates a newly mounted server can use it without reloading.

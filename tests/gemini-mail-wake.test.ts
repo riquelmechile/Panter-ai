@@ -405,3 +405,13 @@ test('a fixed-width or byte-width cut never changes the result, and a word wrap 
   }
   assert.ok(wrappedExact / wrapped > 0.75, `most word-wrapped replies keep their spaces exactly (${wrappedExact}/${wrapped})`);
 });
+
+test('work of a sensitive mission is never mailed: it waits for a live Gemini chat', () => fixture(async ({ mesh, sent, wake }) => {
+  const work = await delegate(mesh, 'sens');
+  wake.setSkipMission(id => id === (work as any).missionId);
+  assert.deepEqual((await wake.dispatchDue()).sent, []);
+  assert.equal(sent.length, 0);
+  assert.equal((await mesh.inbox('claude')).works.find(w => w.id === work.id)?.state, 'QUEUED');
+  wake.setSkipMission(() => false);
+  assert.deepEqual((await wake.dispatchDue()).sent, [work.id]);
+}));

@@ -23,6 +23,21 @@ export async function ringGrokForWork(mesh:MeshEngine,grok:RoutineDoorbell,workI
   return {rung:true,reason:'RUNG',accepted:response.accepted};
 }
 
+/** Ring the oldest queued Grok work that was never rung, when Grok is free. Any queued Grok work counts (directed
+ * panter_mesh_delegate, delegate_auto or harness phases): before, directed work was never rung and waited forever,
+ * and an earlier unrung work kept Grok looking busy. Called after a directed delegate and on a periodic sweep;
+ * the exclusive reservation keeps it to one outstanding ring at a time. */
+export async function ringNextGrokWork(mesh:MeshEngine,grok:RoutineDoorbell):Promise<RingOutcome&{workId?:string}>{
+  if(!grok.configured)return {rung:false,reason:'NOT_CONFIGURED'};
+  const queued=(await mesh.pending('grok')).sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
+  for(const w of queued){
+    const r=await ringGrokForWork(mesh,grok,w.workId);
+    if(r.reason==='ALREADY_RUNG'||r.reason==='NOT_QUEUED')continue;
+    return {...r,workId:w.workId};
+  }
+  return {rung:false,reason:'NOT_QUEUED'};
+}
+
 /** How many pickup limits a Grok work may wait, unrung, behind other Grok work before it ages anyway (so a stuck
  * blocker, e.g. a work left RUNNING or OUTCOME_UNKNOWN, can never stall a harness phase forever). */
 export const GROK_MAX_WAIT_LIMITS=4;

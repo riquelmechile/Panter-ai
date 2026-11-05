@@ -52,3 +52,24 @@ test('concurrent rings never ring two Grok works; the pickup clock starts at the
     assert.equal(await pickupClockStart(m, { configured: false, dispatch: bell.dispatch }, { id: second.id, target: 'grok', createdAt: second.createdAt }, 180_000), second.createdAt);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('any queued Grok work is rung in order (directed delegates too), one at a time', async () => {
+  const { ringNextGrokWork } = await import('../src/core/harness-wake.js');
+  const dir = await mkdtemp(join(tmpdir(), 'panter-wake-'));
+  try {
+    const m = await MeshEngine.open(dir);
+    await m.setProfile('gpt-a', { host: 'grok', actorId: 'actor-grok', modelRequest: 'm', effortRequest: 'max', roles: ['reviewer'] }, 0);
+    const rung: string[] = [];
+    const bell = { configured: true, dispatch: async (id: string) => { rung.push(id); return { accepted: true, statusCode: 200 }; } };
+    assert.equal((await ringNextGrokWork(m, bell)).reason, 'NOT_QUEUED');
+    const a = await m.delegate('gpt-a', { missionId: 'm', target: 'grok', role: 'reviewer', instruction: 'a', idempotencyKey: 'a' });
+    const b = await m.delegate('gpt-a', { missionId: 'm', target: 'grok', role: 'reviewer', instruction: 'b', idempotencyKey: 'b' });
+    assert.deepEqual(await ringNextGrokWork(m, bell), { rung: true, reason: 'RUNG', accepted: true, workId: a.id });
+    assert.equal((await ringNextGrokWork(m, bell)).reason, 'PEER_BUSY', 'a is rung and still queued');
+    const claimed = await m.claim('grok', a.id, 300) as any;
+    await m.complete('grok', a.id, claimed.attemptId, claimed.leaseGeneration, '{}');
+    assert.deepEqual(await ringNextGrokWork(m, bell), { rung: true, reason: 'RUNG', accepted: true, workId: b.id });
+    assert.deepEqual(rung, [a.id, b.id]);
+    assert.equal((await ringNextGrokWork({ pending: async () => [] } as any, { configured: false, dispatch: bell.dispatch })).reason, 'NOT_CONFIGURED');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

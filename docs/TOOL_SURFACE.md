@@ -38,3 +38,11 @@ Hay dos niveles: dominio → operación. A propósito no es un árbol más profu
 ## Servidores MCP downstream
 
 Cada servidor MCP montado detrás de Panter ([DOWNSTREAM_MCP.md](DOWNSTREAM_MCP.md)) aparece como un router propio, `panter_ds_<nombre>`, fuera de los ocho routers de dominio. Solo se lista para los hosts que su configuración permite (y para el operador). Los hosts no permitidos pueden llamarlo por nombre, pero el gateway lo rechaza y queda en el audit. `panter_downstream_status` y `panter_downstream_audit` están en la lista del líder; `panter_downstream_grant`, `panter_downstream_revoke` y `panter_downstream_unmark` son solo del operador.
+
+## Stale tool lists (1.3.0)
+
+A host keeps the tool list it read; Panter cannot force it to read again. What Panter does:
+
+- It announces `notifications/tools/list_changed` when the surface changes: a deploy (new release), a new downstream server, or a downstream server whose tools changed. The last announced fingerprint is kept in the data directory, so a restart into a new release announces once (again after one and five minutes, for hosts that reconnect late). Claude and other clients that honour the notification re-list.
+- The server instructions carry the surface fingerprint, and `panter_admin` operation `surface_status` returns the release, the fingerprint, the tools listed for the caller's role and the downstream servers it may use; with `knownFingerprint` it says whether that list is `stale`.
+- ChatGPT and Gemini keep the list read when the connector was added or last refreshed: after a deploy that adds tools, refresh or reconnect the Panter connector there. Until then every tool stays callable through its router, and downstream servers through `panter_admin` operation `downstream_call`, so nothing is blocked.
