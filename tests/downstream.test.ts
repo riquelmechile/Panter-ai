@@ -306,11 +306,24 @@ test('end to end: a sensitive server signs who calls and keeps its mission free 
     assert.equal(report.isError, true); assert.match(text(report), /This report seems to contain an e-mail/);
     const review = await lead.callTool({ name: 'panter_native_review_create', arguments: { missionId: RUN, kind: '4r', objective: 'Review triage for ana@clinica.cl', candidateSha: 'a'.repeat(40), idempotencyKey: 'r1' } });
     assert.match(text(review), /This review objective seems to contain an e-mail/);
+    const created = JSON.parse(text(await lead.callTool({ name: 'panter_native_review_create', arguments: { missionId: RUN, kind: '4r', objective: 'Review the triage screen', candidateSha: 'a'.repeat(40), idempotencyKey: 'r2' } })));
+    const solo = await lead.callTool({ name: 'panter_native_review_submit_solo', arguments: { reviewId: created.reviewId, slotId: '0b6f8f0e-8b39-4f3c-9d4f-2a7e7c1d5b22',
+      report: { agentId: 'lens', candidateSha: 'a'.repeat(40), packetDigest: 'b'.repeat(64), evidence: ['ok'],
+        findings: [{ id: 'f1', location: 'src/a.ts:1', severity: 'WARNING', claim: 'Leaks a row:\n12.345.678-5', proofRefs: ['log'] }] } } });
+    assert.match(text(solo), /This review report seems to contain a Chilean RUT/);
+    // The operator can clear a mark set by mistake; a later report is not checked.
+    const admin = new Client({ name: 'admin', version: '1' });
+    await admin.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { authProvider: { token: async () => 'panter-admin-ds-token-987654321' } } as any));
+    clients.push(admin);
+    assert.match(text(await lead.callTool({ name: 'panter_downstream_unmark', arguments: { missionId: 'other-run', reason: 'x' } })), /Operator/);
+    assert.deepEqual(JSON.parse(text(await admin.callTool({ name: 'panter_downstream_unmark', arguments: { missionId: 'other-run', reason: 'x' } }))), { unmarked: false });
     // With a sensitive server configured, memory saves are checked too (before Engram is even asked).
     const memory = await lead.callTool({ name: 'panter_memory_save', arguments: { title: 'triage', type: 'decision', topicKey: 'clinic/triage', content: 'llamar al +56 9 1234 5678' } });
     assert.match(text(memory), /This memory seems to contain a Chilean phone number/);
     const audit = JSON.parse(text(await lead.callTool({ name: 'panter_downstream_audit', arguments: {} })));
     assert.deepEqual(audit.sensitiveMissions.map((m: any) => m.id), [RUN]);
+    assert.deepEqual(JSON.parse(text(await admin.callTool({ name: 'panter_downstream_unmark', arguments: { missionId: RUN, reason: 'test' } }))), { unmarked: true });
+    assert.equal((await delegate('Check patient 12.345.678-5', 'k3')).isError ? 'refused' : 'stored', 'stored', 'after unmark the mission is ordinary again');
     assert.ok(audit.audit.every((x: any) => x.argsSha256 === null));
   } finally {
     for (const c of clients) await c.close().catch(() => undefined);
@@ -547,6 +560,7 @@ test('a sensitive server is proxied without keeping its content, and its mission
     // The mark survives a restart, and only hosts that may use the server see it.
     const again = new DownstreamGateway([w.config], SqliteLedger.open(w.dir), w.env);
     assert.equal(again.isSensitiveMission('run-9'), true);
+    assert.equal(new DownstreamGateway([], SqliteLedger.open(w.dir), w.env).isSensitiveMission('run-9'), true, 'marks hold with no server configured');
     assert.deepEqual(again.sensitiveMissions(operator).map(m => [m.id, m.server, m.host]), [['run-9', 'shop', 'claude']]);
     assert.deepEqual(again.sensitiveMissions(grok), []);
     // A refused call (no grant) does not mark its mission: nothing came back.
@@ -558,7 +572,8 @@ test('a sensitive server is proxied without keeping its content, and its mission
     await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' }, undefined, { missionId: run.toUpperCase() });
     assert.equal(w.gw.isSensitiveMission(run), true);
     // The operator can clear a mark set by mistake, durably.
-    assert.deepEqual(w.gw.unmarkSensitive(run), { unmarked: true });
+    assert.deepEqual(w.gw.unmarkSensitive(run, 'marked by mistake'), { unmarked: true });
+    assert.deepEqual(w.gw.unmarkSensitive(run, 'again'), { unmarked: false });
     assert.equal(w.gw.isSensitiveMission(run), false);
     assert.equal(new DownstreamGateway([w.config], SqliteLedger.open(w.dir), w.env).isSensitiveMission(run), false);
     // An open circuit says why without the downstream's words.

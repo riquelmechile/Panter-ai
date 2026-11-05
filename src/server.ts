@@ -109,21 +109,29 @@ const workforceLongPoll = new WorkforceLongPoll(mesh);
 const githubWorkforce = new GitHubWorkforce(dataDir, mesh, leaderHost);
 // Downstream MCP servers mounted behind Panter (docs/DOWNSTREAM_MCP.md). Off unless PANTER_DOWNSTREAM_CONFIG names a file.
 const downstreamConfig = process.env.PANTER_DOWNSTREAM_CONFIG;
+// The ledger is opened even with no servers configured: missions marked sensitive stay protected after a config change.
 const downstream = new DownstreamGateway(downstreamConfig ? parseDownstreamConfig(await readFile(downstreamConfig, 'utf8'), HOSTS) : [],
-  downstreamConfig ? SqliteLedger.open(dataDir) : null);
+  SqliteLedger.open(dataDir));
 if (downstream.configured) {
   const refresh = () => downstream.refreshAll().then(r => { for (const x of r) if ('error' in x) console.error(`Downstream ${x.server}: ${x.error}`); });
   void refresh(); setInterval(refresh, 10 * 60_000).unref();
 }
-/** A mission that called a sensitive downstream server keeps no personal or clinical data anywhere in Panter. */
+/** A mission that called a sensitive downstream server keeps no personal identifiers in what hosts send Panter for it. */
 const guardSensitive = (missionId: string, texts: Array<string | undefined>, where: string) => {
   if (downstream.isSensitiveMission(missionId)) refuseSensitive(texts, where);
 };
 mesh.setContentGuard(guardSensitive);
+/** Every string inside a value (JSON text would turn a line break into "\n" and hide what starts the next line). */
+const stringsIn = (v: unknown, out: string[] = []): string[] => {
+  if (typeof v === 'string') out.push(v);
+  else if (Array.isArray(v)) for (const x of v) stringsIn(x, out);
+  else if (v && typeof v === 'object') for (const x of Object.values(v)) stringsIn(x, out);
+  return out;
+};
 /** Native and solo review reports are stored too: the same check, through the review's mission. */
 const guardReview = async (reviewId: string, report: unknown) => {
   const missionId = await nativeSubagentReview.missionOf(reviewId);
-  if (missionId) guardSensitive(missionId, [JSON.stringify(report)], 'This review report');
+  if (missionId) guardSensitive(missionId, stringsIn(report), 'This review report');
 };
 const grokRoutineWake = new GrokRoutineWake();
 const claudeRoutineWake = new ClaudeRoutineWake();
@@ -481,6 +489,7 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_mesh_delegate',{description:`${leaderLabel()} creates actor-bound A2A work for one configured host. Optional github attaches a work-scoped GitHub grant (see panter_github_grant).`,inputSchema:z.object({missionId:bounded(120),target:hostEnum,role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160),github:githubGrantInput.optional()})},async x=>execute(async()=>{
     const {github,...input}=x;
     if(github)githubWorkforce.validateGrant(github); // fail before creating the work
+    guardSensitive(input.missionId,[input.instruction],'This instruction');
     const work=await mesh.delegate(hostPrincipal(),input);
     if(!github)return work;
     return {...work,github:await githubWorkforce.grant(hostPrincipal(),{workId:work.id,...github})};
@@ -512,6 +521,7 @@ const handler = createMcpHandler(reqCtx => {
     description:`${leaderLabel()} routes to the least-loaded recently authenticated standing peer with the requested role; returns LOCAL_FALLBACK_REQUIRED when no live peer is evidenced. Does not prove cold-start wake.`,
     inputSchema:z.object({missionId:bounded(120),role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160)}).strict(),
   },async x=>execute(async()=>{
+    guardSensitive(x.missionId,[x.instruction],'This instruction');
     const caller=hostPrincipal();
     const direct=await mesh.delegateAuto(caller,x);
     if(direct.status!=='LOCAL_FALLBACK_REQUIRED'||
@@ -735,7 +745,7 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_specialist_delegate',{
     description:`${leaderLabel()} dispatches a centrally versioned agent + assigned skills as a frozen A2A task to its configured host; result returns to ${leaderLabel()} inbox.`,
     inputSchema:z.object({missionId:bounded(120),agentId:z.enum(GENTLE_AGENTS.map(a=>a.id) as [string,...string[]]),objective:bounded(6000),idempotencyKey:bounded(160),candidateSha:z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/).optional(),allowedEditSurfaces:z.array(z.string().min(1).max(256)).max(16).optional()})
-  },async input=>execute(()=>mesh.delegateBoundSpecialist(hostPrincipal(),input)));
+  },async input=>execute(async()=>{guardSensitive(input.missionId,[input.objective],'This objective');return mesh.delegateBoundSpecialist(hostPrincipal(),input);}));
 
   server.registerTool('panter_mesh_uncertain_writers',{
     description:'OPERATOR ONLY: list uncertain and lease-expired implementer attempts with their exact fencing IDs and edit surfaces; does not kill or reconcile external workers.',
@@ -758,7 +768,7 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_review_start',{
     description:`${leaderLabel()} atomically delegates 4R four independent lenses or exactly two blind Judgment Day judges to their configured hosts using one frozen candidate SHA. No automatic approval or fix.`,
     inputSchema:z.object({missionId:bounded(120),kind:z.enum(['4r','judgment-day']),objective:bounded(6000),candidateSha:z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/),idempotencyKey:bounded(160)})
-  },async input=>execute(()=>mesh.startReview(hostPrincipal(),input)));
+  },async input=>execute(async()=>{guardSensitive(input.missionId,[input.objective],'This review objective');return mesh.startReview(hostPrincipal(),input);}));
   server.registerTool('panter_review_status',{
     description:`Read durable 4R / Judgment Day receipts for a review session. When complete, ${leaderLabel()} must independently assess outputs; this is not native provider approval.`,
     inputSchema:z.object({reviewId:z.uuid()}),annotations:{readOnlyHint:true}
@@ -1020,7 +1030,7 @@ const handler = createMcpHandler(reqCtx => {
   const requireLeaderOrOperator = () => { if (principal() !== 'admin' && principal() !== leaderHost()) throw new Error(`${leaderLabel()} or operator required`); };
   for (const name of downstream.names()) {
     surface.external(routerFor(name), {
-      description: `Downstream MCP server "${name}" through Panter's gateway. Operation "index" lists its tools and whether each is read, write or destructive (arguments {"operation":"<tool>"} for one tool's input schema); then operation "<tool>" with that tool's arguments (a tool that is itself called "index" is operation "@index"). Write and destructive tools may need a grantId from the operator (panter_downstream_grant). missionId names the mission (harness run id) the call is for; the downstream server receives it in Panter's signed actor assertion with your host and role.${downstream.isSensitiveServer(name) ? ' This server is SENSITIVE: missionId is required, and that mission then keeps no personal or clinical data in Panter (reports, results, messages and memory containing it are refused).' : ''} Calls are audited.`,
+      description: `Downstream MCP server "${name}" through Panter's gateway. Operation "index" lists its tools and whether each is read, write or destructive (arguments {"operation":"<tool>"} for one tool's input schema); then operation "<tool>" with that tool's arguments (a tool that is itself called "index" is operation "@index"). Write and destructive tools may need a grantId from the operator (panter_downstream_grant). missionId names the mission (harness run id) the call is for; the downstream server receives it in Panter's signed actor assertion with your host and role.${downstream.isSensitiveServer(name) ? ' This server is SENSITIVE: missionId is required, and that mission then is protected: reports, results, messages and memory with a personal identifier (RUT, e-mail, +56 phone) are refused for it; use pseudonymous ids.' : ''} Calls are audited.`,
       inputSchema: z.object({ operation: z.string().trim().min(1).max(64), arguments: z.record(z.string(), z.unknown()).optional(), grantId: z.uuid().optional(),
         missionId: z.string().regex(MISSION_ID).optional() }).strict(),
       annotations: { readOnlyHint: false },
@@ -1061,7 +1071,7 @@ const handler = createMcpHandler(reqCtx => {
       refusedWithoutAccess: downstream.refusedOutsiders(dsCaller()), sensitiveMissions: downstream.sensitiveMissions(dsCaller()).slice(-x.limit).reverse() }; }));
   server.registerTool('panter_downstream_unmark', { description: 'Operator only: clear the sensitive mark of a mission (for a mission marked by mistake). Its later reports are no longer checked for personal data, and Engram mirroring resumes. Nothing already refused comes back.',
     inputSchema: z.object({ missionId: z.string().regex(MISSION_ID), reason: bounded(500) }).strict() },
-    async x => execute(async () => { requireOperator(); return downstream.unmarkSensitive(x.missionId); }));
+    async x => execute(async () => { requireOperator(); return downstream.unmarkSensitive(x.missionId, x.reason); }));
   surface.finalize();
   return server;
 });

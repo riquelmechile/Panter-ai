@@ -13,7 +13,7 @@
  * A server marked `sensitive` (patient data, for example) is proxied without keeping its content: Panter forwards
  * the call and hands the answer back, but stores no argument hash and no error text from it (audit, status and logs
  * keep only metadata), every call must name its mission, and that mission becomes sensitive: Panter then refuses to
- * store personal or clinical data for it anywhere else (reports, tasks, results, messages, memory).
+ * store new text with a personal identifier for it (reports, tasks, results, messages, memory).
  */
 import { Client, StreamableHTTPClientTransport, SdkError, SdkErrorCode, ProtocolError } from '@modelcontextprotocol/client';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
@@ -41,7 +41,7 @@ export type SensitiveMission = { id: string; server: string; host: string; at: s
 type Data = { version: 1; grants: DownstreamGrant[]; audit: DownstreamAudit[]; hashKey?: string; signingKey?: string };
 const seed: Data = { version: 1, grants: [], audit: [] };
 /** Sensitive missions live in their own ledger, apart from the bounded audit: a mark is never dropped. */
-type Marks = { version: 1; missions: SensitiveMission[] };
+type Marks = { version: 1; missions: SensitiveMission[]; unmarked?: Array<{ id: string; reason: string; at: string }> };
 const marksSeed: Marks = { version: 1, missions: [] };
 
 const NAME = /^[a-z][a-z0-9]{1,23}$/;
@@ -156,7 +156,7 @@ export class DownstreamGateway {
     private readonly env: Record<string, string | undefined> = process.env, private readonly now: () => number = Date.now) {
     for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null, refreshFailedMs: 0, refreshError: null, cutCalls: new Set() });
     // Load the sensitive missions now, so the checks other stores run inside their own transactions read no database.
-    if (this.servers.size) this.sensitiveSet();
+    if (this.db) this.sensitiveSet();
   }
   get configured(): boolean { return this.servers.size > 0; }
   isSensitiveServer(name: string): boolean { return !!this.servers.get(name)?.config.sensitive; }
@@ -353,10 +353,14 @@ export class DownstreamGateway {
   }
   isSensitiveMission(id: string | null | undefined): boolean { return !!id && this.sensitiveSet().has(normalizeMission(id)); }
   /** Operator: clear a mission's sensitive mark (a mission marked by mistake, or by a host naming another's run). */
-  unmarkSensitive(id: string): { unmarked: boolean } {
+  unmarkSensitive(id: string, reason: string): { unmarked: boolean } {
     const key = normalizeMission(id);
     const unmarked = this.db ? this.db.mutate<Marks, boolean>('downstream_sensitive', marksSeed, d => {
-      const before = d.missions.length; d.missions = d.missions.filter(m => m.id !== key); return d.missions.length < before;
+      const before = d.missions.length; d.missions = d.missions.filter(m => m.id !== key);
+      if (d.missions.length === before) return false;
+      // Removing a protection leaves a trace (the last 1000 unmarks).
+      d.unmarked = [...(d.unmarked ?? []), { id: key, reason: reason.slice(0, 500), at: iso(this.now()) }].slice(-1000);
+      return true;
     }).result : this.sensitiveSet().has(key);
     this.sensitiveSet().delete(key);
     return { unmarked };
@@ -449,9 +453,11 @@ export class DownstreamGateway {
     if (sensitive) { try { this.markSensitive(missionId!, server, caller.id); } catch (error) { return refuse(clean(error)); } }
     const digest = argsDigest(args);
     try {
+      // The key is loaded before the call: a ledger failure is not a transport failure of the server.
+      const signer = this.signer();
       const result = await this.guarded(s, (c, callId) => {
         const iat = Math.floor(this.now() / 1000);
-        const actor = this.signer().sign({ iss: 'panter-ai', aud: server, sub: caller.id, role, ...(missionId ? { mission: missionId } : {}),
+        const actor = signer.sign({ iss: 'panter-ai', aud: server, sub: caller.id, role, ...(missionId ? { mission: missionId } : {}),
           jti: callId, tool, args: digest, iat, exp: iat + ACTOR_TTL_SECONDS });
         return c.callTool({ name: tool, arguments: args,
           _meta: { 'panter-ai/callId': callId, 'panter-ai/host': caller.id, 'panter-ai/role': role, 'panter-ai/actor': actor,

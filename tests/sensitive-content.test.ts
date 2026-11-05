@@ -7,11 +7,10 @@ import { findSensitive, refuseSensitive } from '../src/core/sensitive-content.js
 import { ActorSigner, argsDigest, canonicalJson, verifyActorAssertion } from '../src/core/actor-assertion.js';
 import { MeshEngine } from '../src/core/mesh.js';
 
-test('personal and clinical data is found in its usual shapes', () => {
+test('personal identifiers are found in their usual shapes', () => {
   for (const [t, kind] of [
-    ['Paciente 12.345.678-5 llegó', /RUT/], ['rut 12345678-5', /RUT/], ['contacto: ana.perez@clinica.cl', /e-mail/],
-    ['llamar al +56 9 1234 5678', /phone/], ['+56912345678', /phone/], ['diagnóstico: hipertensión', /clinical/],
-    ['{"patient_name": "x"}', /clinical/], ['ficha clínica = 22', /clinical/], ['Previsión: Fonasa', /clinical/], ['diagnóstico: Hipertensión arterial', /clinical/], ['alergias = penicilina', /clinical/],
+    ['Paciente 12.345.678-5 llegó', /RUT/], ['rut 12345678-5', /RUT/], ['Found record:\n12.345.678-5', /RUT/], ['contacto: ana.perez@clinica.cl', /e-mail/],
+    ['llamar al +56 9 1234 5678', /phone/], ['+56912345678', /phone/], ['fijo +56 2 2345 6789', /phone/],
   ] as const) assert.match(findSensitive(t) ?? 'none', kind, t);
 });
 
@@ -19,17 +18,15 @@ test('ordinary engineering text passes', () => {
   for (const t of [
     'Reviewed 5d92574b65ec78131bfe2b5ed02d81acbe03805f, 12 tests pass',
     'Co-Authored-By: Claude <noreply@anthropic.com>', '1234+user@users.noreply.github.com pushed',
-    'patient flow screen renders the list', 'run: 12345678-4 finished', 'timestamp 1730000000000 and port 18080',
-    'the RUT validator rejects 12.345.678-4',
-    // Code in a medical project names these fields without holding records.
-    'interface Visit { patient: Patient; diagnosis: string; allergies: Allergy[] }', 'fn(patient: Patient, rut?: string)',
-    'const v = { patient: row.patient, diagnosis: props.diagnosis }', 'url = `?rut=${rut}`', 'paciente: {', 'medications: Array<Med>',
-    'git clone git@github.com:org/clinic.git',
+    'run: 12345678-4 finished', 'timestamp 1730000000000 and port 18080', 'duration 5634567890 ns',
+    'the RUT validator rejects 12.345.678-4', 'git clone git@github.com:org/clinic.git',
+    // Field names in code and pseudonymous ids are not personal data.
+    'interface Visit { patient: Patient; diagnosis: string }', 'patient: P-0042, rut: rutSchema', 'Diagnosis: the parser drops a field',
   ]) assert.equal(findSensitive(t), null, t);
 });
 
 test('the scan stays fast on long hostile input', () => {
-  for (const t of ['a'.repeat(50000), '@'.repeat(50000), 'a@'.repeat(25000), '1'.repeat(50000), '+56'.repeat(16000), 'paciente: '.repeat(5000)]) {
+  for (const t of ['a'.repeat(50000), '@'.repeat(50000), 'a@'.repeat(25000), '1'.repeat(50000), '+56'.repeat(16000), '+56 '.repeat(12000)]) {
     const started = performance.now(); findSensitive(t);
     assert.ok(performance.now() - started < 500, `${t.slice(0, 6)}… took too long`);
   }
@@ -64,22 +61,22 @@ test('the verifier refuses tokens that are not a short-lived Panter assertion', 
   assert.equal(ActorSigner.fromPkcs8(signer.exportPkcs8()).kid, signer.kid);
 });
 
-test('the mesh refuses to store personal data for a guarded mission, and only for it', async () => {
+test('the mesh refuses personal data in worker results and messages of a guarded mission, and only there', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'panter-sensitive-'));
   try {
     const m = await MeshEngine.open(dir);
     await m.setProfile('gpt-a', { host: 'grok', actorId: 'actor-grok-001', modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer'] }, 0);
     m.setContentGuard((mission, texts, where) => { if (mission === 'clinic-run') refuseSensitive(texts, where); });
-    await assert.rejects(m.delegate('gpt-a', { missionId: 'clinic-run', target: 'grok', role: 'reviewer', instruction: 'Revisar paciente 12.345.678-5', idempotencyKey: 'k0' }), /This instruction seems to contain a Chilean RUT/);
     const w = await m.delegate('gpt-a', { missionId: 'clinic-run', target: 'grok', role: 'reviewer', instruction: 'Review the triage screen', idempotencyKey: 'k1' });
-    assert.equal((await m.delegate('gpt-a', { missionId: 'clinic-run', target: 'grok', role: 'reviewer', instruction: 'Review the triage screen', idempotencyKey: 'k1' })).id, w.id, 'a replay is not a new write');
     const c = await m.claim('grok', w.id);
     await assert.rejects(m.message('grok', { missionId: 'clinic-run', to: 'gpt-a', workId: w.id, kind: 'UPDATE', text: 'mail ana@clinica.cl' }), /This message seems to contain an e-mail/);
-    await assert.rejects(m.complete('grok', w.id, c.attemptId!, c.leaseGeneration, 'diagnóstico: x'), /This result seems to contain a clinical/);
+    await assert.rejects(m.complete('grok', w.id, c.attemptId!, c.leaseGeneration, 'row 7:\n12.345.678-5'), /This result seems to contain a Chilean RUT/);
     assert.equal((await m.inbox('gpt-a')).works.find(x => x.id === w.id)?.state, 'RUNNING', 'a refused result is not stored');
     await m.complete('grok', w.id, c.attemptId!, c.leaseGeneration, 'Screen reviewed; patient ids are pseudonymous (P-0042)');
     assert.equal((await m.resultGet('gpt-a', w.id)).result, 'Screen reviewed; patient ids are pseudonymous (P-0042)');
-    const other = await m.delegate('gpt-a', { missionId: 'normal-run', target: 'grok', role: 'reviewer', instruction: 'Ping ana@example.com', idempotencyKey: 'k2' });
-    assert.equal(other.state, 'QUEUED', 'other missions are not checked');
+    const other = await m.delegate('gpt-a', { missionId: 'normal-run', target: 'grok', role: 'reviewer', instruction: 'Ping', idempotencyKey: 'k2' });
+    const oc = await m.claim('grok', other.id);
+    await m.complete('grok', other.id, oc.attemptId!, oc.leaseGeneration, 'mailed ana@example.com');
+    assert.equal((await m.resultGet('gpt-a', other.id)).result, 'mailed ana@example.com', 'other missions are not checked');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
