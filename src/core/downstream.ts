@@ -106,6 +106,16 @@ async function readCapped(res: Response, max: number): Promise<string> {
 /** HTTP Basic client credentials (RFC 6749 2.3.1: id and secret form-encoded, then base64). */
 const formEncode = (v: string) => new URLSearchParams({ v }).toString().slice(2);
 const basicCredentials = (id: string, secret: string) => Buffer.from(`${formEncode(id)}:${formEncode(secret)}`).toString('base64');
+/** Whether a refused request may be sent again: no body (GET, DELETE) or JSON-RPC text with no `tools/call` to a tool
+ * other than a known read. */
+function replayable(body: unknown, tools: readonly DownstreamTool[]): boolean {
+  if (body == null) return true;
+  if (typeof body !== 'string') return false;
+  let msg: unknown;
+  try { msg = JSON.parse(body); } catch { return false; }
+  return (Array.isArray(msg) ? msg : [msg]).every((m: any) => m?.method !== 'tools/call'
+    || tools.some(t => t.name === m?.params?.name && t.cls === 'read'));
+}
 /** An error whose message is already safe to show and store (cleaned, or withheld for a sensitive server). */
 class SafeError extends Error {}
 /** After a failed tool-list fetch, calls fail fast (closed) for this long before Panter asks again. */
@@ -263,8 +273,10 @@ export class DownstreamGateway {
       // No redirects (the token is only ever sent to the configured address) and bounded responses.
       const limited = limitedFetch(id => { if (id && s.cutCalls.size < 1000) s.cutCalls.add(id); });
       // OAuth: each request carries the current token; a 401 renews it once (a token can expire or be revoked early).
-      // Only a body that can be sent twice is retried (the SDK sends JSON-RPC as a string); a refused token means
-      // the server did not act on the request.
+      // A refused request is sent again with a new token only when that is safe: a body that can be sent twice (the
+      // SDK sends JSON-RPC as a string) and no call to a tool that changes anything. A 401 does not prove the server
+      // did nothing (a proxy can answer it after the call ran), so a write is never replayed: it fails and the host
+      // decides whether to call again, with the renewed token.
       const oauthFetch = async (url: string | URL, init?: RequestInit) => {
         const send = async () => {
           const used = await this.oauthToken(s);
@@ -273,7 +285,8 @@ export class DownstreamGateway {
           return { used, res: await limited(url, { ...init, headers }) };
         };
         const first = await send();
-        if (first.res.status !== 401 || !(init?.body == null || typeof init.body === 'string')) return first.res;
+        if (first.res.status !== 401) return first.res;
+        if (!replayable(init?.body, s.tools)) { if (s.oauthToken?.value === first.used) s.oauthToken = null; return first.res; }
         await first.res.body?.cancel().catch(() => undefined);
         // Forget the refused token only if it is still the current one: a late 401 must not drop a newer token.
         if (s.oauthToken?.value === first.used) s.oauthToken = null;

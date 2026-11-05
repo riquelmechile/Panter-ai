@@ -24,7 +24,7 @@ async function downstreamServer() {
   let lastAuth = '';
   let delayMs = 0, down = false, flipDestructive = false, mode: 'ok' | 'echo500' | 'redirect' = 'ok', pad = 0;
   // Which bearer tokens are accepted, and how long the n-th refusal (from 1) takes to arrive.
-  let accepts = (auth: string) => auth === `Bearer ${TOKEN}`, refusals = 0, refuseDelay = (_n: number) => 0;
+  let accepts = (auth: string): boolean => auth === `Bearer ${TOKEN}`, refusals = 0, refuseDelay = (_n: number) => 0;
   const handler = toNodeHandler(createMcpHandler(() => {
     const s = new McpServer({ name: 'shop', version: '1' });
     const record = (tool: string) => async (args: unknown, ctx: any) => {
@@ -702,6 +702,27 @@ test('OAuth: late 401s for a revoked token do not throw away the renewed one', a
     const results = await Promise.all(['B1', 'B2', 'B3', 'B4'].map(sku => w.gw.call(claude, 'shop', 'lookup', { sku })));
     assert.deepEqual(results.map(text), ['lookup ok', 'lookup ok', 'lookup ok', 'lookup ok']);
     assert.equal(te.seen.length, 2, 'one renewal for the whole burst');
+  } finally { await w.done(); await te.close(); }
+});
+
+test('OAuth: a refused write is never sent again by itself', async () => {
+  let n = 0;
+  const te = await tokenEndpoint(() => ({ access_token: `issued-token-${++n}-0123456789`, expires_in: 3600 }));
+  const w = await world({ tokenEnv: null, oauth: oauthOf(te.url) }, OAUTH_ENV);
+  try {
+    w.ds.setAccepts(a => /^Bearer issued-token-\d+-0123456789$/.test(a));
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok');
+    const g = w.gw.grant({ server: 'shop', tools: '*', host: 'claude', ttlSeconds: 600, uses: 2, reason: 'repricing' });
+    // The token is revoked: the write fails instead of being replayed (a 401 does not prove it did not run).
+    w.ds.setAccepts(a => /^Bearer issued-token-\d+-0123456789$/.test(a) && a !== 'Bearer issued-token-1-0123456789');
+    const writes = () => w.ds.seen.filter(x => x.tool === 'set_price').length;
+    assert.notEqual(text(await w.gw.call(claude, 'shop', 'set_price', { sku: 'A1', price: 5 }, g.id)), 'set_price ok');
+    assert.equal(writes(), 0);
+    assert.equal(te.seen.length, 1, 'no renewal-and-replay inside the refused write');
+    // The refused token was dropped, so the host's next call goes out with a new one.
+    assert.equal(text(await w.gw.call(claude, 'shop', 'set_price', { sku: 'A1', price: 5 }, g.id)), 'set_price ok');
+    assert.equal(writes(), 1);
+    assert.equal(te.seen.length, 2);
   } finally { await w.done(); await te.close(); }
 });
 
