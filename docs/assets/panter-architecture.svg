@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 620" width="1200" height="620" role="img" aria-labelledby="pa-title pa-desc">
+  <title id="pa-title">How Panter-ai fits together</title>
+  <desc id="pa-desc">Diagram. Left: AI hosts (Claude as leader; GPT-A, GPT-B, Grok and Gemini as workers) connect to Panter-ai over MCP. Center: Panter-ai with its automatic harness, review gate, mesh and workforce, GitHub workforce, Engram memory and per-role tool surface. Right: downstream MCP servers, each in its own repository and service, reached through Panter with per-server tokens and write grants. Bottom: GitHub, where pull requests, CI and an independent reviewer account gate every merge.</desc>
+  <defs>
+    <marker id="pa-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#2dd4bf"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="620" rx="24" fill="#0d1117"/>
+  <text x="40" y="54" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing="2" fill="#9aa3b5">AI HOSTS</text>
+  <text x="430" y="54" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing="2" fill="#9aa3b5">PANTER-AI</text>
+  <text x="880" y="54" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing="2" fill="#9aa3b5">DOWNSTREAM MCP SERVERS</text>
+  <g transform="translate(40 76)">
+    <rect width="280" height="52" rx="12" fill="#161b26" stroke="#f5b301" stroke-width="2"/>
+    <text x="16" y="23" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Claude</text>
+    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">leader: plans, delegates, merges</text>
+  </g>
+  <g transform="translate(40 142)">
+    <rect width="280" height="52" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+    <text x="16" y="23" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">GPT-A</text>
+    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">worker</text>
+  </g>
+  <g transform="translate(40 208)">
+    <rect width="280" height="52" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+    <text x="16" y="23" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">GPT-B</text>
+    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">worker</text>
+  </g>
+  <g transform="translate(40 274)">
+    <rect width="280" height="52" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+    <text x="16" y="23" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Grok</text>
+    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">worker</text>
+  </g>
+  <g transform="translate(40 340)">
+    <rect width="280" height="52" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+    <text x="16" y="23" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Gemini</text>
+    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">worker (mail relay)</text>
+  </g>
+  <rect x="410" y="70" width="380" height="420" rx="20" fill="#111722" stroke="#f5b301" stroke-width="2"/>
+  <g transform="translate(430 88)">
+    <rect width="340" height="52" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+    <text x="16" y="23" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Automatic harness</text>
+    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">discover, design, implement, verify</text>
+  </g>
+  <g transform="translate(430 154)">
+    <rect width="340" height="52" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+    <text x="16" y="23" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Review gate</text>
+    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">4R, Judgment Day, Panter-RDD</text>
+  </g>
+  <g transform="translate(430 220)">
+    <rect width="340" height="52" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+    <text x="16" y="23" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Mesh + workforce</text>
+    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">delegation, claims, wake, results</text>
+  </g>
+  <g transform="translate(430 286)">
+    <rect width="340" height="52" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+    <text x="16" y="23" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">GitHub workforce</text>
+    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">scoped grants, PRs, audit</text>
+  </g>
+  <g transform="translate(430 352)">
+    <rect width="340" height="52" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+    <text x="16" y="23" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Engram memory</text>
+    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">project context across sessions</text>
+  </g>
+  <g transform="translate(430 418)">
+    <rect width="340" height="52" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+    <text x="16" y="23" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Tool surface</text>
+    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">per-role list, 8 domain routers</text>
+  </g>
+  <g transform="translate(880 100)">
+    <rect width="280" height="52" rx="12" fill="#161b26" stroke="#2dd4bf" stroke-width="2"/>
+    <text x="16" y="23" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Commerce MCP</text>
+    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">its own repo, service, token</text>
+  </g>
+  <g transform="translate(880 180)">
+    <rect width="280" height="52" rx="12" fill="#161b26" stroke="#2dd4bf" stroke-width="2"/>
+    <text x="16" y="23" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Ops MCP</text>
+    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">its own repo, service, token</text>
+  </g>
+  <g transform="translate(880 260)">
+    <rect width="280" height="52" rx="12" fill="#161b26" stroke="#2dd4bf" stroke-width="2"/>
+    <text x="16" y="23" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Any MCP server</text>
+    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">registered once, prefixed tools</text>
+  </g>
+  <path d="M326 245 L402 245" stroke="#2dd4bf" stroke-width="3" fill="none" marker-start="url(#pa-arrow)" marker-end="url(#pa-arrow)"/>
+  <text x="364" y="232" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12" fill="#9aa3b5" text-anchor="middle">MCP</text>
+  <text x="364" y="268" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12" fill="#9aa3b5" text-anchor="middle">OAuth</text>
+  <path d="M798 220 L872 220" stroke="#2dd4bf" stroke-width="3" fill="none" marker-end="url(#pa-arrow)"/>
+  <text x="836" y="206" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12" fill="#9aa3b5" text-anchor="middle">gateway</text>
+  <text x="880" y="370" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" fill="#9aa3b5">Localhost only, a token per server,</text>
+  <text x="880" y="390" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" fill="#9aa3b5">writes need a grant, every call audited,</text>
+  <text x="880" y="410" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" fill="#9aa3b5">the server keeps its own approvals.</text>
+  <path d="M600 498 L600 536" stroke="#2dd4bf" stroke-width="3" fill="none" marker-end="url(#pa-arrow)"/>
+  <rect x="300" y="544" width="600" height="52" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+  <text x="600" y="567" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6" text-anchor="middle">GitHub</text>
+  <text x="600" y="585" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5" text-anchor="middle">pull requests, CI, an independent reviewer account on the exact commit</text>
+</svg>
