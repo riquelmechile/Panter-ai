@@ -138,6 +138,12 @@ export class GeminiMailWake{
     try{work=await this.mesh.claim('gemini',workId,LEASE_SECONDS,true,true,true);}
     catch{return false;} // taken, finished or a transient error: the queue and lease expiry decide what's next
     if(work.state!=='RUNNING'||!work.attemptId||!work.leaseUntil||work.role==='implementer')return false;
+    // The mission may have turned sensitive since the pending list was read (another host reached a sensitive
+    // downstream server meanwhile): hand the unsent claim back so the work waits for a live Gemini chat.
+    if(work.missionId&&this.skipMission(work.missionId)){
+      await this.mesh.releaseUnsentClaim('gemini',workId,work.attemptId,work.leaseGeneration).catch(()=>{});
+      return false;
+    }
     if(attempt>MAX_ATTEMPTS){
       await this.mesh.complete('gemini',workId,work.attemptId,work.leaseGeneration,
         `Gemini mail relay: ${MAX_ATTEMPTS} attempts to hand this task to Gemini by e-mail got no valid reply; Gemini did not complete it.`,false,true);
@@ -200,6 +206,10 @@ export class GeminiMailWake{
     if(!t||t.validatedAt||Date.parse(t.expiresAt)<=Date.now()||!sameHash(t.instructionDigest,sha(e.instruction as string))||
       e.lease_generation!==t.leaseGeneration||(t.envelopeDigest&&!sameHash(t.envelopeDigest,sha(canonical(e)))))
       throw new MailError(403,'Envelope is not an outstanding Panter ticket');
+    // Last check before the relay e-mails it: a mission that became sensitive after the ticket was issued is
+    // refused here, so its task never leaves Panter in a mail.
+    if(typeof e.mission_id==='string'&&this.skipMission(e.mission_id))
+      throw new MailError(409,'Mission is sensitive: its work waits for a live Gemini chat');
     // One relay send per ticket: a copied envelope cannot be replayed through /wake.
     this.db!.mutate('gemini_mail',seed,d=>{const x=d.tickets.find(y=>y.workId===t.workId&&y.attempt===t.attempt);if(x)x.validatedAt=iso();});
     return {ok:true,work_id:t.workId,lease_generation:t.leaseGeneration};

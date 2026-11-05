@@ -415,3 +415,20 @@ test('work of a sensitive mission is never mailed: it waits for a live Gemini ch
   wake.setSkipMission(() => false);
   assert.deepEqual((await wake.dispatchDue()).sent, [work.id]);
 }));
+
+test('a mission that turns sensitive during dispatch is not mailed, and its ticket is refused before sending', () => fixture(async ({ mesh, sent, wake }) => {
+  const work = await delegate(mesh, 'late');
+  let checks = 0;
+  wake.setSkipMission(() => ++checks > 1); // not sensitive when listed, sensitive once claimed
+  assert.deepEqual((await wake.dispatchDue()).sent, []);
+  assert.equal(sent.length, 0);
+  assert.equal((await mesh.inbox('claude')).works.find(w => w.id === work.id)?.state, 'QUEUED');
+
+  wake.setSkipMission(() => false);
+  assert.deepEqual((await wake.dispatchDue()).sent, [work.id]);
+  const envelope = sent[0].payload.envelope;
+  wake.setSkipMission(id => id === envelope.mission_id);
+  assert.throws(() => wake.validateEnvelope(envelope), /sensitive/);
+  wake.setSkipMission(() => false);
+  assert.equal(wake.validateEnvelope(envelope).ok, true);
+}));
