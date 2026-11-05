@@ -612,18 +612,19 @@ test('an ordinary server keeps its diagnostics', async () => {
 });
 
 /** A token endpoint for OAuth client credentials that records what it was sent. */
-async function tokenEndpoint(issue: () => { access_token?: string; expires_in?: number; status?: number; pad?: number }) {
+async function tokenEndpoint(issue: () => { access_token?: string; expires_in?: number; status?: number; pad?: number; hang?: boolean }) {
   const seen: Array<{ auth: string; body: URLSearchParams }> = [];
   const http: Server = createServer((req, res) => {
     let raw = ''; req.on('data', c => { raw += c; });
     req.on('end', () => {
       seen.push({ auth: String(req.headers.authorization ?? ''), body: new URLSearchParams(raw) });
       const t = issue();
+      if (t.hang) return; // accepts the request and never answers
       res.writeHead(t.status ?? 200, { 'content-type': 'application/json' }).end(JSON.stringify({ access_token: t.access_token, token_type: 'Bearer', expires_in: t.expires_in ?? 3600, ...(t.pad ? { pad: 'p'.repeat(t.pad) } : {}) }));
     });
   });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', () => r()));
-  return { url: `http://127.0.0.1:${(http.address() as { port: number }).port}/oidc/token`, seen, close: () => new Promise(r => http.close(r)) };
+  return { url: `http://127.0.0.1:${(http.address() as { port: number }).port}/oidc/token`, seen, close: () => new Promise(r => { http.closeAllConnections?.(); http.close(r); }) };
 }
 
 test('OAuth client credentials: Panter gets a token, renews it when refused, and never shows it', async () => {
@@ -917,6 +918,29 @@ test('OAuth: a failed renewal keeps using the token that still works; one failed
     assert.ok(failed.every(r => /no OAuth token: token endpoint answered 500/.test(text(r))), failed.map(text).join(' | '));
     assert.equal(te.seen.length, 3, 'one shared request');
     assert.equal(st.failures, 1);
+  } finally { await w.done(); await te.close(); }
+});
+
+test('OAuth: a token endpoint that hangs never delays a call with a valid token, nor sends one late', async () => {
+  let hang = false;
+  const te = await tokenEndpoint(() => hang ? { hang: true } : { access_token: TOKEN, expires_in: 100 });
+  const w = await world({ tokenEnv: null, oauth: oauthOf(te.url), timeoutMs: 1000 }, OAUTH_ENV);
+  try {
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok');
+    const g = w.gw.grant({ server: 'shop', tools: '*', host: 'claude', ttlSeconds: 600, uses: 3, reason: 'repricing' });
+    // Past the renewal time, token still valid, endpoint hanging: the write goes out at once with the current token.
+    hang = true;
+    w.advance(55_000);
+    const t0 = Date.now();
+    assert.equal(text(await w.gw.call(claude, 'shop', 'set_price', { sku: 'W1', price: 9 }, g.id)), 'set_price ok');
+    assert.ok(Date.now() - t0 < 500, 'did not wait for the hanging renewal');
+    // Expired, endpoint still hanging: the write times out waiting for a token and is never sent afterwards.
+    await w.gw.refresh('shop'); // the tool list stays fresh, so the call itself is what waits
+    w.advance(46_000);
+    const before = w.ds.seen.filter(x => x.tool === 'set_price').length;
+    assert.match(text(await w.gw.call(claude, 'shop', 'set_price', { sku: 'W2', price: 9 }, g.id)), /timed out|no OAuth token/);
+    await new Promise(r => setTimeout(r, 1500)); // the token request gives up (its own timeout)
+    assert.equal(w.ds.seen.filter(x => x.tool === 'set_price').length, before, 'nothing was sent late');
   } finally { await w.done(); await te.close(); }
 });
 

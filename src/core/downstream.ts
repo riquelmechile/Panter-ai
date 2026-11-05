@@ -258,16 +258,15 @@ export class DownstreamGateway {
   private async oauthToken(s: ServerState): Promise<string> {
     const now = this.now(), current = s.oauthToken;
     if (current && now < current.renewAt) return current.value;
-    // Renewing early must not cost a token that still works: while the last renewal failed recently, or if this one
-    // fails, the current token is used until it really expires.
-    const stillValid = () => !!s.oauthToken && s.oauthToken === current && this.now() < current.expiresAt;
-    if (stillValid() && now < s.oauthRetryAt) return current!.value;
-    try { return await this.requestToken(s); }
-    catch (error) {
-      s.oauthRetryAt = this.now() + TOKEN_RETRY_MS;
-      if (stillValid()) return current!.value;
-      throw error;
+    // Renewing early must not cost a token that still works, nor make a call wait for the token endpoint: while the
+    // current token is valid, renewal runs in the background (at most every TOKEN_RETRY_MS after a failure) and the
+    // call goes out at once with the current token.
+    if (current && now < current.expiresAt) {
+      if (!s.oauthFetch && now >= s.oauthRetryAt) this.requestToken(s).catch(() => { s.oauthRetryAt = this.now() + TOKEN_RETRY_MS; });
+      return current.value;
     }
+    try { return await this.requestToken(s); }
+    catch (error) { s.oauthRetryAt = this.now() + TOKEN_RETRY_MS; throw error; }
   }
   /** One token request shared by every caller that needs it. Its failure carries the request's id, so callers that
    * failed on the same request count once toward the circuit breaker. */
@@ -336,6 +335,9 @@ export class DownstreamGateway {
             failCall(`no OAuth token: ${clean(error, this.secrets(s))}`, `token-request:${request}`);
             throw error;
           }
+          // A call that already ended (timed out while waiting for its token) is never sent late.
+          const id = callIdOf(init?.body);
+          if (id && !s.activeCalls.has(id)) throw new Error('the call ended before its token arrived; not sent');
           const headers = new Headers(init?.headers);
           headers.set('authorization', `Bearer ${used}`);
           return { used, res: await limited(url, { ...init, headers }) };
