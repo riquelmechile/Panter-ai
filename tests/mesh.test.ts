@@ -99,3 +99,20 @@ test('operator can inspect uncertain attempt fences without unlocking the writer
   assert.equal((await m.uncertainWriters()).length,1);
  }finally{Date.now=original;}
 }));
+
+test('hasDelegation reports whether a delegate call would replay existing work', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { MeshEngine } = await import('../src/core/mesh.js');
+  const dir = await mkdtemp(join(tmpdir(), 'panter-replay-'));
+  try {
+    const m = await MeshEngine.open(dir);
+    await m.setProfile('gpt-a', { host: 'grok', actorId: 'actor-grok', modelRequest: 'm', effortRequest: 'max', roles: ['reviewer'] }, 0);
+    const { default: assert } = await import('node:assert/strict');
+    assert.equal(await m.hasDelegation('m', 'k'), false);
+    await m.delegate('gpt-a', { missionId: 'm', target: 'grok', role: 'reviewer', instruction: 'x', idempotencyKey: 'k' });
+    assert.equal(await m.hasDelegation('m', 'k'), true);
+    assert.equal(await m.hasDelegation('m', 'other'), false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

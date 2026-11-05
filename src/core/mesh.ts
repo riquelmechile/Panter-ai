@@ -481,6 +481,10 @@ export class MeshEngine {
     return this.delegate(caller,{missionId:input.missionId,target:binding.host,role:packet.role,instruction:packet.instruction,idempotencyKey:input.idempotencyKey,
       specialist:{agentId:packet.agentId,skillIds:packet.skillIds,packetDigest:packet.digest,assetDigests:packet.assetDigests,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,bindingRevision:binding.revision,candidateSha:input.candidateSha,allowedEditSurfaces:packet.allowedEditSurfaces}});
   }
+  /** Whether a delegate with this mission and idempotency key already exists (a delegate call would replay it). */
+  async hasDelegation(missionId: string, idempotencyKey: string): Promise<boolean> {
+    return this.read(d => d.works.some(w => w.missionId === missionId && w.idempotencyKey === idempotencyKey));
+  }
   async delegate(caller: Host, input: { missionId: string; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?:NonNullable<MeshWork['specialist']>; wakeOnly?:boolean; scheduleOnly?:boolean }) {
     check(caller === leaderHost(), `Only ${leaderLabel()} can delegate`);
     check(input.missionId.length > 0 && input.missionId.length <= 120, 'Invalid mission');

@@ -528,13 +528,15 @@ const handler = createMcpHandler(reqCtx => {
     const {github,...input}=x;
     if(github)githubWorkforce.validateGrant(github); // fail before creating the work
     guardSensitive(input.missionId,[input.instruction],'This instruction');
+    const replay=github?await mesh.hasDelegation(input.missionId,input.idempotencyKey):false;
     const work=await mesh.delegate(hostPrincipal(),input);
     let granted={};
     if(github){
       try{granted={github:await githubWorkforce.grant(hostPrincipal(),{workId:work.id,...github})};}
       catch(error){
-        // Never leave a work without the access it was delegated with: withdraw it before anyone runs it.
-        await mesh.withdrawUnstarted(hostPrincipal(),work.id,'GitHub grant failed').catch(()=>undefined);
+        // Never leave new work without the access it was delegated with: withdraw it before anyone runs it. A replay
+        // of existing work keeps it (its original grant still stands; only this retry's grant was refused).
+        if(!replay)await mesh.withdrawUnstarted(hostPrincipal(),work.id,'GitHub grant failed').catch(()=>undefined);
         throw error;
       }
     }
