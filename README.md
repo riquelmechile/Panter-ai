@@ -41,12 +41,12 @@ The mascot is a panther with a mouse's face. The panther is patient and precise 
 | Area | What you get |
 |---|---|
 | **Automatic harness** | `panter_harness_start` and `panter_harness_tick` run ODD phases (discover, design, implement, verify, review) chosen by risk. The user never picks agents or skills. A run can be closed for good with `panter_harness_close`. |
-| **Review gate** | 4R review with four lenses, an optional Judgment Day with two blind judges, and Panter-RDD, which only acknowledges a review bound to the exact commit, its CI and attested transports. Reviews can run natively or on remote hosts that did not write the code. |
+| **Review gate** | 4R review with four lenses, an optional Judgment Day with two blind judges, and Panter-RDD, which only acknowledges a review bound to the exact commit, its CI and attested transports. Reviews run natively or on their bound remote hosts; Judgment Day never goes to a host that wrote the candidate, and with transport attestation Panter-RDD refuses remote receipts from one. |
 | **Mesh and workforce** | Durable delegation, claims with leases, heartbeats, results, wake signals and pickup timeouts with native fallback. Gemini works through a mail relay. |
 | **GitHub workforce** | Write access scoped to one work item, granted on dispatch and revoked when the work ends, with an audit trail. |
 | **Memory** | Optional Engram project memory, mirrored from the harness ledger. |
 | **Tool surface** | Each role sees a short list: the leader 50 tools and a worker 29, the 8 domain routers included. Every tool stays callable by name. See [docs/TOOL_SURFACE.md](docs/TOOL_SURFACE.md). |
-| **Downstream gateway** | Register an MCP server once; its tools appear under a prefix, with timeouts, a circuit breaker, write grants and audit. See [docs/DOWNSTREAM_MCP.md](docs/DOWNSTREAM_MCP.md). |
+| **Downstream gateway** | Register an MCP server once; it appears as one router, `panter_ds_<name>`, with timeouts, a circuit breaker, write grants and audit. See [docs/DOWNSTREAM_MCP.md](docs/DOWNSTREAM_MCP.md). |
 | **Operations** | One-command deploy of an exact commit with automatic rollback, a backup with a restore check before every deploy and every day, and a health check that restarts the service. See [docs/OPERATIONS.md](docs/OPERATIONS.md). |
 
 ## Ground rules
@@ -72,17 +72,17 @@ npm start
 
 The server listens on `127.0.0.1:8080/mcp`. Send `Authorization: Bearer $PANTER_TOKEN`. For real hosts, use embedded OAuth (`PANTER_AUTH_MODE=embedded`, see [docs/OAUTH_EMBEDDED.md](docs/OAUTH_EMBEDDED.md)) behind a TLS proxy. Every setting is listed in [`deploy/panter.env.example`](deploy/panter.env.example).
 
-`GET /health` returns `{"status":"ok","name":"panter-ai","version":"…","revision":"…"}`.
+`GET /health` returns `{"status":"ok","name":"panter-ai","version":"…","revision":"<commit>"}` (`revision` is `null` outside a release installed by `deploy/deploy.sh`).
 
 ## Running it in production
 
 The reference deployment is a single ARM64 VM running a `systemd --user` service behind a Cloudflare tunnel:
 
 ```sh
-PANTER_SOURCE_REPO=~/panter-ai/src deploy/deploy.sh <full commit sha on main>
+PANTER_SOURCE_REPO=<clone of this repo> ~/panter-ai/current/deploy/deploy.sh <full commit sha on main>
 ```
 
-The script builds and tests that commit, backs up the state, switches to it, and rolls back on its own if `/health` does not report that commit. Backups, restore steps and the timers are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+The script builds and tests that commit, stops the service for a consistent backup, switches to it, and rolls back on its own if `/health` does not report that commit. The rollback covers code, not data (restore from the pre-deploy backup if a release changed it), and the very first deploy has no previous release to go back to. Backups, restore steps and the timers are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 Panter keeps its state in one SQLite ledger plus a few JSON stores. Run **one process** per data directory.
 

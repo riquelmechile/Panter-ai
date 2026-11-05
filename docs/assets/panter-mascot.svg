@@ -51,5 +51,5 @@
   <path d="M256 272 v8 M244 282 Q256 290 268 282" fill="none" stroke="#ff8fa3" stroke-width="3" stroke-linecap="round"/>
   <rect x="249" y="286" width="6" height="8" rx="1.5" fill="#ffffff"/>
   <rect x="257" y="286" width="6" height="8" rx="1.5" fill="#ffffff"/>
-  <path d="M234 256 L176 242 M234 264 L172 266 M236 272 L182 288 M278 256 L336 242 M278 264 L340 266 M276 272 L330 288" stroke="#cbd2df" stroke-width="3" stroke-linecap="round"/>
+  <path d="M234 256 L176 242 M234 264 L172 266 M236 272 L182 288 M278 256 L336 242 M278 264 L340 266 M276 272 L330 288" stroke="#8a93a5" stroke-width="3" stroke-linecap="round"/>
 </svg>

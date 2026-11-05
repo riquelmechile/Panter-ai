@@ -13,7 +13,7 @@
   <g transform="translate(40 76)">
     <rect width="280" height="52" rx="12" fill="#161b26" stroke="#f5b301" stroke-width="2"/>
     <text x="16" y="23" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Claude</text>
-    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">leader: plans, delegates, merges</text>
+    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">leader (set by PANTER_LEAD_HOST)</text>
   </g>
   <g transform="translate(40 142)">
     <rect width="280" height="52" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
@@ -79,14 +79,14 @@
   <g transform="translate(880 260)">
     <rect width="280" height="52" rx="12" fill="#161b26" stroke="#2dd4bf" stroke-width="2"/>
     <text x="16" y="23" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Any MCP server</text>
-    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">registered once, prefixed tools</text>
+    <text x="16" y="41" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">registered once, one router</text>
   </g>
   <path d="M326 245 L402 245" stroke="#2dd4bf" stroke-width="3" fill="none" marker-start="url(#pa-arrow)" marker-end="url(#pa-arrow)"/>
   <text x="364" y="232" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12" fill="#9aa3b5" text-anchor="middle">MCP</text>
   <text x="364" y="268" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12" fill="#9aa3b5" text-anchor="middle">OAuth</text>
   <path d="M798 220 L872 220" stroke="#2dd4bf" stroke-width="3" fill="none" marker-end="url(#pa-arrow)"/>
   <text x="836" y="206" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12" fill="#9aa3b5" text-anchor="middle">gateway</text>
-  <text x="880" y="370" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" fill="#9aa3b5">Localhost only, a token per server,</text>
+  <text x="880" y="370" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" fill="#9aa3b5">Local or private, or https; a token per server,</text>
   <text x="880" y="390" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" fill="#9aa3b5">writes need a grant, every call audited,</text>
   <text x="880" y="410" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" fill="#9aa3b5">the server keeps its own approvals.</text>
   <path d="M600 498 L600 536" stroke="#2dd4bf" stroke-width="3" fill="none" marker-end="url(#pa-arrow)"/>

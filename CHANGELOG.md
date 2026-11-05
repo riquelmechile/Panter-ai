@@ -2,7 +2,7 @@
 
 All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://semver.org/). Releases before 1.0 are described in [docs/HISTORY.md](docs/HISTORY.md).
 
-## 1.0.0
+## 1.0.0 (2026-11-04)
 
 The first stable release: the developer-preview features are now the supported product, deployed and running in production.
 
@@ -13,8 +13,8 @@ The first stable release: the developer-preview features are now the supported p
 - Durable mesh and workforce: delegation, claims with leases, heartbeats, results, wake for Claude routines, Grok and Gemini (mail relay).
 
 ### Review
-- 4R with four lenses on remote hosts that did not write the candidate, and Judgment Day with two blind judges on their bound hosts.
-- Panter-RDD acknowledges only reviews bound to the exact commit and its CI, with optional transport attestation for remote receipts.
+- 4R with four lenses on their bound remote hosts, and Judgment Day with two blind judges on bound hosts that did not write the candidate.
+- Panter-RDD acknowledges only reviews bound to the exact commit and its CI, with optional transport attestation that also refuses receipts from hosts that wrote the candidate.
 
 ### GitHub
 - GitHub workforce: write access scoped to one work item, granted on dispatch and revoked when the work ends, with an audit trail.
@@ -22,7 +22,7 @@ The first stable release: the developer-preview features are now the supported p
 
 ### Tools
 - Per-role `tools/list` (leader, worker, operator) and eight domain routers; every tool stays callable by name.
-- Downstream MCP gateway: other MCP servers mounted behind Panter with prefixed tools, timeouts, a circuit breaker, write grants and audit.
+- Downstream MCP gateway: other MCP servers mounted behind Panter, each as one router (`panter_ds_<name>`), with timeouts, a circuit breaker, write grants and audit.
 
 ### Operations
 - `deploy/deploy.sh` deploys an exact commit of main: build and test in its own release, backup with the service stopped, switch, health check on that revision, automatic rollback.
