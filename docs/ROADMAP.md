@@ -22,7 +22,7 @@ The checkboxes below are a **historical per-release backlog** and should not be 
 ## Connectivity (v0.3)
 - [ ] OAuth 2.1 / protected-resource metadata / per-user and per-actor identities.
 - [ ] PostgreSQL persistence and horizontal-safe claims.
-- [ ] Authenticated, scoped MCP downstream registry with live discovery.
+- [x] Authenticated, scoped MCP downstream registry with live discovery (v0.16 gateway; see [DOWNSTREAM_MCP.md](DOWNSTREAM_MCP.md)).
 - [ ] MCP tool read/write classification and approvals.
 
 ## Development engine (v0.4)
@@ -221,6 +221,8 @@ La interfaz read-only no ejecuta código, no hace cambios en producción y no re
 
 ## v0.16 superficie de herramientas por rol y routers por dominio
 
-- [x] `tools/list` por rol: líder (~47) y worker (~29) ven los 8 routers por dominio más las herramientas de su flujo; el operador ve todo. Ninguna herramienta se bloquea: siguen invocables por nombre y por su router, con su misma autorización. `PANTER_TOOL_SURFACE=all` vuelve a la lista completa. Ver [TOOL_SURFACE.md](TOOL_SURFACE.md).
+- [x] `tools/list` por rol: líder (~50 con los routers) y worker (~29) ven los 8 routers por dominio más las herramientas de su flujo; el operador ve todo. Ninguna herramienta se bloquea: siguen invocables por nombre y por su router, con su misma autorización. `PANTER_TOOL_SURFACE=all` vuelve a la lista completa. Ver [TOOL_SURFACE.md](TOOL_SURFACE.md).
 - [x] Routers `panter_<dominio>` con `operation=index` (y esquema de entrada por operación), validación con el esquema de la herramienta y el mismo handler.
-- [ ] Montar los MCP downstream (commerce-control primero) como routers propios, con clasificación lectura/escritura y permisos de Panter.
+- [x] Gateway de MCP downstream: registro en `PANTER_DOWNSTREAM_CONFIG`, un router `panter_ds_<nombre>` por servidor listado solo para sus hosts, clasificación lectura/escritura/destructiva desde las anotaciones MCP, política `writes` y grants del operador, timeout, circuit breaker, límites de tamaño, redacción del token y audit. Ver [DOWNSTREAM_MCP.md](DOWNSTREAM_MCP.md).
+- [ ] Montar commerce-control como primer servidor downstream (su propio repo, servicio, token y aprobaciones), empezando con `writes: "deny"`.
+- [ ] Siguientes downstream: XanxitoSpA, harness médico y los demás proyectos, cada uno con el mismo contrato.
