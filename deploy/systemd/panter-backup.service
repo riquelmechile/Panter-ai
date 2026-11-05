@@ -1,0 +1,11 @@
+# Daily backup with restore check, taken with panter-ai.service stopped for a few seconds (the JSON stores are only
+# consistent while it is stopped); keeps 14 daily backups (deploy backups are never pruned).
+[Unit]
+Description=Panter-ai daily backup
+
+[Service]
+Type=oneshot
+UMask=0077
+# Waits up to 15 min for a deploy's lock, then at most 10 min of backup; never left hanging with the service stopped.
+TimeoutStartSec=30min
+ExecStart=/bin/bash %h/panter-ai/current/deploy/daily-backup.sh
