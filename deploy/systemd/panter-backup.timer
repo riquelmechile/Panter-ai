@@ -1,0 +1,10 @@
+[Unit]
+Description=Panter-ai daily backup
+
+[Timer]
+OnCalendar=*-*-* 07:17:00 UTC
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target
