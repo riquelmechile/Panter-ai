@@ -756,6 +756,23 @@ test('OAuth: an access token that redaction could not handle safely is refused',
   }
 });
 
+test('OAuth: issued tokens are never forgotten early; past the cap Panter asks for no more', async () => {
+  const te = await tokenEndpoint(() => ({ access_token: TOKEN }));
+  const w = await world({ tokenEnv: null, oauth: oauthOf(te.url) }, OAUTH_ENV);
+  try {
+    // White box: 1000 live tokens already issued (reaching that through real renewals would take 1000 refusals).
+    const issued = (w.gw as any).servers.get('shop').oauthIssued as Map<string, number>;
+    for (let i = 0; i < 1000; i++) issued.set(`live-token-${i}-0123456789`, w.now() + 86_400_000);
+    assert.match(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), /1000 tokens issued are still alive/);
+    assert.equal(te.seen.length, 0);
+    assert.equal(issued.size, 1000, 'none was dropped');
+    // Once they expire, Panter asks again.
+    w.advance(86_400_001);
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A2' })), 'lookup ok');
+    assert.equal(issued.size, 1);
+  } finally { await w.done(); await te.close(); }
+});
+
 test('OAuth: an oversized token endpoint answer is refused without being buffered', async () => {
   const te = await tokenEndpoint(() => ({ access_token: TOKEN, pad: 200_000 }));
   const w = await world({ tokenEnv: null, oauth: oauthOf(te.url) }, OAUTH_ENV);

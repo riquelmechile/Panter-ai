@@ -245,6 +245,9 @@ export class DownstreamGateway {
     if (s.oauthToken && this.now() < s.oauthToken.renewAt) return s.oauthToken.value;
     if (s.oauthFetch) return s.oauthFetch;
     const id = this.env[o.clientIdEnv]!, secret = this.env[o.clientSecretEnv]!;
+    for (const [t, until] of s.oauthIssued) if (until <= this.now()) s.oauthIssued.delete(t);
+    // So many renewals mean something is wrong; refusing keeps every issued token redacted.
+    if (s.oauthIssued.size >= MAX_ISSUED_TOKENS) return Promise.reject(new Error(`${MAX_ISSUED_TOKENS} tokens issued are still alive; Panter asks for no more until some expire`));
     s.oauthFetch = (async () => {
       const body = new URLSearchParams({ grant_type: 'client_credentials' });
       if (o.scope) body.set('scope', o.scope);
@@ -265,14 +268,8 @@ export class DownstreamGateway {
       const now = this.now();
       s.oauthToken = { value: json.access_token, renewAt: now + Math.max(life - 60_000, life / 2) };
       // Kept redacted until it expires plus the longest call, and at least a day (the server may not say how long it
-      // lives). Bounded: past the cap, the token that expires first goes.
-      for (const [t, until] of s.oauthIssued) if (until <= now) s.oauthIssued.delete(t);
+      // lives). A token is never forgotten early: the cap is checked before asking for one.
       s.oauthIssued.set(json.access_token, now + Math.min(Math.max(life, TOKEN_KEEP_MIN_MS), TOKEN_KEEP_MAX_MS) + s.config.timeoutMs);
-      while (s.oauthIssued.size > MAX_ISSUED_TOKENS) {
-        let first: string | null = null, at = Infinity;
-        for (const [t, until] of s.oauthIssued) if (until < at) { first = t; at = until; }
-        s.oauthIssued.delete(first!);
-      }
       return json.access_token as string;
     })().finally(() => { s.oauthFetch = null; });
     return s.oauthFetch;
