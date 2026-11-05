@@ -844,3 +844,110 @@ test('a review started for a candidate that a correction replaced meanwhile is r
   assert.ok(orphans.length === 2 && orphans.every(w => w.state === 'ABORTED_NO_EFFECTS'), 'the old-candidate judges were withdrawn');
   assert.deepEqual(abandoned.map(a => a.workId).sort(), orphans.map(w => w.id).sort());
 }));
+
+test('closing a run withdraws its queued remote work, revokes grants and stops it for good', () => withHosts(async (h, m, { abandoned }) => {
+  const s = await h.start({ project: 'app', objective: 'Repair unknown issue', idempotencyKey: 'close1', writesAuthorized: true });
+  const first = await h.tick(s.id, all);
+  assert.equal(first.status, 'REMOTE_A2A_DISPATCHED');
+  const workId = first.next[0]!.workId as string;
+  const run = (await h.get(s.id))!;
+  await assert.rejects(h.close(s.id, 'abandoned', run.revision - 1), /Stale harness revision/);
+  const closed = await h.close(s.id, 'abandoned test run', run.revision);
+  assert.ok(closed.closedAt);
+  assert.equal((await m.inbox('gpt-a')).works.find(w => w.id === workId)?.state, 'ABORTED_NO_EFFECTS');
+  assert.ok(abandoned.some(a => a.workId === workId));
+  const t = await h.tick(s.id, all);
+  assert.equal(t.status, 'HARNESS_CLOSED');
+  assert.equal(t.closedReason, 'abandoned test run');
+  await assert.rejects(h.report(s.id, run.steps[0]!.id, { summary: 'late', evidence: ['x'] }), /closed/);
+  // Idempotent: closing again keeps the first close.
+  assert.equal((await h.close(s.id, 'again', 999)).closedReason, 'abandoned test run');
+}));
+
+test('closing a run retires its remote Judgment Day judges', () => withHosts(async (h, m) => {
+  const id = await toJudgment(h, m, 'close2');
+  assert.equal((await h.tick(id, all)).status, 'WAITING_REMOTE_REVIEW');
+  const run = (await h.get(id))!;
+  await h.close(id, 'superseded', run.revision);
+  const judges = (await m.reviewStatus('gpt-a', run.judgmentId!)).work;
+  assert.ok(judges.every(w => w.state === 'ABORTED_NO_EFFECTS'));
+}));
+
+test('a phase sent native by one host goes remote again once it is bound to another host', () => withHosts(async (h, m, { timeout }) => {
+  await m.bindSpecialist('gpt-a', { agentId: 'gentle-ai-verify', host: 'gpt-b', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] } as any, 0);
+  const s = await h.start({ project: 'app', objective: 'Fix login security', idempotencyKey: 'scope1', writesAuthorized: true, changeSurfaces: ['src/auth.ts'] });
+  let t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Plan', evidence: ['plan'] });
+  t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Done', evidence: ['tests'], candidateSha: sha, runId: 'impl-run-1' });
+  t = await h.tick(s.id, all);
+  assert.equal(t.status, 'REMOTE_A2A_DISPATCHED');
+  timeout.ms = 0; await new Promise(r => setTimeout(r, 5));
+  const fb: any = await h.tick(s.id, all);
+  assert.equal(fb.fallback?.from, 'gpt-b');
+  timeout.ms = 3_600_000;
+  await h.report(s.id, fb.phaseId, { summary: 'Verified', evidence: ['checks'], candidateSha: sha, runId: 'verify-run-1' });
+  await h.tick(s.id, all);
+  // A correction sends VERIFY again: still bound to gpt-b, it stays native; bound to grok, grok gets it.
+  await h.recordCorrection(s.id, { candidateSha: 'e'.repeat(40), runId: 'fix-run-scope1', evidence: ['fixed'] }, (await h.get(s.id))!.revision);
+  await m.bindSpecialist('gpt-a', { agentId: 'gentle-ai-verify', host: 'grok', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] } as any, 1);
+  const again: any = await h.tick(s.id, all);
+  assert.equal(again.status, 'REMOTE_A2A_DISPATCHED');
+  assert.equal(again.next[0].host, 'grok');
+}));
+
+test('a tick racing a close never leaves granted remote work behind', () => withHosts(async (h, m, { dispatched, abandoned }) => {
+  for (let i = 0; i < 6; i++) {
+    const s = await h.start({ project: 'app', objective: `Repair unknown issue ${i}`, idempotencyKey: `race-close-${i}`, writesAuthorized: true });
+    const rev = (await h.get(s.id))!.revision;
+    await Promise.all([h.tick(s.id, all).catch(() => null), h.close(s.id, 'race', rev)]);
+    await h.close(s.id, 'race again', rev); // a second close repeats the cleanup
+    const works = (await m.inbox('gpt-a')).works.filter(w => w.missionId === s.id);
+    assert.ok(works.every(w => w.state === 'ABORTED_NO_EFFECTS'), `run ${i}: ${works.map(w => w.state)}`);
+    for (const w of works) if (dispatched.some(d => d.workId === w.id)) assert.ok(abandoned.some(a => a.workId === w.id), `run ${i}: granted work ${w.id} was revoked`);
+    assert.equal((await h.tick(s.id, all)).status, 'HARNESS_CLOSED');
+  }
+}));
+
+test('a close landing while a tick prepares native or inline work hands the host nothing', () => withHosts(async (h, m) => {
+  const s = await h.start({ project: 'app', objective: 'Repair unknown issue', idempotencyKey: 'close-inline', writesAuthorized: true });
+  const before = (await h.get(s.id))!;
+  const original = m.specialistBindings.bind(m);
+  let closing: Promise<unknown> | undefined;
+  (m as any).specialistBindings = async () => { closing ??= h.close(s.id, 'cancelled', before.revision); await closing; return original(); };
+  const t = await h.tick(s.id, { ...all, peerStates: {} });
+  assert.equal(t.status, 'HARNESS_CLOSED');
+  assert.deepEqual(t.next, []);
+  const after = (await h.get(s.id))!;
+  assert.ok(after.closedAt);
+  assert.ok(after.steps.every(x => x.status !== 'ISSUED'), 'no phase was issued on the closed run');
+  const closedRevision = after.revision;
+  assert.equal((await h.tick(s.id, { ...all, peerStates: {} })).status, 'HARNESS_CLOSED');
+  assert.equal((await h.get(s.id))!.revision, closedRevision, 'ticking a closed run changes nothing');
+}));
+
+test('a closed run no longer authorizes writers, units or delivery strategy', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-close-guard-'));
+  try {
+    const m = await MeshEngine.open(dir), n = await NativeSubagentReview.open(dir);
+    const h = await AutomaticHarness.open(dir, m, n, undefined, undefined, undefined, true);
+    const objective = 'Add a helper';
+    const g = await h.grantWrite({ project: 'app', objective, allowedPaths: ['src/util.ts'], ttlSeconds: 600 });
+    const s = await h.start({ project: 'app', objective, idempotencyKey: 'guard1', writesAuthorized: true, changeSurfaces: ['src/util.ts'], writeGrantId: g.grantId });
+    await h.authorizeDelegatedWrite(s.id, ['src/util.ts']);
+    await h.close(s.id, 'stop', (await h.get(s.id))!.revision);
+    await assert.rejects(h.authorizeDelegatedWrite(s.id, ['src/util.ts']), /closed/);
+    await assert.rejects(h.setDeliveryStrategy(s.id, 'single-pr', (await h.get(s.id))!.revision), /closed/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('a correction stops a remote verification still checking the old candidate', () => withHosts(async (h, m, { abandoned }) => {
+  await m.bindSpecialist('gpt-a', { agentId: 'gentle-ai-verify', host: 'gpt-b', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] } as any, 0);
+  const s = await h.start({ project: 'app', objective: 'Fix login security', idempotencyKey: 'corr-verify', writesAuthorized: true, changeSurfaces: ['src/auth.ts'] });
+  let t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Plan', evidence: ['plan'] });
+  t = await h.tick(s.id, all); await h.report(s.id, t.phaseId!, { summary: 'Done', evidence: ['tests'], candidateSha: sha, runId: 'impl-run-1' });
+  t = await h.tick(s.id, all);
+  assert.equal(t.status, 'REMOTE_A2A_DISPATCHED');
+  const workId = t.next[0]!.workId as string;
+  await h.recordCorrection(s.id, { candidateSha: 'f'.repeat(40), runId: 'fix-run-corr-verify', evidence: ['fixed'] }, (await h.get(s.id))!.revision);
+  assert.equal((await m.inbox('gpt-a')).works.find(w => w.id === workId)?.state, 'ABORTED_NO_EFFECTS');
+  assert.ok(abandoned.some(a => a.workId === workId));
+}));

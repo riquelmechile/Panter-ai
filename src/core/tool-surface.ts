@@ -40,7 +40,7 @@ export function toolDomain(name: string): Domain {
 /** Tools the leader uses in its normal workflow (listed flat for the leader). */
 const LEADER = new Set([
   'harness_start', 'harness_tick', 'harness_report', 'harness_status', 'harness_correction_report', 'harness_github_bind',
-  'harness_github_check', 'harness_unit_report', 'harness_units_set', 'harness_write_grant',
+  'harness_github_check', 'harness_unit_report', 'harness_units_set', 'harness_write_grant', 'harness_close',
   'review_status', 'rdd_status', 'native_review_submit', 'native_review_submit_solo', 'native_review_progress',
   'specialist_delegate', 'specialist_assignments', 'specialist_bind', 'mesh_delegate', 'mesh_delegate_auto',
   'mesh_inbox', 'mesh_profiles', 'mesh_profile_set', 'mesh_message',

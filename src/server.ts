@@ -845,6 +845,10 @@ const handler = createMcpHandler(reqCtx => {
       discoveredPaths:z.array(z.string().min(1).max(256)).max(16).optional()}),capabilities:harnessRuntimeSchema})
   },async x=>execute(async()=>{requireLeader();await harness.report(x.runId,x.stepId,x.report);const memoryCheckpoint=await checkpoint(x.runId);
     return {...await harness.tick(x.runId,x.capabilities),memoryCheckpoint}}));
+  server.registerTool('panter_harness_close',{
+    description:`${leaderLabel()} closes an automatic ODD run that will not be finished (abandoned, superseded or stuck in an old format). The run never advances again; its queued remote work is withdrawn and its remote work's grants are revoked. It never touches GitHub branches or PRs.`,
+    inputSchema:z.object({runId:z.uuid(),reason:bounded(500),expectedRevision:z.number().int().positive()}).strict()
+  },async x=>execute(async()=>{requireLeader();return harness.close(x.runId,x.reason,x.expectedRevision);}));
   server.registerTool('panter_harness_github_bind',{
     description:`${leaderLabel()} attaches a verified, previously authorized existing/created PR to an automatic ODD run. Metadata only: no GitHub writes, no agent selection, no approval.`,
     inputSchema:z.object({runId:z.uuid(),repository:bounded(120),prNumber:z.number().int().positive(),
