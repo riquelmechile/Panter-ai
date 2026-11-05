@@ -11,7 +11,7 @@ test('personal and clinical data is found in its usual shapes', () => {
   for (const [t, kind] of [
     ['Paciente 12.345.678-5 llegó', /RUT/], ['rut 12345678-5', /RUT/], ['contacto: ana.perez@clinica.cl', /e-mail/],
     ['llamar al +56 9 1234 5678', /phone/], ['+56912345678', /phone/], ['diagnóstico: hipertensión', /clinical/],
-    ['{"patient_name": "x"}', /clinical/], ['ficha clínica = 22', /clinical/], ['Previsión: Fonasa', /clinical/],
+    ['{"patient_name": "x"}', /clinical/], ['ficha clínica = 22', /clinical/], ['Previsión: Fonasa', /clinical/], ['diagnóstico: Hipertensión arterial', /clinical/], ['alergias = penicilina', /clinical/],
   ] as const) assert.match(findSensitive(t) ?? 'none', kind, t);
 });
 
@@ -21,7 +21,18 @@ test('ordinary engineering text passes', () => {
     'Co-Authored-By: Claude <noreply@anthropic.com>', '1234+user@users.noreply.github.com pushed',
     'patient flow screen renders the list', 'run: 12345678-4 finished', 'timestamp 1730000000000 and port 18080',
     'the RUT validator rejects 12.345.678-4',
+    // Code in a medical project names these fields without holding records.
+    'interface Visit { patient: Patient; diagnosis: string; allergies: Allergy[] }', 'fn(patient: Patient, rut?: string)',
+    'const v = { patient: row.patient, diagnosis: props.diagnosis }', 'url = `?rut=${rut}`', 'paciente: {', 'medications: Array<Med>',
+    'git clone git@github.com:org/clinic.git',
   ]) assert.equal(findSensitive(t), null, t);
+});
+
+test('the scan stays fast on long hostile input', () => {
+  for (const t of ['a'.repeat(50000), '@'.repeat(50000), 'a@'.repeat(25000), '1'.repeat(50000), '+56'.repeat(16000), 'paciente: '.repeat(5000)]) {
+    const started = performance.now(); findSensitive(t);
+    assert.ok(performance.now() - started < 500, `${t.slice(0, 6)}… took too long`);
+  }
 });
 
 test('a refusal names the kind of data, never the value', () => {
@@ -61,6 +72,7 @@ test('the mesh refuses to store personal data for a guarded mission, and only fo
     m.setContentGuard((mission, texts, where) => { if (mission === 'clinic-run') refuseSensitive(texts, where); });
     await assert.rejects(m.delegate('gpt-a', { missionId: 'clinic-run', target: 'grok', role: 'reviewer', instruction: 'Revisar paciente 12.345.678-5', idempotencyKey: 'k0' }), /This instruction seems to contain a Chilean RUT/);
     const w = await m.delegate('gpt-a', { missionId: 'clinic-run', target: 'grok', role: 'reviewer', instruction: 'Review the triage screen', idempotencyKey: 'k1' });
+    assert.equal((await m.delegate('gpt-a', { missionId: 'clinic-run', target: 'grok', role: 'reviewer', instruction: 'Review the triage screen', idempotencyKey: 'k1' })).id, w.id, 'a replay is not a new write');
     const c = await m.claim('grok', w.id);
     await assert.rejects(m.message('grok', { missionId: 'clinic-run', to: 'gpt-a', workId: w.id, kind: 'UPDATE', text: 'mail ana@clinica.cl' }), /This message seems to contain an e-mail/);
     await assert.rejects(m.complete('grok', w.id, c.attemptId!, c.leaseGeneration, 'diagnóstico: x'), /This result seems to contain a clinical/);

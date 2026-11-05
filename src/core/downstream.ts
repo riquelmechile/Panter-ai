@@ -38,14 +38,19 @@ export type DownstreamAudit = {
   ms: number; argsSha256: string | null; error: string | null; role?: ActorRole; missionId?: string | null; sensitive?: boolean;
 };
 export type SensitiveMission = { id: string; server: string; host: string; at: string };
-type Data = { version: 1; grants: DownstreamGrant[]; audit: DownstreamAudit[]; hashKey?: string; signingKey?: string; sensitiveMissions?: SensitiveMission[] };
+type Data = { version: 1; grants: DownstreamGrant[]; audit: DownstreamAudit[]; hashKey?: string; signingKey?: string };
 const seed: Data = { version: 1, grants: [], audit: [] };
+/** Sensitive missions live in their own ledger, apart from the bounded audit: a mark is never dropped. */
+type Marks = { version: 1; missions: SensitiveMission[] };
+const marksSeed: Marks = { version: 1, missions: [] };
 
 const NAME = /^[a-z][a-z0-9]{1,23}$/;
 const TOKEN_ENV = /^PANTER_DOWNSTREAM_[A-Z0-9_]{1,60}$/;
-const MAX_SERVERS = 16, MAX_TOOLS = 200, MAX_AUDIT = 2000, MAX_RESULT_BYTES = 2_000_000, MAX_SENSITIVE_MISSIONS = 10_000;
+const MAX_SERVERS = 16, MAX_TOOLS = 200, MAX_AUDIT = 2000, MAX_RESULT_BYTES = 2_000_000, MAX_SENSITIVE_MISSIONS = 100_000;
 /** A mission id as harness runs and mesh work use them. */
 export const MISSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/;
+/** Harness run ids are lowercase UUIDs: the same id written in upper case is the same mission. */
+export const normalizeMission = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id.toLowerCase() : id;
 /** Any single HTTP response from a downstream server (a result, a tools page) is cut off past this many bytes. */
 const MAX_RESPONSE_BYTES = 4_000_000, MAX_SCHEMA_BYTES = 64_000;
 const FAILURES_TO_OPEN = 3, OPEN_MS = 30_000;
@@ -343,24 +348,33 @@ export class DownstreamGateway {
   /** Missions that called a sensitive server, cached from the ledger. */
   private sensitiveCache: Set<string> | null = null;
   private sensitiveSet(): Set<string> {
-    if (!this.sensitiveCache) this.sensitiveCache = new Set(this.db ? (this.db.read<Data>('downstream', seed).sensitiveMissions ?? []).map(m => m.id) : []);
+    if (!this.sensitiveCache) this.sensitiveCache = new Set(this.db ? this.db.read<Marks>('downstream_sensitive', marksSeed).missions.map(m => m.id) : []);
     return this.sensitiveCache;
   }
-  isSensitiveMission(id: string | null | undefined): boolean { return !!id && this.sensitiveSet().has(id); }
+  isSensitiveMission(id: string | null | undefined): boolean { return !!id && this.sensitiveSet().has(normalizeMission(id)); }
+  /** Operator: clear a mission's sensitive mark (a mission marked by mistake, or by a host naming another's run). */
+  unmarkSensitive(id: string): { unmarked: boolean } {
+    const key = normalizeMission(id);
+    const unmarked = this.db ? this.db.mutate<Marks, boolean>('downstream_sensitive', marksSeed, d => {
+      const before = d.missions.length; d.missions = d.missions.filter(m => m.id !== key); return d.missions.length < before;
+    }).result : this.sensitiveSet().has(key);
+    this.sensitiveSet().delete(key);
+    return { unmarked };
+  }
   /** Sensitive missions of the servers this caller may use. */
   sensitiveMissions(caller: Caller): SensitiveMission[] {
-    return this.db ? (this.db.read<Data>('downstream', seed).sensitiveMissions ?? []).filter(m => this.allowed(caller, m.server)) : [];
+    return this.db ? this.db.read<Marks>('downstream_sensitive', marksSeed).missions.filter(m => this.allowed(caller, m.server)) : [];
   }
+  /** Mark a mission sensitive, durably, before anything comes back. Throws (the call is refused) rather than drop
+   * an old mark when the list is full. */
   private markSensitive(id: string, server: string, host: string) {
     const set = this.sensitiveSet();
     if (set.has(id)) return;
-    set.add(id);
-    this.db?.mutate<Data, void>('downstream', seed, d => {
-      const list = d.sensitiveMissions ??= [];
-      if (list.some(m => m.id === id)) return;
-      list.push({ id, server, host, at: iso(this.now()) });
-      if (list.length > MAX_SENSITIVE_MISSIONS) d.sensitiveMissions = list.slice(-MAX_SENSITIVE_MISSIONS);
+    if (set.size >= MAX_SENSITIVE_MISSIONS) throw new Error(`${MAX_SENSITIVE_MISSIONS} sensitive missions are marked; Panter refuses new ones rather than forget an old mark`);
+    this.db?.mutate<Marks, void>('downstream_sensitive', marksSeed, d => {
+      if (!d.missions.some(m => m.id === id)) d.missions.push({ id, server, host, at: iso(this.now()) });
     });
+    set.add(id);
   }
   private record(entry: DownstreamAudit) {
     if (!this.db) return;
@@ -391,7 +405,7 @@ export class DownstreamGateway {
     opts: { missionId?: string } = {}) {
     const started = this.now();
     const s = this.servers.get(server);
-    const sensitive = !!s?.config.sensitive, missionId = opts.missionId ?? null, role = roleOf(caller);
+    const sensitive = !!s?.config.sensitive, missionId = opts.missionId === undefined ? null : normalizeMission(opts.missionId), role = roleOf(caller);
     // A sensitive server's arguments are not even hashed: a hash of a short value (a RUT) can be guessed back.
     const argsSha256 = sensitive ? null : this.argsHash(args);
     let cls: ToolClass = 'destructive', usedGrant: string | null = null;
@@ -432,7 +446,7 @@ export class DownstreamGateway {
       }
     }
     // From here the answer may hold sensitive data: the mission is sensitive before anything comes back.
-    if (sensitive) this.markSensitive(missionId!, server, caller.id);
+    if (sensitive) { try { this.markSensitive(missionId!, server, caller.id); } catch (error) { return refuse(clean(error)); } }
     const digest = argsDigest(args);
     try {
       const result = await this.guarded(s, (c, callId) => {

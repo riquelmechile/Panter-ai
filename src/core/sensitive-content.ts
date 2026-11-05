@@ -19,20 +19,31 @@ function rutCheckDigit(body: string): string {
 const RUT = /(?<![\w.-])(\d{1,2}(?:\.\d{3}){2}|\d{7,8})-([\dkK])(?![\w-])/g;
 const hasRut = (text: string) => [...text.matchAll(RUT)].some(m => rutCheckDigit(m[1]!.replace(/\./g, '')) === m[2]!.toUpperCase());
 
-const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
 /** Machine addresses that identify no patient (commit trailers and the like). */
-const NOREPLY = /^(?:[^@]*\+)?(?:no-?reply|noreply)@|@users\.noreply\.github\.com$/i;
-const hasEmail = (text: string) => [...text.matchAll(EMAIL)].some(m => !NOREPLY.test(m[0]));
+const NOREPLY = /^(?:[^@]*\+)?(?:no-?reply|noreply)@|@users\.noreply\.github\.com$|^git@/i;
+const LOCAL = /[A-Za-z0-9._%+-]{1,64}$/, DOMAIN = /^[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,8}\.[A-Za-z]{2,24}/;
+/** E-mail addresses, found from each "@" outwards over bounded windows, so the scan stays linear on any input. */
+function hasEmail(text: string): boolean {
+  for (let at = text.indexOf('@'); at !== -1; at = text.indexOf('@', at + 1)) {
+    const local = LOCAL.exec(text.slice(Math.max(0, at - 64), at))?.[0];
+    const domain = local && DOMAIN.exec(text.slice(at + 1, at + 1 + 300))?.[0];
+    if (local && domain && !NOREPLY.test(`${local}@${domain}`)) return true;
+  }
+  return false;
+}
 
 const PHONE = /(?<![\w+])\+?56[\s.-]?(?:9[\s.-]?\d{4}[\s.-]?\d{4}|[2-8]\d?[\s.-]?\d{3,4}[\s.-]?\d{4})(?![\w])/;
-const CLINICAL_FIELD = /["']?\b(?:rut|paciente|patient(?:[ _-]?(?:name|id))?|diagn[oó]stico|diagnosis|ficha(?:[ _-]cl[ií]nica)?|historia[ _-]cl[ií]nica|medical[ _-]record|previsi[oó]n|fonasa|isapre|cie-?10|icd-?10|alergias?|allerg(?:y|ies)|medicamentos?|medications?|f[aá]rmacos?)["']?\s*[:=]/i;
+const CLINICAL_FIELD = /["']?\b(?:rut|paciente|patient(?:[ _-]?(?:name|id))?|diagn[oó]stico|diagnosis|ficha(?:[ _-]cl[ií]nica)?|historia[ _-]cl[ií]nica|medical[ _-]record|previsi[oó]n|fonasa|isapre|cie-?10|icd-?10|alergias?|allerg(?:y|ies)|medicamentos?|medications?|f[aá]rmacos?)["']?[ \t]*[:=][ \t]*([^\n]{0,60})/gi;
+/** What follows a field name in code rather than a record: a type, an expression, a template or nothing. */
+const CODE_VALUE = /^(?:$|[\[{(<|&$`]|=|(?:string|number|boolean|bigint|null|undefined|any|unknown|void|never|true|false|this|new|await|typeof)\b|[A-Z][A-Za-z0-9_]*(?:<[^>]*>|\[\])+|[A-Z][A-Za-z0-9_]*\s*[;,)}\]|=?]|[a-z_$][\w$]*(?:\??\.|\(|\[))/;
+const hasClinicalField = (text: string) => [...text.matchAll(CLINICAL_FIELD)].some(m => !CODE_VALUE.test(m[1]!.trim()));
 
 /** What kind of personal or clinical data the text seems to hold, or null. */
 export function findSensitive(text: string): string | null {
   if (hasRut(text)) return 'a Chilean RUT';
   if (hasEmail(text)) return 'an e-mail address';
   if (PHONE.test(text)) return 'a Chilean phone number';
-  if (CLINICAL_FIELD.test(text)) return 'a clinical or patient field';
+  if (hasClinicalField(text)) return 'a clinical or patient field';
   return null;
 }
 

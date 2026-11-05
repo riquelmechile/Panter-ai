@@ -9,7 +9,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { enableSqliteWal, retrySqliteStartup } from './sqlite-startup.js';
 
-export const LEGACY_LEDGERS = ['state', 'agents', 'mesh', 'harness', 'oauth', 'events', 'gemini_mail', 'github_workforce', 'downstream'] as const;
+export const LEGACY_LEDGERS = ['state', 'agents', 'mesh', 'harness', 'oauth', 'events', 'gemini_mail', 'github_workforce', 'downstream', 'downstream_sensitive'] as const;
 export type LedgerName = typeof LEGACY_LEDGERS[number];
 type LedgerRow = { payload: string; revision: number };
 type SqliteRow = { user_version: number };

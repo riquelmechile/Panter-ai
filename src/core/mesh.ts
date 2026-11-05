@@ -474,16 +474,18 @@ export class MeshEngine {
     if(dup&&dup.target===binding.host&&dup.specialist?.agentId===binding.agentId&&dup.specialist.bindingRevision===binding.revision&&
       dup.specialist.candidateSha===input.candidateSha&&packetWithoutMaterial(dup.instruction)===packetWithoutMaterial(packet.instruction))return dup;
     return this.delegate(caller,{missionId:input.missionId,target:binding.host,role:packet.role,instruction:packet.instruction,idempotencyKey:input.idempotencyKey,
-      specialist:{agentId:packet.agentId,skillIds:packet.skillIds,packetDigest:packet.digest,assetDigests:packet.assetDigests,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,bindingRevision:binding.revision,candidateSha:input.candidateSha,allowedEditSurfaces:packet.allowedEditSurfaces}});
+      specialist:{agentId:packet.agentId,skillIds:packet.skillIds,packetDigest:packet.digest,assetDigests:packet.assetDigests,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,bindingRevision:binding.revision,candidateSha:input.candidateSha,allowedEditSurfaces:packet.allowedEditSurfaces},
+      hostText:[input.objective,input.leaderNotes??'']});
   }
-  async delegate(caller: Host, input: { missionId: string; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?:NonNullable<MeshWork['specialist']>; wakeOnly?:boolean; scheduleOnly?:boolean }) {
+  /** `hostText` is the part of the instruction a host wrote (checked by the content guard); by default all of it. A
+   * specialist packet passes only the objective and notes: its skill text and code material come from Panter. */
+  async delegate(caller: Host, input: { missionId: string; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?:NonNullable<MeshWork['specialist']>; wakeOnly?:boolean; scheduleOnly?:boolean; hostText?:string[] }) {
     check(caller === leaderHost(), `Only ${leaderLabel()} can delegate`);
     check(input.missionId.length > 0 && input.missionId.length <= 120, 'Invalid mission');
     check(isHost(input.target) && input.target !== leaderHost(), 'Invalid target');
     check(roles.has(input.role) && input.role !== 'orchestrator', 'Invalid role');
     check(input.instruction.trim().length > 0 && input.instruction.length <= 50000, 'Invalid instruction');
     check(input.idempotencyKey.length > 0 && input.idempotencyKey.length <= 160, 'Invalid idempotency');
-    this.contentGuard?.(input.missionId,[input.instruction],'This instruction');
     if(input.role==='implementer'&&this.writeGuard)
       await this.writeGuard(input.missionId,input.specialist?.allowedEditSurfaces??[]);
     return this.write(d => {
@@ -503,6 +505,8 @@ export class MeshEngine {
         check(dup.target === input.target && dup.role === input.role && dup.instruction === input.instruction && JSON.stringify(dup.specialist??null)===JSON.stringify(input.specialist??null), 'Idempotency conflict');
         return dup;
       }
+      // After the replay check: retransmitting work stored before its mission became sensitive is not a new write.
+      this.contentGuard?.(input.missionId,input.hostText??[input.instruction],'This instruction');
       if(input.scheduleOnly){
         const observation=d.workforce?.[input.target as WorkerHost];
         const interval=profile?.scheduledPollIntervalSeconds;
@@ -955,6 +959,7 @@ export class MeshEngine {
     return this.write(d => {
       const w = d.works.find(w => w.id === id);
       check(w, 'Work not found');
+      this.contentGuard?.(w.missionId,[reason],'This reason');
       if (w.state === 'ABORTED_NO_EFFECTS') return { workId: w.id, state: w.state, withdrawn: false };
       check(w.role !== 'implementer' || w.state === 'QUEUED', 'A started writer is never withdrawn automatically');
       check(w.state === 'QUEUED' || (w.state === 'RUNNING' && w.transportClaim === true), 'Work already started by its worker');
@@ -972,6 +977,7 @@ export class MeshEngine {
     return this.write(d => {
       const w = d.works.find(w => w.id === id);
       check(w, 'Work not found');
+      this.contentGuard?.(w.missionId,[reason],'This reason');
       if (w.state === 'ABORTED_NO_EFFECTS') return { workId: w.id, state: w.state, abandoned: false };
       if (w.role === 'implementer' || w.state !== 'RUNNING' || w.transportClaim ||
         !(Date.now() - Date.parse(w.leaseUntil ?? '') > graceMs)) return { workId: w.id, state: w.state, abandoned: false };

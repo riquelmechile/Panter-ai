@@ -120,6 +120,11 @@ const guardSensitive = (missionId: string, texts: Array<string | undefined>, whe
   if (downstream.isSensitiveMission(missionId)) refuseSensitive(texts, where);
 };
 mesh.setContentGuard(guardSensitive);
+/** Native and solo review reports are stored too: the same check, through the review's mission. */
+const guardReview = async (reviewId: string, report: unknown) => {
+  const missionId = await nativeSubagentReview.missionOf(reviewId);
+  if (missionId) guardSensitive(missionId, [JSON.stringify(report)], 'This review report');
+};
 const grokRoutineWake = new GrokRoutineWake();
 const claudeRoutineWake = new ClaudeRoutineWake();
 const workforceEvents = new WorkforceEvents(dataDir);
@@ -856,13 +861,13 @@ const handler = createMcpHandler(reqCtx => {
     inputSchema:z.object({runId:z.uuid(),stepId:z.uuid(),report:z.object({summary:bounded(6000),evidence:z.array(bounded(1000)).min(1).max(40),
       runId:z.string().max(160).optional(),candidateSha:z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/).optional(),
       discoveredPaths:z.array(z.string().min(1).max(256)).max(16).optional()}),capabilities:harnessRuntimeSchema})
-  },async x=>execute(async()=>{requireLeader();guardSensitive(x.runId,[x.report.summary,...x.report.evidence,...(x.report.discoveredPaths??[])],'This report');
+  },async x=>execute(async()=>{requireLeader();guardSensitive(x.runId,[x.report.summary,...x.report.evidence,x.report.runId,...(x.report.discoveredPaths??[])],'This report');
     await harness.report(x.runId,x.stepId,x.report);const memoryCheckpoint=await checkpoint(x.runId);
     return {...await harness.tick(x.runId,x.capabilities),memoryCheckpoint}}));
   server.registerTool('panter_harness_close',{
     description:`${leaderLabel()} closes an automatic ODD run that will not be finished (abandoned, superseded or stuck in an old format). The run never advances again; its queued remote work is withdrawn and its remote work's grants are revoked. It never touches GitHub branches or PRs.`,
     inputSchema:z.object({runId:z.uuid(),reason:bounded(500),expectedRevision:z.number().int().positive()}).strict()
-  },async x=>execute(async()=>{requireLeader();return harness.close(x.runId,x.reason,x.expectedRevision);}));
+  },async x=>execute(async()=>{requireLeader();guardSensitive(x.runId,[x.reason],'This reason');return harness.close(x.runId,x.reason,x.expectedRevision);}));
   server.registerTool('panter_harness_github_bind',{
     description:`${leaderLabel()} attaches a verified, previously authorized existing/created PR to an automatic ODD run. Metadata only: no GitHub writes, no agent selection, no approval.`,
     inputSchema:z.object({runId:z.uuid(),repository:bounded(120),prNumber:z.number().int().positive(),
@@ -872,15 +877,15 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_harness_correction_report',{
     description:`${leaderLabel()} registers an authorized bounded correction with a fresh real Git SHA. Automatically resets verifier, 4R and Judgment Day, and invalidates old review evidence.`,
     inputSchema:z.object({runId:z.uuid(),expectedRevision:z.number().int().positive(),report:z.object({candidateSha:z.string().regex(/^[a-f0-9]{40}$/),runId:bounded(160),evidence:z.array(bounded(1000)).min(1).max(30)})})
-  },async x=>execute(async()=>{requireLeader();guardSensitive(x.runId,x.report.evidence,'This correction');return harness.recordCorrection(x.runId,x.report,x.expectedRevision)}));
+  },async x=>execute(async()=>{requireLeader();guardSensitive(x.runId,[...x.report.evidence,x.report.runId],'This correction');return harness.recordCorrection(x.runId,x.report,x.expectedRevision)}));
   server.registerTool('panter_harness_units_set',{
     description:`${leaderLabel()} automatically decomposes completed design into disjoint, scoped implementation units. Requires actual separate host worktrees for parallel writers.`,
     inputSchema:z.object({runId:z.uuid(),expectedRevision:z.number().int().positive(),units:z.array(z.object({objective:bounded(3000),paths:z.array(bounded(256)).min(1).max(12)})).min(2).max(16)})
-  },async x=>execute(async()=>{requireLeader();return harness.defineUnits(x.runId,x.units,x.expectedRevision)}));
+  },async x=>execute(async()=>{requireLeader();guardSensitive(x.runId,x.units.map(u=>u.objective),'This unit objective');return harness.defineUnits(x.runId,x.units,x.expectedRevision)}));
   server.registerTool('panter_harness_unit_report',{
     description:'Record one actually executed implementation child with unique run ID and concrete evidence; no fabricated invocation is permitted.',
     inputSchema:z.object({runId:z.uuid(),unitId:z.uuid(),result:z.object({runId:bounded(160),summary:bounded(3000),evidence:z.array(bounded(1000)).min(1).max(30)})})
-  },async x=>execute(async()=>{requireLeader();guardSensitive(x.runId,[x.result.summary,...x.result.evidence],'This unit report');return harness.reportUnit(x.runId,x.unitId,x.result)}));
+  },async x=>execute(async()=>{requireLeader();guardSensitive(x.runId,[x.result.summary,...x.result.evidence,x.result.runId],'This unit report');return harness.reportUnit(x.runId,x.unitId,x.result)}));
   server.registerTool('panter_harness_delivery_strategy_set',{
     description:'Operator-only, explicitly authorized GitHub delivery strategy; no merge/push/write authority. Persists the choice for automatic GitHub and RDD gates.',
     inputSchema:z.object({runId:z.uuid(),strategy:z.enum(['single-pr','feature-branch-chain','stacked-to-main']),expectedRevision:z.number().int().positive()})
@@ -943,7 +948,7 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_native_review_create',{
     description:`${leaderLabel()} prepares four independent 4R slots or two blind Judgment Day slots, with versioned MCP skills and frozen candidate SHA. Works in GPT_A_ONLY without any remote workers.`,
     inputSchema:z.object({missionId:bounded(120),kind:z.enum(['4r','judgment-day']),objective:bounded(6000),candidateSha:z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/),idempotencyKey:bounded(160)})
-  },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.create(x)}));
+  },async x=>execute(async()=>{requireLeader();guardSensitive(x.missionId,[x.objective],'This review objective');return nativeSubagentReview.create(x)}));
   server.registerTool('panter_native_review_packet',{
     description:'Retrieve exactly one frozen reviewer/skill packet. Blind Judge A/B never see each other outputs; no model is started by the MCP.',
     inputSchema:z.object({reviewId:z.uuid(),slotId:z.uuid()}),annotations:{readOnlyHint:true}
@@ -955,7 +960,7 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_native_review_submit',{
     description:'Record one host-reported native subagent run and structured SHA/packet-bound evidence. Immutable and idempotent; cannot grant RDD approval.',
     inputSchema:z.object({reviewId:z.uuid(),slotId:z.uuid(),report:z.object({agentId:bounded(100),candidateSha:z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/),packetDigest:z.string().regex(/^[0-9a-f]{64}$/),subagentRunId:bounded(160),evidence:z.array(bounded(1000)).min(1).max(40),findings:z.array(z.object({id:bounded(100),location:bounded(400),severity:z.enum(['BLOCKER','CRITICAL','WARNING','SUGGESTION']),claim:bounded(2000),proofRefs:z.array(bounded(600)).min(1).max(12)})).max(80),attestation:z.object({keyId:bounded(80),signature:bounded(160)}).optional()})})
-  },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.submit(x.reviewId,x.slotId,x.report)}));
+  },async x=>execute(async()=>{requireLeader();await guardReview(x.reviewId,x.report);return nativeSubagentReview.submit(x.reviewId,x.slotId,x.report)}));
   server.registerTool('panter_native_review_submit_solo',{
     description:`Record one ${leaderLabel()} self-reviewed 4R lens when native subagents are unavailable. Explicitly UNVERIFIED: never independently attested or Panter-RDD-approved.`,
     inputSchema:z.object({reviewId:z.uuid(),slotId:z.uuid(),report:z.object({
@@ -965,7 +970,7 @@ const handler = createMcpHandler(reqCtx => {
       findings:z.array(z.object({id:bounded(100),location:bounded(400),
         severity:z.enum(['BLOCKER','CRITICAL','WARNING','SUGGESTION']),
         claim:bounded(2000),proofRefs:z.array(bounded(600)).min(1).max(12)})).max(80)})})
-  },async x=>execute(async()=>{requireLeader();return nativeSubagentReview.submitSolo(x.reviewId,x.slotId,x.report)}));
+  },async x=>execute(async()=>{requireLeader();await guardReview(x.reviewId,x.report);return nativeSubagentReview.submitSolo(x.reviewId,x.slotId,x.report)}));
   server.registerTool('panter_native_review_progress',{
     description:`Recover native 4R/JD and ${leaderLabel()} solo four-lens progress, severe findings and explicit unverified/independent status. Never marks review officially approved.`,
     inputSchema:z.object({reviewId:z.uuid()}),annotations:{readOnlyHint:true}
@@ -1053,7 +1058,10 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_downstream_audit', { description: `${leaderLabel()} or operator: grants and the audit of recent gateway calls (host, role, mission, tool, class, grant, outcome, time; arguments only as a keyed hash, and not even that for sensitive servers) and the missions marked sensitive for the downstream servers you may use.`,
     inputSchema: z.object({ server: z.string().max(24).optional(), limit: z.number().int().min(1).max(500).default(100) }).strict(), annotations: { readOnlyHint: true } },
     async x => execute(async () => { requireLeaderOrOperator(); return { grants: downstream.grants(dsCaller()).filter(g => !x.server || g.server === x.server), audit: downstream.audit(dsCaller(), x),
-      refusedWithoutAccess: downstream.refusedOutsiders(dsCaller()), sensitiveMissions: downstream.sensitiveMissions(dsCaller()) }; }));
+      refusedWithoutAccess: downstream.refusedOutsiders(dsCaller()), sensitiveMissions: downstream.sensitiveMissions(dsCaller()).slice(-x.limit).reverse() }; }));
+  server.registerTool('panter_downstream_unmark', { description: 'Operator only: clear the sensitive mark of a mission (for a mission marked by mistake). Its later reports are no longer checked for personal data, and Engram mirroring resumes. Nothing already refused comes back.',
+    inputSchema: z.object({ missionId: z.string().regex(MISSION_ID), reason: bounded(500) }).strict() },
+    async x => execute(async () => { requireOperator(); return downstream.unmarkSensitive(x.missionId); }));
   surface.finalize();
   return server;
 });

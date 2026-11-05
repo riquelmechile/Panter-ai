@@ -294,14 +294,18 @@ test('end to end: a sensitive server signs who calls and keeps its mission free 
     assert.deepEqual(st.actorKeys, keys);
     assert.equal(st.servers[0].sensitive, true);
     // The mission is now sensitive: Panter refuses to store personal data for it, and still stores clean text.
+    const profile = await lead.callTool({ name: 'panter_mesh_profile_set', arguments: { host: 'grok', actorId: 'actor-grok-001', modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer'], expectedRevision: 0 } });
+    assert.notEqual(profile.isError, true, text(profile));
     const delegate = (instruction: string, idempotencyKey: string) => lead.callTool({ name: 'panter_mesh_delegate', arguments: { missionId: RUN, target: 'grok', role: 'reviewer', instruction, idempotencyKey } });
     const refused = await delegate('Check patient 12.345.678-5', 'k1');
     assert.equal(refused.isError, true); assert.match(text(refused), /seems to contain a Chilean RUT/); assert.doesNotMatch(text(refused), /12\.345/);
     const clean = await delegate('Check the triage screen with patient P-0042', 'k2');
-    assert.doesNotMatch(text(clean), /seems to contain/, 'clean text is not refused for its content');
+    assert.notEqual(clean.isError, true, text(clean));
     const report = await lead.callTool({ name: 'panter_harness_report', arguments: { runId: RUN, stepId: '0b6f8f0e-8b39-4f3c-9d4f-2a7e7c1d5b22',
       report: { summary: 'ok', evidence: ['contact ana@clinica.cl'] }, capabilities: { nativeSubagents: false, maxParallelSubagents: 1, toolsAvailable: true } } });
     assert.equal(report.isError, true); assert.match(text(report), /This report seems to contain an e-mail/);
+    const review = await lead.callTool({ name: 'panter_native_review_create', arguments: { missionId: RUN, kind: '4r', objective: 'Review triage for ana@clinica.cl', candidateSha: 'a'.repeat(40), idempotencyKey: 'r1' } });
+    assert.match(text(review), /This review objective seems to contain an e-mail/);
     // With a sensitive server configured, memory saves are checked too (before Engram is even asked).
     const memory = await lead.callTool({ name: 'panter_memory_save', arguments: { title: 'triage', type: 'decision', topicKey: 'clinic/triage', content: 'llamar al +56 9 1234 5678' } });
     assert.match(text(memory), /This memory seems to contain a Chilean phone number/);
@@ -549,6 +553,20 @@ test('a sensitive server is proxied without keeping its content, and its mission
     assert.match(text(await w.gw.call(claude, 'shop', 'set_price', { sku: 'A1', price: 1 }, undefined, { missionId: 'run-10' })), /needs a grantId/);
     assert.equal(w.gw.isSensitiveMission('run-10'), false);
     assert.match(text(await w.gw.call(claude, 'shop', 'lookup', {}, undefined, { missionId: 'bad mission!' })), /missionId must be/);
+    // A run id written in upper case is the same mission.
+    const run = '7f4c1a52-3c1e-4c55-9a51-6f1d2b9e0a11';
+    await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' }, undefined, { missionId: run.toUpperCase() });
+    assert.equal(w.gw.isSensitiveMission(run), true);
+    // The operator can clear a mark set by mistake, durably.
+    assert.deepEqual(w.gw.unmarkSensitive(run), { unmarked: true });
+    assert.equal(w.gw.isSensitiveMission(run), false);
+    assert.equal(new DownstreamGateway([w.config], SqliteLedger.open(w.dir), w.env).isSensitiveMission(run), false);
+    // An open circuit says why without the downstream's words.
+    w.ds.setMode('echo500');
+    for (let i = 0; i < 3; i++) await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' }, undefined, { missionId: 'run-9' });
+    w.ds.setMode('ok');
+    const open = text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' }, undefined, { missionId: 'run-9' }));
+    assert.match(open, /circuit open/); assert.doesNotMatch(open, /echo|500|Bearer/);
   } finally { await w.done(); }
 });
 

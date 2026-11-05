@@ -20,6 +20,8 @@ export const ACTOR_TYP = 'panter-actor+jwt';
 export const ACTOR_TTL_SECONDS = 120;
 /** Longest lifetime a verifier accepts, whatever the token says. */
 export const ACTOR_MAX_TTL_SECONDS = 300;
+/** Clock leeway the verifier allows by default: a token is accepted until `exp` plus this. */
+export const ACTOR_LEEWAY_SECONDS = 30;
 
 export type ActorRole = 'leader' | 'worker' | 'operator';
 export type ActorClaims = {
@@ -72,7 +74,8 @@ export class ActorSigner {
 /**
  * Reference verifier for downstream servers. Throws unless the token is a valid Panter assertion for exactly this
  * call: this server (`aud`), this tool, these arguments, signed by `key` and not expired. Returns its claims.
- * Keep each `jti` until its `exp` and refuse a repeat, so a captured token cannot be replayed within its lifetime.
+ * Keep each accepted `jti` until `exp` plus the leeway (the whole time this function would still accept the token)
+ * and refuse a repeat, so a captured token cannot be replayed.
  */
 export function verifyActorAssertion(token: unknown, key: JsonWebKey | KeyObject,
   expect: { aud: string; tool: string; args: unknown; now?: number; leewaySeconds?: number }): ActorClaims {
@@ -89,7 +92,7 @@ export function verifyActorAssertion(token: unknown, key: JsonWebKey | KeyObject
   const kid = key instanceof KeyObject ? undefined : (key as { kid?: string }).kid;
   if (kid !== undefined && header.kid !== kid) throw new Error('actor assertion: signed with another key');
   if (!verify(null, Buffer.from(`${head}.${body}`), publicKey, fromB64u(sig))) throw new Error('actor assertion: bad signature');
-  const now = Math.floor((expect.now ?? Date.now()) / 1000), leeway = expect.leewaySeconds ?? 30;
+  const now = Math.floor((expect.now ?? Date.now()) / 1000), leeway = expect.leewaySeconds ?? ACTOR_LEEWAY_SECONDS;
   if (claims?.iss !== 'panter-ai') throw new Error('actor assertion: wrong issuer');
   if (claims.aud !== expect.aud) throw new Error('actor assertion: meant for another server');
   if (claims.tool !== expect.tool) throw new Error('actor assertion: meant for another tool');

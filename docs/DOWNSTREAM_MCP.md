@@ -110,18 +110,20 @@ Without help a downstream server only sees "Panter". So every call Panter forwar
 | `jti` | Panter's id for this request (also `_meta["panter-ai/callId"]`). |
 | `iat`, `exp` | Issued at, and expiry 120 seconds later. |
 
-The public keys are a JWK set at `GET /.well-known/panter-downstream-keys` on Panter (and in `panter_downstream_status` as `actorKeys`). Fetch it once and pin it, rather than trusting whatever the network serves at call time. The key is created on first use and kept in Panter's ledger, so it survives restarts and is in every backup.
+The public keys are a JWK set at `GET /.well-known/panter-downstream-keys` on Panter (and in `panter_downstream_status` as `actorKeys`). Fetch it once and pin it, rather than trusting whatever the network serves at call time. The key is created on first use and kept in Panter's ledger, so it survives restarts and is in every backup: protect the backups like the server itself, since whoever reads the private key can sign as any host. There is one key for now; `kid` leaves room for rotation.
 
 To verify, copy [`src/core/actor-assertion.ts`](../src/core/actor-assertion.ts) (it only needs `node:crypto`) and call:
 
 ```ts
 import { verifyActorAssertion } from './actor-assertion.js';
 
-const claims = verifyActorAssertion(meta['panter-ai/actor'], pinnedKey, { aud: 'clinic', tool: name, args });
+// args: the raw request.params.arguments, exactly as received, not the values after your schema parsed them
+// (defaults, coercion and dropped keys would change the digest).
+const claims = verifyActorAssertion(meta['panter-ai/actor'], pinnedKey, { aud: 'clinic', tool: name, args: request.params.arguments });
 // claims.sub === 'grok', claims.role === 'worker', claims.mission === '…'
 ```
 
-It throws unless the signature, issuer, server, tool, arguments and lifetime all match (30 seconds of clock leeway). Remember each `jti` until its `exp` and refuse a repeat, so a captured token cannot be replayed. Then apply your own rules: for example, which hosts may act as which panelist, and an audit row with `sub`, `role` and `mission`.
+It throws unless the signature, issuer, server, tool, arguments and lifetime all match (30 seconds of clock leeway). Remember each accepted `jti` until `exp` plus the leeway (the whole time the verifier would still accept it) and refuse a repeat, so a captured token cannot be replayed. Deduplicate on `jti`, never on the token string: a signature can be written in more than one way. A verifier in another language must hash the same canonical JSON (sorted keys, JavaScript number form; integers beyond 2^53 lose precision as JSON numbers, so send those as strings). Then apply your own rules: for example, which hosts may act as which panelist, and an audit row with `sub`, `role` and `mission`.
 
 What it proves, and what not: Panter authenticated that host (OAuth or its host token) and that host made this exact call. It does not prove which model the host was running or what the model was told: that stays the host's own claim, and a compromised host can still make calls in its own name.
 
@@ -136,14 +138,18 @@ What it proves, and what not: Panter authenticated that host (OAuth or its host 
 
 The data does pass through Panter's memory while the call is proxied; it is not written to disk, the log, memory or the ledger.
 
-**Sensitive missions.** Once a call to a sensitive server is forwarded for a mission, that mission is sensitive (listed as `sensitiveMissions` in `panter_downstream_audit`, kept in the ledger). For a sensitive mission Panter:
+**Sensitive missions.** Once a call to a sensitive server is forwarded for a mission, that mission is sensitive (listed as `sensitiveMissions` in `panter_downstream_audit`, kept in the ledger apart from the bounded audit, and never dropped: if 100,000 sensitive missions were ever reached, new sensitive calls would be refused rather than an old mark forgotten). For a sensitive mission Panter:
 
 - never mirrors the harness run to Engram (`memoryCheckpoint: "ENGRAM_SKIPPED_SENSITIVE"`);
-- refuses to store text that looks like personal or clinical data in harness reports, corrections and unit reports, delegated instructions, review objectives, worker results and peer messages. The write is refused, not cut: nothing is stored, and the error names the kind of data (never the value), so the host sends it again without it.
+- refuses to store text that looks like personal or clinical data in what hosts write for it: harness reports, corrections, unit reports and unit objectives, close reasons, delegated instructions (for a specialist packet, the objective and leader notes), review objectives, native and solo review reports, worker results, peer messages, and withdraw or abandon reasons. The write is refused, not cut: nothing is stored, and the error names the kind of data (never the value), so the host sends it again without it. A retransmission of work stored before the mark is not refused.
+
+Not checked: text Panter assembles itself (skill text and code material such as a diff in specialist and reviewer packets), the legacy native flow tools, and the operator's reconciliation of a writer.
+
+The mark follows the `missionId` the host names: a host that names another mission, or none, is not stopped by this. It is a guard against accidents by honest hosts, not against a host that wants to leak what it already received. A harness run id in upper case counts as the same run. The operator clears a mark set by mistake with `panter_downstream_unmark`.
 
 While any sensitive server is configured, `panter_memory_save` is checked the same way.
 
-The check looks for a Chilean RUT with a valid check digit, an e-mail address (no-reply addresses aside), a Chilean phone number (+56) and clinical fields written as `name: value` (paciente, diagnóstico, ficha clínica, previsión, alergias, medicamentos and their English names). It is a safety net, not a guarantee: it misses anything else. Pseudonymize at the source: the sensitive server should hand hosts pseudonymous ids (`P-0042`) and keep the mapping to real people to itself.
+The check looks for a Chilean RUT with a valid check digit, an e-mail address (no-reply and `git@` addresses aside), a Chilean phone number (+56) and clinical fields written as `name: value` (paciente, diagnóstico, ficha clínica, previsión, alergias, medicamentos and their English names) where the value is not code (a type such as `patient: Patient;`, an expression such as `row.patient`, or a template). It scans in linear time. It is a safety net, not a guarantee: it misses anything else. Pseudonymize at the source: the sensitive server should hand hosts pseudonymous ids (`P-0042`) and keep the mapping to real people to itself.
 
 Data protection law still applies to the downstream server and to the hosts that receive the answers (in Chile, Ley 19.628 and Ley 21.719 for personal and health data, and Ley 20.584 for clinical records). This feature reduces what Panter keeps; it is not a legal assessment.
 
