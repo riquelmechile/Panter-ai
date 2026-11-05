@@ -226,4 +226,4 @@ La interfaz read-only no ejecuta código, no hace cambios en producción y no re
 - [x] Gateway de MCP downstream: registro en `PANTER_DOWNSTREAM_CONFIG`, un router `panter_ds_<nombre>` por servidor listado solo para sus hosts, clasificación lectura/escritura/destructiva desde las anotaciones MCP, política `writes` y grants del operador, timeout, circuit breaker, límites de tamaño, redacción del token y audit. Ver [DOWNSTREAM_MCP.md](DOWNSTREAM_MCP.md).
 - [x] Servidores downstream `sensitive` (proxy sin guardar contenido, misiones sensibles sin datos personales) e identidad del actor firmada (Ed25519) en cada llamada. Ver [DOWNSTREAM_MCP.md](DOWNSTREAM_MCP.md).
 - [ ] Montar commerce-control como primer servidor downstream (su propio repo, servicio, token y aprobaciones), empezando con `writes: "deny"`.
-- [ ] Siguientes downstream: XanxitoSpA, harness médico y los demás proyectos, cada uno con el mismo contrato.
+- [ ] Siguientes downstream: XanxitoSpA y los demás proyectos, cada uno con el mismo contrato (`sensitive: true` para los que traen datos que Panter no debe guardar).

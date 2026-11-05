@@ -54,7 +54,7 @@ Create a JSON file and point `PANTER_DOWNSTREAM_CONFIG` at it (for example `~/pa
 | `writes` | `deny`: no write or destructive call through Panter. `grant` (default): a host needs an operator grant. `allow`: allowed hosts write without a grant (only for servers whose own approvals are enough). |
 | `timeoutMs` | Per call, 1000-300000. Default 30000. |
 | `description` | Shown in status. |
-| `sensitive` | `true` for a server that handles personal or clinical data. See [Sensitive servers](#sensitive-servers). Default `false`. |
+| `sensitive` | `true` for any server whose calls carry data Panter must not keep (personal data, customer records, credentials of third parties, health data...). See [Sensitive servers](#sensitive-servers). Default `false`. |
 
 A config that fails validation stops Panter from starting: a half-configured gateway is worse than none. Panter fetches each server's tools at start, every 10 minutes, on demand with `panter_downstream_refresh`, and before any call when the cached list is more than a minute old, so a tool whose annotations changed is classified by what the server says now. If that fetch fails, the call fails too (fail closed), and calls fail fast for 10 seconds before Panter asks again.
 
@@ -119,7 +119,7 @@ import { verifyActorAssertion } from './actor-assertion.js';
 
 // args: the raw request.params.arguments, exactly as received, not the values after your schema parsed them
 // (defaults, coercion and dropped keys would change the digest).
-const claims = verifyActorAssertion(meta['panter-ai/actor'], pinnedKey, { aud: 'clinic', tool: name, args: request.params.arguments });
+const claims = verifyActorAssertion(meta['panter-ai/actor'], pinnedKey, { aud: 'crm', tool: name, args: request.params.arguments });
 // claims.sub === 'grok', claims.role === 'worker', claims.mission === '…'
 ```
 
@@ -129,7 +129,7 @@ What it proves, and what not: Panter authenticated that host (OAuth or its host 
 
 ## Sensitive servers
 
-`"sensitive": true` is for a server whose calls carry personal or clinical data (patients, for example). Panter still proxies the call and hands the answer to the host that asked (that is the point of the call), but it keeps none of it:
+`"sensitive": true` is for any downstream server whose calls carry data Panter must not keep: personal data, customer or account records, health data, anything under a confidentiality duty. It is a property of the server, not of one project. Panter still proxies the call and hands the answer to the host that asked (that is the point of the call), but it keeps none of it:
 
 - The audit keeps only metadata: time, host, role, mission, tool, class, grant, outcome and duration. No argument hash (a hash of a short value, a RUT for example, can be guessed back) and no error text.
 - Errors from the server reach the host and the audit as their kind only (`timed out`, `transport error`, `the server answered with an error`), with the details withheld: a downstream error message can echo the call. The same goes for `lastError` in status and for the log.
@@ -149,9 +149,9 @@ The mark follows the `missionId` the host names: a host that names another missi
 
 While any sensitive server is configured, `panter_memory_save` is checked the same way.
 
-The check looks for a Chilean RUT with a valid check digit, an e-mail address (no-reply and `git@` addresses aside), a Chilean phone number (+56) and clinical fields written as `name: value` (paciente, diagnóstico, ficha clínica, previsión, alergias, medicamentos and their English names) where the value is not code (a type such as `patient: Patient;`, an expression such as `row.patient`, or a template). It scans in linear time. It is a safety net, not a guarantee: it misses anything else. Pseudonymize at the source: the sensitive server should hand hosts pseudonymous ids (`P-0042`) and keep the mapping to real people to itself.
+The check is the same for every sensitive server. It looks for a Chilean RUT with a valid check digit, an e-mail address (no-reply and `git@` addresses aside), a Chilean phone number (+56) and clinical fields written as `name: value` (paciente, diagnóstico, ficha clínica, previsión, alergias, medicamentos and their English names) where the value is not code (a type such as `patient: Patient;`, an expression such as `row.patient`, or a template). It scans in linear time. It is a safety net, not a guarantee: it misses anything else (names, addresses, data in other formats). The stronger protection is on the server's side: hand hosts pseudonymous ids (`C-0042`) and keep the mapping to real people to itself.
 
-Data protection law still applies to the downstream server and to the hosts that receive the answers (in Chile, Ley 19.628 and Ley 21.719 for personal and health data, and Ley 20.584 for clinical records). This feature reduces what Panter keeps; it is not a legal assessment.
+Data protection law still applies to the downstream server and to the hosts that receive the answers. This feature reduces what Panter keeps; it is not a compliance assessment.
 
 ## Adding a project
 
@@ -159,5 +159,5 @@ Data protection law still applies to the downstream server and to the hosts that
 2. Deploy it on the VM under its own Unix user and service, on a localhost port, with its own token.
 3. Add the token to `etc/panter.env` as `PANTER_DOWNSTREAM_<NAME>_TOKEN`, and the server to the config file.
 4. Restart Panter and check `panter_downstream_status`.
-5. If it handles personal or clinical data, set `"sensitive": true` and have it verify the actor assertion (pin the key from `/.well-known/panter-downstream-keys`).
+5. If its calls carry data Panter must not keep, set `"sensitive": true` and have it verify the actor assertion (pin the key from `/.well-known/panter-downstream-keys`).
 6. Start with `writes: "deny"` until the tool annotations and the server's own approvals have been reviewed, then move to `grant`.
