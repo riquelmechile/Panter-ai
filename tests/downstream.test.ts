@@ -612,7 +612,7 @@ test('an ordinary server keeps its diagnostics', async () => {
 });
 
 /** A token endpoint for OAuth client credentials that records what it was sent. */
-async function tokenEndpoint(issue: () => { access_token?: string; expires_in?: number; status?: number; pad?: number; hang?: boolean }) {
+async function tokenEndpoint(issue: () => { access_token?: string; expires_in?: number; status?: number; pad?: number; hang?: boolean; delay?: number }) {
   const seen: Array<{ auth: string; body: URLSearchParams }> = [];
   const http: Server = createServer((req, res) => {
     let raw = ''; req.on('data', c => { raw += c; });
@@ -620,7 +620,8 @@ async function tokenEndpoint(issue: () => { access_token?: string; expires_in?: 
       seen.push({ auth: String(req.headers.authorization ?? ''), body: new URLSearchParams(raw) });
       const t = issue();
       if (t.hang) return; // accepts the request and never answers
-      res.writeHead(t.status ?? 200, { 'content-type': 'application/json' }).end(JSON.stringify({ access_token: t.access_token, token_type: 'Bearer', expires_in: t.expires_in ?? 3600, ...(t.pad ? { pad: 'p'.repeat(t.pad) } : {}) }));
+      const answer = () => res.writeHead(t.status ?? 200, { 'content-type': 'application/json' }).end(JSON.stringify({ access_token: t.access_token, token_type: 'Bearer', expires_in: t.expires_in ?? 3600, ...(t.pad ? { pad: 'p'.repeat(t.pad) } : {}) }));
+      if (t.delay) setTimeout(answer, t.delay); else answer();
     });
   });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', () => r()));
@@ -941,6 +942,22 @@ test('OAuth: a token endpoint that hangs never delays a call with a valid token,
     assert.match(text(await w.gw.call(claude, 'shop', 'set_price', { sku: 'W2', price: 9 }, g.id)), /timed out|no OAuth token/);
     await new Promise(r => setTimeout(r, 1500)); // the token request gives up (its own timeout)
     assert.equal(w.ds.seen.filter(x => x.tool === 'set_price').length, before, 'nothing was sent late');
+  } finally { await w.done(); await te.close(); }
+});
+
+test('OAuth: a read retried after a 401 is not sent once its call has timed out', async () => {
+  let n = 0;
+  const te = await tokenEndpoint(() => ({ access_token: `issued-token-${++n}-0123456789`, expires_in: 3600, delay: n === 1 ? 0 : 800 }));
+  const w = await world({ tokenEnv: null, oauth: oauthOf(te.url), timeoutMs: 1000 }, OAUTH_ENV);
+  try {
+    w.ds.setAccepts(a => /^Bearer issued-token-\d+-0123456789$/.test(a));
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok');
+    // Token 1 is revoked: the refusal comes after 500 ms, the new token after 800 ms more, past the 1000 ms timeout.
+    w.ds.setAccepts(a => /^Bearer issued-token-\d+-0123456789$/.test(a) && a !== 'Bearer issued-token-1-0123456789', () => 500);
+    const before = w.ds.seen.filter(x => x.tool === 'lookup').length;
+    assert.match(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'L1' })), /timed out/);
+    await new Promise(r => setTimeout(r, 900)); // the new token arrives
+    assert.equal(w.ds.seen.filter(x => x.tool === 'lookup').length, before, 'the ended call was not sent late');
   } finally { await w.done(); await te.close(); }
 });
 
