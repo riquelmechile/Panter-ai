@@ -340,11 +340,14 @@ test('a reply wrapped at spaces keeps its spaces; a word broken at full width is
   assert.equal(parsed.candidateSha, sha);
   assert.match(parsed.evidence[0], /^Read leader-supplied diff main\.\.\./);
   assert.match(parsed.evidence[1], /remains unchanged and export function/);
-  // Full-width lines join with nothing, shorter ones with a space; widths count the part of the first line before the block.
-  assert.equal(unwrap('abcd\nefgh\nij'), 'abcdefghij');
-  assert.equal(unwrap('ab cd\nefghij\nkl\nmn op'), 'ab cd efghijkl mn op');
-  assert.equal(unwrap('ab cdef\ngh\nij'), 'ab cdef gh ij', 'the widest line of a word-wrapped reply is not a cut word');
-  assert.equal(unwrap('{"t\nok"}', 4), '{"tok"}', 'a block starting mid-line still sees its first line as full');
+  // Breaks inside strings at one width are a fixed cut (nothing); at varying widths a word wrap (a space, except a
+  // full-width piece of a long word); a single break joins with nothing; breaks outside strings always with nothing.
+  assert.equal(unwrap('"abc\nefgh\nij"'), '"abcefghij"');
+  assert.equal(unwrap('"ab cd\nefghij\nkl\nmn op"'), '"ab cd efghijkl mn op"');
+  assert.equal(unwrap('"ab cdef\ngh\nij"'), '"ab cdef gh ij"', 'the widest line of a word-wrapped reply is not a cut word');
+  assert.equal(unwrap('{"t\nok"}', 4), '{"tok"}', 'a single break is no evidence: it joins with nothing');
+  assert.equal(unwrap('{"a": 1,\n"b": "x y\nz"}'), '{"a": 1,"b": "x yz"}', 'a break between values is not inside a string');
+  assert.equal(unwrap('"\\\n"x"'), '"\\"x"', 'a break between a backslash and what it escapes keeps the string open');
 });
 
 test('mail cuts inside tokens never break a reply the old reading accepted', () => {
@@ -353,13 +356,50 @@ test('mail cuts inside tokens never break a reply the old reading accepted', () 
   // (a) a fixed-width cutter with the marker on the same line as the JSON.
   const fixed = `${GEMINI_MAIL_RESULT_MARKER} ${JSON.stringify(reply)}`.match(/.{1,76}/g)!.join('\r\n');
   assert.ok((markedJson(fixed) as any[]).some(r => r.token === token));
-  // (b) a word-wrapper that hard-cuts words longer than the width (compact JSON is one long word).
+  // (b) a word-wrapper that hard-cuts words longer than the width (compact JSON is one long word). At 72 columns the
+  // wrapped prose line is shorter than the cut pieces, which shows a word wrap. (When every line comes out exactly as
+  // wide, a word wrap cannot be told from a fixed cut, and the break joins with nothing, as the old reading did.)
   const wrap = (s: string) => { const out: string[] = []; let line = '';
     for (const w of s.split(' ')) { let word = w;
-      while (word.length > 76) { if (line) { out.push(line); line = ''; } out.push(word.slice(0, 76)); word = word.slice(76); }
-      if (line && (line + ' ' + word).length > 76) { out.push(line); line = word; } else line = line ? line + ' ' + word : word; }
+      while (word.length > 72) { if (line) { out.push(line); line = ''; } out.push(word.slice(0, 72)); word = word.slice(72); }
+      if (line && (line + ' ' + word).length > 72) { out.push(line); line = word; } else line = line ? line + ' ' + word : word; }
     out.push(line); return out.join('\r\n'); };
   const parsed = markedJson(`${GEMINI_MAIL_RESULT_MARKER}\r\n${wrap(JSON.stringify(reply))}`) as any[];
   assert.ok(parsed.some(r => r.token === token), 'the token survives');
   assert.ok(parsed.some(r => r.token === token && r.result === reply.result), 'and the prose keeps its spaces');
+});
+
+test('a fixed-width or byte-width cut never changes the result, and a word wrap reads at least as well as before', () => {
+  const sha = 'a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0', token = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_abcde';
+  const results = [
+    JSON.stringify({ lens: 'risk', candidateSha: sha, findings: [{ severity: 'low', claim: 'a small thing in the code worth a second look later on' }] }),
+    'Read the diff and found nothing to change in the work. Revisión completa: sin hallazgos críticos en el código de la función.',
+    JSON.stringify({ agentId: 'jd-judge-b', candidateSha: sha, evidence: [`Read leader-supplied diff main...${sha} in riquelmechile/panter-e2e (2 files modified).`, 'Verified add(a, b) remains unchanged and multiply(a, b) returns a * b.'] }),
+  ];
+  const cutChars = (w: number) => (s: string) => s.split('\n').flatMap(l => l.match(new RegExp(`.{1,${w}}`, 'g')) ?? ['']).join('\r\n');
+  const cutBytes = (w: number) => (s: string) => s.split('\n').flatMap(l => { const b = Buffer.from(l), o: string[] = []; let i = 0;
+    while (i < b.length) { let j = Math.min(b.length, i + w); while (j < b.length && (b[j]! & 0xc0) === 0x80) j--; o.push(b.subarray(i, j).toString()); i = j; }
+    return o.length ? o : ['']; }).join('\r\n');
+  const wordWrap = (w: number) => (s: string) => s.split('\n').map(l => { const out: string[] = []; let line = '';
+    for (const x of l.split(' ')) { let word = x;
+      while (word.length > w) { if (line) { out.push(line); line = ''; } out.push(word.slice(0, w)); word = word.slice(w); }
+      if (line && (line + ' ' + word).length > w) { out.push(line); line = word; } else line = line ? line + ' ' + word : word; }
+    out.push(line); return out.join('\r\n'); }).join('\r\n');
+  let wrapped = 0, wrappedExact = 0;
+  for (const result of results) for (const indent of [undefined, 2]) for (const sep of ['\r\n', ' ']) for (let w = 60; w <= 80; w++) {
+    const body = JSON.stringify({ work_id: '7e31e313-7f6e-4fce-8cb7-9397bbbd9393', token, success: true, result }, null, indent);
+    for (const [kind, cut] of [['chars', cutChars], ['bytes', cutBytes], ['words', wordWrap]] as const) {
+      const text = cut(w)(GEMINI_MAIL_RESULT_MARKER + sep + body);
+      const first = (markedJson(text) as any[]).find(r => r.token === token);
+      assert.ok(first, `${kind} w${w}: the token survives`);
+      if (kind !== 'words') assert.equal(first.result, result, `${kind} w${w} indent=${indent}: a fixed cut is rejoined exactly`);
+      else {
+        wrapped++; if (first.result === result) wrappedExact++;
+        // The old reading (every break removed) is never better.
+        const old = (() => { try { const s = text.indexOf('{', text.indexOf(GEMINI_MAIL_RESULT_MARKER)); return JSON.parse(text.slice(s).replace(/\r?\n/g, '').replace(/\}[^}]*$/, '}')); } catch { return null; } })();
+        if (old?.result === result) assert.equal(first.result, result, `words w${w}: no worse than the old reading`);
+      }
+    }
+  }
+  assert.ok(wrappedExact / wrapped > 0.75, `most word-wrapped replies keep their spaces exactly (${wrappedExact}/${wrapped})`);
 });

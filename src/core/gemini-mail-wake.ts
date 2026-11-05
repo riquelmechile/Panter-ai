@@ -275,23 +275,48 @@ export function mimeTexts(raw:string):string[]{
 
 /** The widest line plain-text mailers cut at (RFC 2045 asks for 76; some use 78-80). */
 const MAX_WRAP_WIDTH=80;
-/** Rejoin hard-wrapped lines. A mailer that cuts at a fixed width (every line but the last as wide, measured on whole
- * mail lines: `firstLineOffset` counts the part of the first line before the text) may cut anywhere, so those breaks
- * join with nothing. A mailer that wraps at words drops the space it broke at, so its breaks join with a space; only a
- * wrap-width line with no space in it is a long word (a SHA, a token, compact JSON) it had to cut, and joins with nothing. */
+/** Rejoin a hard-wrapped JSON block. Only a break inside a JSON string matters (elsewhere a break is whitespace, or cuts
+ * a literal that joins back with nothing), and a raw newline can never be part of a JSON string, so every such break is
+ * the mailer's. Two or more of them all at one width (counted in characters, or in bytes where a cut stops short
+ * only of a UTF-8 character that would not fit, with `firstLineOffset` for the part of the first line before the block) are a fixed-width cut, which may land anywhere: they join with nothing.
+ * Breaks at varying widths are a word wrap, which dropped the space it broke at: they join with a space, except a
+ * no-space line at least as wide as every line with spaces and within mailer widths (~76-80), a piece of a long word
+ * (a SHA, a token, compact JSON) the mailer had to cut. A single break is no evidence either way and joins with nothing,
+ * as the old reading did. */
 export function unwrap(text:string,firstLineOffset=0):string{
   const lines=text.split(/\r?\n/);
-  const inner=lines.slice(0,-1);
-  const width=(i:number)=>lines[i]!.length+(i===0?firstLineOffset:0);
-  const widest=Math.max(...inner.map((_,i)=>width(i)));
-  // Three or more equally wide lines are a fixed-width cut; fewer are not evidence either way (markedJson then also
-  // offers the reading with every break removed).
-  const fixedWidth=inner.length>=3&&inner.every((_,i)=>width(i)===widest);
-  // A cut piece of a long word is exactly the wrap width: at least as wide as any wrapped line with spaces, and within
-  // what mailers use (~76-80). A longer line with no space is a word the mailer left whole, followed by a dropped space.
-  const spaced=Math.max(0,...inner.map((l,i)=>l.includes(' ')?width(i):0));
-  const cutWord=(i:number)=>fixedWidth||(!lines[i]!.includes(' ')&&width(i)>=spaced&&width(i)<=MAX_WRAP_WIDTH);
-  return lines.reduce((acc,line,i)=>i===0?line:acc+(cutWord(i-1)||lines[i-1]!.endsWith(' ')||line.startsWith(' ')?'':' ')+line,'');
+  if(lines.length<2)return text;
+  const inString:boolean[]=[];
+  let quoted=false,escaped=false;
+  for(let i=0;i<lines.length-1;i++){
+    // A break is not a character: an escape or a string open at the end of a line carries on into the next one.
+    for(const c of lines[i]!){
+      if(quoted){if(escaped)escaped=false;else if(c==='\\')escaped=true;else if(c==='"')quoted=false;}
+      else if(c==='"')quoted=true;
+    }
+    inString.push(quoted);
+  }
+  const chars=(i:number)=>lines[i]!.length+(i===0?firstLineOffset:0);
+  const bytes=(i:number)=>Buffer.byteLength(lines[i]!)+(i===0?firstLineOffset:0);
+  const cuts=inString.flatMap((inside,i)=>inside?[i]:[]);
+  const sameChars=cuts.every(i=>chars(i)===chars(cuts[0]!));
+  // A byte-counting cutter stops short of the width only when the next character would not fit whole.
+  let full=0;for(const i of cuts)if(bytes(i)>full)full=bytes(i);
+  const sameBytes=cuts.every(i=>{const next=lines[i+1]!.codePointAt(0);
+    return bytes(i)===full||(next!==undefined&&next>0x7f&&bytes(i)+Buffer.byteLength(String.fromCodePoint(next))>full);});
+  const wordWrap=cuts.length>=2&&!sameChars&&!sameBytes;
+  let spaced=0;
+  for(let i=0;i<lines.length-1;i++)if(lines[i]!.includes(' ')&&chars(i)>spaced)spaced=chars(i);
+  const joint=(i:number)=>{
+    if(!wordWrap||!inString[i])return '';
+    const before=lines[i]!,after=lines[i+1]!;
+    if(before.endsWith(' ')||after.startsWith(' '))return '';
+    if(!before.includes(' ')&&chars(i)>=spaced&&chars(i)<=MAX_WRAP_WIDTH)return '';
+    return ' ';
+  };
+  let out=lines[0]!;
+  for(let i=1;i<lines.length;i++)out+=joint(i-1)+lines[i]!;
+  return out;
 }
 
 /** JSON objects that follow each result marker, in order (the reply comes before any quoted template). */
@@ -311,6 +336,8 @@ export function markedJson(text:string):unknown[]{
     let depth=0,inStr=false,esc=false,end=-1;
     for(let i=start;i<limit;i++){
       const c=text[i];
+      // A line break is never part of the JSON (a mailer may put one between a backslash and what it escapes).
+      if(c==='\n'||c==='\r')continue;
       if(inStr){if(esc)esc=false;else if(c==='\\')esc=true;else if(c==='"')inStr=false;continue;}
       if(c==='"')inStr=true;else if(c==='{')depth++;else if(c==='}'&&--depth===0){end=i;break;}
     }
@@ -318,8 +345,8 @@ export function markedJson(text:string):unknown[]{
     const block=text.slice(start,end+1);
     try{out.push(JSON.parse(block));continue;}catch{/* maybe hard-wrapped */}
     // Plain-text mailers may hard-wrap long lines at ~76 columns, even inside strings. Offer the rejoined reading (see
-    // unwrap) and then the old one with every break removed: the caller takes the first whose token matches, so a
-    // reply the old reading accepted is never lost.
+    // unwrap) and then the old one with every break removed: the caller takes the first whose token matches, and the
+    // two differ only where the breaks inside strings showed a word wrap.
     const lineStart=text.lastIndexOf('\n',start)+1;
     const variants=new Map<string,unknown>();
     for(const candidate of [unwrap(block,start-lineStart),block.replace(/\r?\n/g,'')]){

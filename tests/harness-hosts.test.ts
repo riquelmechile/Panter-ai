@@ -907,6 +907,22 @@ test('a tick racing a close never leaves granted remote work behind', () => with
   }
 }));
 
+test('a close landing while a tick prepares native or inline work hands the host nothing', () => withHosts(async (h, m) => {
+  const s = await h.start({ project: 'app', objective: 'Repair unknown issue', idempotencyKey: 'close-inline', writesAuthorized: true });
+  const before = (await h.get(s.id))!;
+  const original = m.specialistBindings.bind(m);
+  let closing: Promise<unknown> | undefined;
+  (m as any).specialistBindings = async () => { closing ??= h.close(s.id, 'cancelled', before.revision); await closing; return original(); };
+  const t = await h.tick(s.id, { ...all, peerStates: {} });
+  assert.equal(t.status, 'HARNESS_CLOSED');
+  assert.deepEqual(t.next, []);
+  const after = (await h.get(s.id))!;
+  assert.ok(after.closedAt);
+  assert.ok(after.steps.every(x => x.status !== 'ISSUED'), 'no phase was issued on the closed run');
+  assert.equal(after.revision, (await h.get(s.id))!.revision);
+  assert.equal((await h.tick(s.id, { ...all, peerStates: {} })).status, 'HARNESS_CLOSED');
+}));
+
 test('a closed run no longer authorizes writers, units or delivery strategy', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'panter-close-guard-'));
   try {

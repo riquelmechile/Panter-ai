@@ -569,11 +569,22 @@ export class AutomaticHarness {
       r.revision++;return r;
     });
   }
+  private closedResult(record:HarnessRun):HarnessTickResult{
+    return {runId:record.id,mode:record.mode,risk:record.risk,reason:record.reason,status:'HARNESS_CLOSED',
+      closedAt:record.closedAt,closedReason:record.closedReason,next:[]};
+  }
   async tick(runId:string,runtime:HarnessRuntime):Promise<HarnessTickResult>{
+    const result=await this.tickOnce(runId,runtime);
+    if(result.status==='HARNESS_CLOSED'||!Array.isArray(result.next)||!result.next.length)return result;
+    // Closed while this tick prepared work: the host is handed nothing to execute (closing already stopped the
+    // run's remote work and its grants).
+    const now=await this.get(runId);
+    return now?.closedAt?this.closedResult(now):result;
+  }
+  private async tickOnce(runId:string,runtime:HarnessRuntime):Promise<HarnessTickResult>{
     ensure(Number.isInteger(runtime.maxParallelSubagents)&&runtime.maxParallelSubagents>=0&&runtime.maxParallelSubagents<=32,'Invalid host native capacity');
     const record=await this.get(runId);ensure(record,'Harness not found');
-    if(record.closedAt)return {runId:record.id,mode:record.mode,risk:record.risk,reason:record.reason,status:'HARNESS_CLOSED',
-      closedAt:record.closedAt,closedReason:record.closedReason,next:[]};
+    if(record.closedAt)return this.closedResult(record);
     const phase=record.steps.find(s=>s.status!=='COMPLETE');
     const profile=(await this.mesh.profiles()).find(p=>p.host===leaderHost());
     // An operator may switch to GPT_A_ONLY mid-mission. Never dispatch fresh
@@ -592,7 +603,7 @@ export class AutomaticHarness {
         if(previous.soloEvidenceComplete){
           await this.write(state=>{const run=state.runs.find(r=>r.id===runId)!;
             const review=run.steps.find(step=>step.phase==='REVIEW');
-            if(!review||review.status!=='COMPLETE')return;
+            if(run.closedAt||!review||review.status!=='COMPLETE')return;
             review.status='PENDING';run.reviewId=null;run.reviewTransport=null;
             const verify=run.steps.find(step=>step.phase==='VERIFY');
             if(verify?.result?.verificationMode==='SELF_UNVERIFIED'){
@@ -840,7 +851,7 @@ export class AutomaticHarness {
           notice:'Each native writer MUST use a separate trusted worktree and cannot edit another unit scope. Host confirmation is not filesystem enforcement.'
         })));
         await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;
-          if(st.status==='PENDING'){st.status='ISSUED';st.execution=max>0?'GPT_A_NATIVE':'GPT_A_INLINE';r.revision++;}});
+          if(!r.closedAt&&st.status==='PENDING'){st.status='ISSUED';st.execution=max>0?'GPT_A_NATIVE':'GPT_A_INLINE';r.revision++;}});
         return {...common,status:max>0?'GPT_A_NATIVE_IMPLEMENTATION_BATCH':'GPT_A_SEQUENTIAL_IMPLEMENTATION_UNITS',
           phaseId:phase.id,next:packets,concurrentSlots:max>0?Math.min(max,unreported.length):1,
           instruction:'Schedule only independent units; isolate writers in separate trusted worktrees, then integrate, test and freeze ONE final SHA. The parent reports each unit via panter_harness_unit_report before the final integration.'};
@@ -859,7 +870,7 @@ export class AutomaticHarness {
       `Verify the exact frozen candidate ${record.candidateSha} against: ${brief}. If the host supplies an actual verifier, report its independent run ID. Otherwise perform a ${leaderLabel()} self-check inline, report runId=${leaderHost()}, and label evidence SELF_UNVERIFIED.`;
     const packetObjective=objective.length>5800?objective.slice(0,5700)+' [Retrieve complete objective and paths from panter_harness_status.]':objective;
     if(phase.phase==='DESIGN'){
-      await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;if(st.status==='PENDING'){st.status='ISSUED';r.revision++;}});
+      await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;if(!r.closedAt&&st.status==='PENDING'){st.status='ISSUED';r.revision++;}});
       return {...common,status:'GPT_A_INLINE',phaseId:phase.id,next:[{phase:phase.phase,agentId:null,instruction:objective,
         skills:['gentle-ai','work-unit-commits'],execution:'GPT_A_INLINE'}]};
     }
@@ -895,7 +906,7 @@ export class AutomaticHarness {
       allowedEditSurfaces:phase.phase==='IMPLEMENT'?record.paths:undefined});
     const execution=runtime.nativeSubagents&&runtime.maxParallelSubagents>0&&phase.phase!=='IMPLEMENT'?'GPT_A_NATIVE':'GPT_A_INLINE';
     await this.write(s=>{const r=s.runs.find(x=>x.id===runId)!;const st=r.steps.find(x=>x.id===phase.id)!;
-      if(st.status==='PENDING'){st.status='ISSUED';st.execution=execution;r.revision++;}});
+      if(!r.closedAt&&st.status==='PENDING'){st.status='ISSUED';st.execution=execution;r.revision++;}});
     return {...common,status:execution,phaseId:phase.id,next:[{...packet,phase:phase.phase,execution,
       instruction:packet.instruction,requestedWorkerProcessing:policy.worker.preferredProcessing,
       notice:'Host must invoke its actual tool/subagent and return evidence; MCP has not started model inference.'}]};
