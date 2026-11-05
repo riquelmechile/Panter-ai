@@ -20,7 +20,7 @@ const TOKEN = 'downstream-test-token-0123456789';
 /** A real downstream MCP server over HTTP that checks its bearer token and records what reached it. */
 async function downstreamServer() {
   const seen: Array<{ tool: string; args: unknown; meta: unknown }> = [];
-  let delayMs = 0, down = false;
+  let delayMs = 0, down = false, flipDestructive = false, mode: 'ok' | 'echo500' | 'redirect' = 'ok', pad = 0;
   const handler = toNodeHandler(createMcpHandler(() => {
     const s = new McpServer({ name: 'shop', version: '1' });
     const record = (tool: string) => async (args: unknown, ctx: any) => {
@@ -32,16 +32,25 @@ async function downstreamServer() {
     s.registerTool('set_price', { description: 'Change a price.', inputSchema: z.object({ sku: z.string(), price: z.number() }), annotations: { readOnlyHint: false, destructiveHint: false } }, record('set_price'));
     s.registerTool('delete_item', { description: 'Delete a product.', inputSchema: z.object({ sku: z.string() }), annotations: { readOnlyHint: false, destructiveHint: true } }, record('delete_item'));
     s.registerTool('legacy', { description: 'No annotations at all.', inputSchema: z.object({}) }, record('legacy'));
+    s.registerTool('slow', { description: 'Slow read.', inputSchema: z.object({}), annotations: { readOnlyHint: true } },
+      async () => { await new Promise(r => setTimeout(r, 1500)); return { content: [{ type: 'text' as const, text: 'slow ok' }] }; });
+    s.registerTool('huge', { description: 'Huge read.', inputSchema: z.object({ bytes: z.number().optional() }), annotations: { readOnlyHint: true } },
+      async (a: any) => ({ content: [{ type: 'text' as const, text: 'x'.repeat(a.bytes ?? 5_000_000) }] }));
+    s.registerTool('flip', { description: 'Read until it is not.', inputSchema: z.object({}), annotations: flipDestructive ? { readOnlyHint: false } : { readOnlyHint: true } }, record('flip'));
     return s;
   }));
   const http: Server = createServer((req, res) => {
     if (down) { req.socket.destroy(); return; }
+    if (mode === 'redirect') { res.writeHead(307, { location: 'http://127.0.0.1:9/mcp' }).end(); return; }
+    // A broken server that echoes the request's Authorization header back in an error body.
+    if (mode === 'echo500') { res.writeHead(500, { 'content-type': 'text/plain' }).end('e'.repeat(pad) + ' echo ' + String(req.headers.authorization)); return; }
     if (req.headers.authorization !== `Bearer ${TOKEN}`) { res.writeHead(401).end(); return; }
     handler(req, res);
   });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', () => r()));
   const url = `http://127.0.0.1:${(http.address() as { port: number }).port}/mcp`;
-  return { url, seen, setDelay: (ms: number) => { delayMs = ms; }, setDown: (v: boolean) => { down = v; }, close: () => new Promise(r => http.close(r)) };
+  return { url, seen, setDelay: (ms: number) => { delayMs = ms; }, setDown: (v: boolean) => { down = v; }, setFlip: (v: boolean) => { flipDestructive = v; },
+    setMode: (m: typeof mode, p = 0) => { mode = m; pad = p; }, close: () => new Promise(r => { http.closeAllConnections?.(); http.close(r); }) };
 }
 
 async function world(over: Partial<DownstreamConfig> = {}, env: Record<string, string> = { PANTER_DOWNSTREAM_SHOP_TOKEN: TOKEN }) {
@@ -65,6 +74,10 @@ test('config is validated strictly: names, addresses, token variables and hosts'
   bad({ hosts: ['someone'] }, /hosts/);
   bad({ writes: 'yes' }, /writes/);
   bad({ name: 'Shop!' }, /name/);
+  for (const url of ['http://10.evil.example/mcp', 'http://127.attacker.example/mcp', 'http://192.168.x.example/mcp', 'http://8.8.8.8/mcp', 'https://a.example/mcp?token=x'])
+    bad({ url }, /url/);
+  for (const url of ['http://10.0.0.5:8080/mcp', 'http://[::1]:9000/mcp', 'http://[fd12::1]/mcp', 'http://localhost:1/mcp'])
+    assert.equal(parseDownstreamConfig(JSON.stringify({ servers: [{ name: 'ok', url }] }), HOSTS)[0]!.url, url);
   bad({ extra: 1 }, /unknown field/);
   assert.throws(() => parseDownstreamConfig('{"servers":[{"name":"a1","url":"https://a.example/mcp"},{"name":"a1","url":"https://b.example/mcp"}]}', HOSTS), /duplicate/);
   assert.equal(parseDownstreamConfig('{"servers":[{"name":"remote","url":"https://mcp.example.com/mcp"}]}', HOSTS)[0]!.url, 'https://mcp.example.com/mcp');
@@ -80,8 +93,8 @@ test('tools are classified the MCP way: destructive unless they say otherwise', 
 test('reads pass through with the token and the calling host; other hosts are refused', async () => {
   const w = await world();
   try {
-    assert.deepEqual(await w.gw.refresh('shop'), { server: 'shop', tools: 4 });
-    assert.deepEqual(w.gw.tools('shop').map(t => [t.name, t.cls]), [['lookup', 'read'], ['set_price', 'write'], ['delete_item', 'destructive'], ['legacy', 'destructive']]);
+    assert.deepEqual(await w.gw.refresh('shop'), { server: 'shop', tools: 7 });
+    assert.deepEqual(w.gw.tools('shop').slice(0, 4).map(t => [t.name, t.cls]), [['lookup', 'read'], ['set_price', 'write'], ['delete_item', 'destructive'], ['legacy', 'destructive']]);
     const r = await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' });
     assert.equal(text(r), 'lookup ok');
     assert.deepEqual(w.ds.seen[0], { tool: 'lookup', args: { sku: 'A1' }, meta: { 'panter-ai/host': 'claude' } });
@@ -89,7 +102,7 @@ test('reads pass through with the token and the calling host; other hosts are re
     assert.equal(no.isError, true); assert.match(text(no), /may not use/);
     assert.equal(w.ds.seen.length, 1, 'a refused call never reaches the server');
     assert.deepEqual(w.gw.status(grok), [], 'a host not allowed does not even see the server');
-    const audit = w.gw.audit();
+    const audit = w.gw.audit(operator);
     assert.deepEqual(audit.map(a => [a.host, a.tool, a.outcome]), [['grok', 'lookup', 'REFUSED'], ['claude', 'lookup', 'OK']]);
     assert.ok(audit.every(a => /^[0-9a-f]{64}$/.test(a.argsSha256) && !JSON.stringify(a).includes('A1')), 'arguments are only hashed');
   } finally { await w.done(); }
@@ -163,7 +176,7 @@ test('timeouts and failures open the circuit, which fails fast and closes again'
     assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok');
     assert.equal(w.gw.status(claude)[0]!.state, 'OK');
     assert.equal(w.ds.seen.length, before + 1);
-    assert.ok(w.gw.audit().some(a => a.outcome === 'FAILED'));
+    assert.ok(w.gw.audit(operator).some(a => a.outcome === 'FAILED'));
   } finally { await w.done(); }
 });
 
@@ -220,7 +233,10 @@ test('end to end: the built server mounts a downstream server for the hosts its 
     assert.ok((await lead.listTools()).tools.some(t => t.name === 'panter_ds_shop'), stderr);
     assert.ok(!(await grokClient.listTools()).tools.some(t => t.name === 'panter_ds_shop'));
     const index = JSON.parse(text(await lead.callTool({ name: 'panter_ds_shop', arguments: { operation: 'index' } })));
-    assert.deepEqual(index.operations.map((o: any) => [o.operation, o.class]), [['lookup', 'read'], ['set_price', 'write'], ['delete_item', 'destructive'], ['legacy', 'destructive']]);
+    assert.deepEqual(index.operations.slice(0, 4).map((o: any) => [o.operation, o.class]), [['lookup', 'read'], ['set_price', 'write'], ['delete_item', 'destructive'], ['legacy', 'destructive']]);
+    assert.equal(index.status.server, 'shop');
+    const peek = await grokClient.callTool({ name: 'panter_ds_shop', arguments: { operation: 'index' } });
+    assert.equal(peek.isError, true); assert.match(text(peek), /may not use/);
     assert.equal(text(await lead.callTool({ name: 'panter_ds_shop', arguments: { operation: 'lookup', arguments: { sku: 'A1' } } })), 'lookup ok');
     assert.deepEqual(ds.seen.at(-1)!.meta, { 'panter-ai/host': 'claude' });
     assert.match(text(await lead.callTool({ name: 'panter_ds_shop', arguments: { operation: 'set_price', arguments: { sku: 'A1', price: 2 } } })), /needs a grantId/);
@@ -233,4 +249,92 @@ test('end to end: the built server mounts a downstream server for the hosts its 
     for (const c of clients) await c.close().catch(() => undefined);
     proc.kill('SIGTERM'); await ds.close(); await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('a grant is bound to its host and its server', async () => {
+  const w = await world({ hosts: ['claude', 'grok'] });
+  try {
+    const g = w.gw.grant({ server: 'shop', tools: '*', host: 'claude', ttlSeconds: 600, uses: 5, reason: 'x' });
+    assert.match(text(await w.gw.call(grok, 'shop', 'set_price', { sku: 'A1', price: 1 }, g.id)), /another host/);
+    const ds2 = await downstreamServer();
+    const dir = await mkdtemp(join(tmpdir(), 'panter-ds2-'));
+    try {
+      const ledger = SqliteLedger.open(dir);
+      const two = new DownstreamGateway([
+        { name: 'shop', url: w.ds.url, tokenEnv: 'PANTER_DOWNSTREAM_SHOP_TOKEN', hosts: ['claude'], writes: 'grant', timeoutMs: 2000, description: '' },
+        { name: 'shop2', url: ds2.url, tokenEnv: 'PANTER_DOWNSTREAM_SHOP_TOKEN', hosts: ['claude'], writes: 'grant', timeoutMs: 2000, description: '' },
+      ], ledger, { PANTER_DOWNSTREAM_SHOP_TOKEN: TOKEN });
+      const g1 = two.grant({ server: 'shop', tools: '*', host: 'claude', ttlSeconds: 600, uses: 5, reason: 'x' });
+      assert.match(text(await two.call(claude, 'shop2', 'set_price', { sku: 'A1', price: 1 }, g1.id)), /another server/);
+      assert.equal(ds2.seen.length, 0);
+      await two.close();
+    } finally { await ds2.close(); await rm(dir, { recursive: true, force: true }); }
+  } finally { await w.done(); }
+});
+
+test('the token never leaks, even when a broken server echoes it in a long error', async () => {
+  const w = await world();
+  try {
+    await w.gw.refresh('shop');
+    for (const pad of [0, 230, 240, 290, 2000]) {
+      w.ds.setMode('echo500', pad);
+      const r = await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' });
+      assert.equal(r.isError, true);
+      const everywhere = JSON.stringify([r, w.gw.status(claude), w.gw.audit(operator)]);
+      for (const piece of [TOKEN, TOKEN.slice(0, 12), TOKEN.slice(-12)]) assert.ok(!everywhere.includes(piece), `pad ${pad}: ${piece}`);
+      w.advance(31_000);
+    }
+  } finally { await w.done(); }
+});
+
+test('redirects are refused and huge results are cut off', async () => {
+  const w = await world();
+  try {
+    await w.gw.refresh('shop');
+    // Past the 4 MB response cap (cut while reading) and past the 2 MB result cap (checked after).
+    for (const bytes of [5_000_000, 3_000_000]) {
+      const huge = await w.gw.call(claude, 'shop', 'huge', { bytes });
+      assert.equal(huge.isError, true, `${bytes}`);
+      assert.ok(JSON.stringify(huge).length < 10_000, 'the huge result is not passed on');
+      w.advance(31_000);
+    }
+    w.ds.setMode('redirect');
+    const r = await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' });
+    assert.equal(r.isError, true);
+  } finally { await w.done(); }
+});
+
+test('one slow call fails alone: other calls on the shared connection go on, and a success resets the count', async () => {
+  const w = await world({ timeoutMs: 1000, hosts: ['claude', 'grok'] });
+  try {
+    await w.gw.refresh('shop');
+    // The reads are still running when the slow call times out (at 1 s): closing the shared connection would kill them.
+    w.ds.setDelay(800);
+    const [slow, ...reads] = await Promise.all([w.gw.call(claude, 'shop', 'slow', {}),
+      ...[1, 2, 3].map(() => new Promise(r => setTimeout(r, 500)).then(() => w.gw.call(grok, 'shop', 'lookup', { sku: 'A1' })))]);
+    w.ds.setDelay(0);
+    assert.equal(slow!.isError, true);
+    assert.ok(reads.every(r => !r.isError), JSON.stringify(reads));
+    assert.notEqual(w.gw.status(claude)[0]!.state, 'CIRCUIT_OPEN');
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok');
+    assert.equal(w.gw.status(claude)[0]!.failures, 0, 'a success resets the count');
+    w.ds.setDown(true);
+    for (let i = 0; i < 2; i++) await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' });
+    w.ds.setDown(false);
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok');
+    w.ds.setDown(true);
+    for (let i = 0; i < 2; i++) await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' });
+    assert.notEqual(w.gw.status(claude)[0]!.state, 'CIRCUIT_OPEN', 'the success in between reset the count');
+  } finally { w.ds.setDown(false); await w.done(); }
+});
+
+test('a tool that turns destructive is treated as destructive once the cached list is a minute old', async () => {
+  const w = await world();
+  try {
+    await w.gw.refresh('shop');
+    assert.equal(text(await w.gw.call(claude, 'shop', 'flip', {})), 'flip ok');
+    w.ds.setFlip(true);
+    w.advance(61_000);
+    assert.match(text(await w.gw.call(claude, 'shop', 'flip', {})), /needs a grantId/);
+  } finally { await w.done(); }
 });

@@ -7,8 +7,9 @@
  * says otherwise) and gated by the server's write policy and Panter's write grants, then forwarded with a timeout and
  * a circuit breaker, and audited. The downstream server keeps its own approvals on top (a double lock).
  */
-import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
-import { createHash, randomUUID } from 'node:crypto';
+import { Client, StreamableHTTPClientTransport, SdkError, SdkErrorCode } from '@modelcontextprotocol/client';
+import { createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { isIP } from 'node:net';
 import type { SqliteLedger } from './sqlite-ledger.js';
 
 export type WritePolicy = 'deny' | 'grant' | 'allow';
@@ -25,32 +26,53 @@ export type DownstreamAudit = {
   at: string; host: string; server: string; tool: string; cls: ToolClass; grantId: string | null; outcome: 'OK' | 'TOOL_ERROR' | 'REFUSED' | 'FAILED';
   ms: number; argsSha256: string; error: string | null;
 };
-type Data = { version: 1; grants: DownstreamGrant[]; audit: DownstreamAudit[] };
+type Data = { version: 1; grants: DownstreamGrant[]; audit: DownstreamAudit[]; hashKey?: string };
 const seed: Data = { version: 1, grants: [], audit: [] };
 
 const NAME = /^[a-z][a-z0-9]{1,23}$/;
 const TOKEN_ENV = /^PANTER_DOWNSTREAM_[A-Z0-9_]{1,60}$/;
 const MAX_SERVERS = 16, MAX_TOOLS = 200, MAX_AUDIT = 2000, MAX_RESULT_BYTES = 2_000_000;
+/** Any single HTTP response from a downstream server (a result, a tools page) is cut off past this many bytes. */
+const MAX_RESPONSE_BYTES = 4_000_000, MAX_SCHEMA_BYTES = 64_000;
 const FAILURES_TO_OPEN = 3, OPEN_MS = 30_000;
+/** Tools are fetched again before a call when the cached list is older than this, so a changed annotation counts. */
+const FRESH_MS = 60_000;
 const iso = (ms = Date.now()) => new Date(ms).toISOString();
-const sha = (s: string) => createHash('sha256').update(s).digest('hex');
-/** Error text safe to show and store: one line, bounded, never a token. */
-const clean = (e: unknown, secrets: string[] = []) => {
-  let s = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, ' ').slice(0, 300);
+/** Error text safe to show and store: secrets removed from the whole text first, then one line, bounded. */
+export const clean = (e: unknown, secrets: string[] = []) => {
+  let s = e instanceof Error ? e.message : String(e);
   for (const x of secrets) if (x) s = s.split(x).join('[redacted]');
-  return s;
+  return s.replace(/\s+/g, ' ').slice(0, 300);
+};
+/** fetch that refuses redirects and stops reading a response past MAX_RESPONSE_BYTES. */
+const limitedFetch = async (url: string | URL, init?: RequestInit): Promise<Response> => {
+  const res = await fetch(url, { ...init, redirect: 'error' });
+  if (!res.body) return res;
+  let seen = 0;
+  const cap = new TransformStream<Uint8Array, Uint8Array>({ transform(chunk, ctl) {
+    seen += chunk.byteLength;
+    if (seen > MAX_RESPONSE_BYTES) ctl.error(new Error(`response larger than ${MAX_RESPONSE_BYTES} bytes`)); else ctl.enqueue(chunk);
+  } });
+  return new Response(res.body.pipeThrough(cap), { status: res.status, statusText: res.statusText, headers: res.headers });
 };
 
 /** http only to this machine or a private network; https anywhere. */
 function allowedUrl(raw: string): boolean {
   let u: URL;
   try { u = new URL(raw); } catch { return false; }
-  if (u.username || u.password || u.hash) return false;
+  // No credentials anywhere in the address: the token travels only in the Authorization header.
+  if (u.username || u.password || u.hash || u.search) return false;
   if (u.protocol === 'https:') return true;
   if (u.protocol !== 'http:') return false;
-  const h = u.hostname.replace(/^\[|\]$/g, '');
-  return h === 'localhost' || h === '::1' || /^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h) ||
-    /^172\.(1[6-9]|2\d|3[01])\./.test(h);
+  // Plain http only to a literal private address (a name like 10.evil.example is not one) or localhost.
+  const h = u.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (h === 'localhost') return true;
+  if (isIP(h) === 4) {
+    const [a, b] = h.split('.').map(Number) as [number, number];
+    return a === 127 || a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
+  }
+  if (isIP(h) === 6) return h === '::1' || /^f[cd][0-9a-f]{2}:/.test(h);
+  return false;
 }
 
 /** Validate the operator's config file. Throws on anything unclear: a gateway half-configured is worse than none. */
@@ -89,8 +111,8 @@ export function classify(annotations: { readOnlyHint?: unknown; destructiveHint?
 }
 
 type ServerState = {
-  config: DownstreamConfig; tools: DownstreamTool[]; fetchedAt: string | null; failures: number; openUntil: number;
-  lastError: string | null; client: Promise<Client> | null;
+  config: DownstreamConfig; tools: DownstreamTool[]; fetchedAt: string | null; fetchedMs: number; failures: number; openUntil: number;
+  lastError: string | null; client: Promise<Client> | null; refreshing: Promise<{ server: string; tools: number }> | null;
 };
 export type Caller = { id: string; operator: boolean };
 
@@ -98,7 +120,7 @@ export class DownstreamGateway {
   private readonly servers = new Map<string, ServerState>();
   constructor(configs: DownstreamConfig[], private readonly db: SqliteLedger | null,
     private readonly env: Record<string, string | undefined> = process.env, private readonly now: () => number = Date.now) {
-    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, failures: 0, openUntil: 0, lastError: null, client: null });
+    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null });
   }
   get configured(): boolean { return this.servers.size > 0; }
   names(): string[] { return [...this.servers.keys()]; }
@@ -119,9 +141,9 @@ export class DownstreamGateway {
     if (s.config.tokenEnv && !token) return Promise.reject(new Error(`${s.config.tokenEnv} is not set`));
     const attempt = (async () => {
       const client = new Client({ name: 'panter-ai-gateway', version: '1.0.0' });
-      // No redirects: the token is only ever sent to the configured address.
+      // No redirects (the token is only ever sent to the configured address) and bounded responses.
       const transport = new StreamableHTTPClientTransport(new URL(s.config.url),
-        { requestInit: { redirect: 'error', ...(token ? { headers: { authorization: `Bearer ${token}` } } : {}) } });
+        { fetch: limitedFetch as any, requestInit: token ? { headers: { authorization: `Bearer ${token}` } } : {} });
       let timer: NodeJS.Timeout | undefined;
       try {
         await Promise.race([client.connect(transport), new Promise((_, no) => { timer = setTimeout(() => no(new Error('connect timed out')), s.config.timeoutMs); })]);
@@ -133,27 +155,46 @@ export class DownstreamGateway {
     attempt.catch(() => { if (s.client === attempt) s.client = null; });
     return attempt;
   }
-  private drop(s: ServerState) {
-    const c = s.client; s.client = null;
-    c?.then(x => x.close()).catch(() => undefined);
+  /** Close a connection, but only if it is still the server's current one (never one another call reopened). */
+  private drop(s: ServerState, which: Promise<Client> | null) {
+    if (!which || s.client !== which) return;
+    s.client = null;
+    which.then(x => x.close()).catch(() => undefined);
   }
-  /** Run one transport operation under the circuit breaker. */
+  private readonly failedConnections = new WeakSet<Promise<Client>>();
+  private secrets(s: ServerState): string[] { const t = this.token(s); return t ? [`Bearer ${t}`, t] : []; }
+  /** Run one transport operation under the circuit breaker. A slow call only fails itself: the shared connection is
+   * closed (and a failure counted) only for a broken connection, and only once per connection. */
   private async guarded<T>(s: ServerState, op: (c: Client) => Promise<T>): Promise<T> {
     if (this.now() < s.openUntil) throw new Error(`circuit open until ${iso(s.openUntil)} after ${s.failures} failures: ${s.lastError ?? ''}`);
+    const used = this.connect(s);
     try {
-      const result = await op(await this.connect(s));
+      const result = await op(await used);
       s.failures = 0; s.lastError = null; s.openUntil = 0;
       return result;
     } catch (error) {
-      s.failures++; s.lastError = clean(error, [this.token(s) ?? '']);
-      if (s.failures >= FAILURES_TO_OPEN) s.openUntil = this.now() + OPEN_MS;
-      this.drop(s);
-      throw new Error(s.lastError);
+      const message = clean(error, this.secrets(s));
+      const timeout = error instanceof SdkError && error.code === SdkErrorCode.RequestTimeout;
+      // Calls that fail together because one connection broke count once (one failure per connection).
+      if (timeout || !this.failedConnections.has(used)) {
+        if (!timeout) this.failedConnections.add(used);
+        s.failures++; s.lastError = message;
+        if (s.failures >= FAILURES_TO_OPEN) s.openUntil = this.now() + OPEN_MS;
+      }
+      if (!timeout) this.drop(s, used);
+      throw new Error(message);
     }
   }
   /** Fetch and cache a server's tools (all pages, bounded). */
   async refresh(name: string): Promise<{ server: string; tools: number }> {
     const s = this.state(name);
+    // Concurrent refreshes of one server share a single tools/list.
+    if (s.refreshing) return s.refreshing;
+    s.refreshing = this.fetchTools(s).finally(() => { s.refreshing = null; });
+    return s.refreshing;
+  }
+  private async fetchTools(s: ServerState): Promise<{ server: string; tools: number }> {
+    const name = s.config.name;
     const tools = await this.guarded(s, async c => {
       const out: DownstreamTool[] = [];
       let cursor: string | undefined;
@@ -162,7 +203,9 @@ export class DownstreamGateway {
         for (const t of r.tools) {
           if (out.length >= MAX_TOOLS) break;
           if (typeof t.name !== 'string' || !/^[A-Za-z0-9_.-]{1,64}$/.test(t.name)) continue;
-          out.push({ name: t.name, description: String(t.description ?? '').slice(0, 2000), inputSchema: t.inputSchema ?? { type: 'object' },
+          const schema = t.inputSchema ?? { type: 'object' };
+          out.push({ name: t.name, description: String(t.description ?? '').slice(0, 2000),
+            inputSchema: Buffer.byteLength(JSON.stringify(schema)) > MAX_SCHEMA_BYTES ? { type: 'object', description: 'schema too large to show' } : schema,
             cls: classify(t.annotations as any) });
         }
         cursor = r.nextCursor;
@@ -170,11 +213,11 @@ export class DownstreamGateway {
       }
       return out;
     });
-    s.tools = tools; s.fetchedAt = iso(this.now());
+    s.tools = tools; s.fetchedAt = iso(this.now()); s.fetchedMs = this.now();
     return { server: name, tools: tools.length };
   }
   async refreshAll(): Promise<Array<{ server: string; tools?: number; error?: string }>> {
-    return Promise.all(this.names().map(n => this.refresh(n).catch(e => ({ server: n, error: clean(e) }))));
+    return Promise.all(this.names().map(n => this.refresh(n).catch(e => ({ server: n, error: clean(e, this.secrets(this.state(n))) }))));
   }
   tools(name: string): DownstreamTool[] { return this.state(name).tools; }
   status(caller: Caller) {
@@ -182,7 +225,7 @@ export class DownstreamGateway {
     return this.names().filter(n => this.allowed(caller, n)).map(n => {
       const s = this.state(n);
       return { server: n, description: s.config.description, writes: s.config.writes, hosts: s.config.hosts, timeoutMs: s.config.timeoutMs,
-        state: t < s.openUntil ? 'CIRCUIT_OPEN' : s.config.tokenEnv && !this.token(s) ? 'TOKEN_MISSING' : s.lastError ? 'DEGRADED' : s.fetchedAt ? 'OK' : 'NOT_CONTACTED',
+        state: s.config.tokenEnv && !this.token(s) ? 'TOKEN_MISSING' : t < s.openUntil ? 'CIRCUIT_OPEN' : s.lastError ? 'DEGRADED' : s.fetchedAt ? 'OK' : 'NOT_CONTACTED',
         tools: s.tools.length, byClass: { read: s.tools.filter(x => x.cls === 'read').length, write: s.tools.filter(x => x.cls === 'write').length,
           destructive: s.tools.filter(x => x.cls === 'destructive').length },
         fetchedAt: s.fetchedAt, failures: s.failures, openUntil: t < s.openUntil ? iso(s.openUntil) : null, lastError: s.lastError,
@@ -218,11 +261,19 @@ export class DownstreamGateway {
       return !!g;
     }).result };
   }
-  grants(): DownstreamGrant[] { return this.db ? this.db.read<Data>('downstream', seed).grants : []; }
-  audit(filter: { server?: string; limit?: number } = {}): DownstreamAudit[] {
+  /** Grants and audit of the servers this caller may use (the operator sees all). */
+  grants(caller: Caller): DownstreamGrant[] { return this.db ? this.db.read<Data>('downstream', seed).grants.filter(g => this.allowed(caller, g.server)) : []; }
+  audit(caller: Caller, filter: { server?: string; limit?: number } = {}): DownstreamAudit[] {
     if (!this.db) return [];
-    const all = this.db.read<Data>('downstream', seed).audit.filter(a => !filter.server || a.server === filter.server);
+    const all = this.db.read<Data>('downstream', seed).audit.filter(a => this.allowed(caller, a.server) && (!filter.server || a.server === filter.server));
     return all.slice(-(filter.limit ?? 100)).reverse();
+  }
+  /** Arguments are audited as a keyed hash (the key lives in the ledger), so short values cannot be guessed back. */
+  private hashKey: string | null = null;
+  private argsHash(args: Record<string, unknown>): string {
+    if (!this.hashKey) this.hashKey = this.db ? this.db.mutate<Data, string>('downstream', seed, d => (d.hashKey ??= randomBytes(32).toString('hex'))).result
+      : randomBytes(32).toString('hex');
+    return createHmac('sha256', this.hashKey).update(JSON.stringify(args)).digest('hex');
   }
   private record(entry: DownstreamAudit) {
     if (!this.db) return;
@@ -250,16 +301,19 @@ export class DownstreamGateway {
   async call(caller: Caller, server: string, tool: string, args: Record<string, unknown>, grantId?: string,
     meta: Record<string, unknown> = {}) {
     const started = this.now();
-    const argsSha256 = sha(JSON.stringify(args));
+    const argsSha256 = this.argsHash(args);
     const s = this.servers.get(server);
     let cls: ToolClass = 'destructive', usedGrant: string | null = null;
     const finish = (outcome: DownstreamAudit['outcome'], error: string | null) =>
       this.record({ at: iso(started), host: caller.id, server, tool, cls, grantId: usedGrant, outcome, ms: this.now() - started, argsSha256, error });
     const refuse = (message: string) => { finish('REFUSED', message); return { isError: true, content: [{ type: 'text' as const, text: message }] }; };
     if (!s || !this.allowed(caller, server)) return refuse(`${caller.id} may not use downstream server "${server}"`);
-    if (!s.fetchedAt) {
+    // A stale list is fetched again first: the class of a tool is read from what the server says now.
+    if (!s.fetchedAt || this.now() - s.fetchedMs > FRESH_MS) {
       try { await this.refresh(server); }
-      catch (error) { const message = clean(error); finish('FAILED', message); return { isError: true, content: [{ type: 'text' as const, text: `${server} is unreachable: ${message}` }] }; }
+      catch (error) {
+        if (!s.fetchedAt) { const message = clean(error, this.secrets(s)); finish('FAILED', message); return { isError: true, content: [{ type: 'text' as const, text: `${server} is unreachable: ${message}` }] }; }
+      }
     }
     const known = s.tools.find(t => t.name === tool);
     if (!known) return refuse(`Unknown tool "${tool}" on ${server}; call operation "index"`);
@@ -275,16 +329,16 @@ export class DownstreamGateway {
       const result = await this.guarded(s, c => c.callTool({ name: tool, arguments: args,
         _meta: { ...meta, 'panter-ai/host': caller.id, ...(usedGrant ? { 'panter-ai/grantId': usedGrant } : {}) } } as any,
         { timeout: s.config.timeoutMs } as any));
-      if (JSON.stringify(result).length > MAX_RESULT_BYTES) { finish('FAILED', 'result too large'); return { isError: true, content: [{ type: 'text' as const, text: `${server}.${tool} returned more than ${MAX_RESULT_BYTES} bytes` }] }; }
+      if (Buffer.byteLength(JSON.stringify(result)) > MAX_RESULT_BYTES) { finish('FAILED', 'result too large'); return { isError: true, content: [{ type: 'text' as const, text: `${server}.${tool} returned more than ${MAX_RESULT_BYTES} bytes` }] }; }
       finish(result.isError ? 'TOOL_ERROR' : 'OK', null);
       return result;
     } catch (error) {
-      const message = clean(error, [this.token(s) ?? '']);
+      const message = clean(error, this.secrets(s));
       finish('FAILED', message);
       return { isError: true, content: [{ type: 'text' as const, text: `${server}.${tool} failed: ${message}` }] };
     }
   }
-  async close() { for (const s of this.servers.values()) this.drop(s); }
+  async close() { for (const s of this.servers.values()) this.drop(s, s.client); }
 }
 
 export const routerFor = (name: string) => `panter_ds_${name}`;
