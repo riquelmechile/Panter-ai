@@ -5,4 +5,4 @@ Description=Panter-ai daily backup
 [Service]
 Type=oneshot
 UMask=0077
-ExecStart=/usr/bin/node %h/panter-ai/current/deploy/backup.mjs --base %h/panter-ai --daily --keep-daily 14
+ExecStart=/usr/bin/env node %h/panter-ai/current/deploy/backup.mjs --base %h/panter-ai --daily --keep-daily 14

@@ -14,12 +14,18 @@ import { DatabaseSync, backup } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 
 const args = process.argv.slice(2);
-const opt = name => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] : undefined; };
+const opt = name => { const i = args.indexOf(`--${name}`); const v = i >= 0 ? args[i + 1] : undefined;
+  if (i >= 0 && (v === undefined || v.startsWith('--'))) { console.error(`backup: --${name} needs a value`); process.exit(1); }
+  return v; };
 const flag = name => args.includes(`--${name}`);
-let created = null;
+let created = null, scratch = null;
 // A failed backup leaves nothing behind (so a daily retry is never mistaken for a finished backup).
 const fail = message => { console.error(`backup: ${message}`); process.exit(1); };
-process.on('exit', code => { if (code !== 0 && created) fs.rmSync(created, { recursive: true, force: true }); });
+process.on('exit', code => {
+  // The restore-check copy (a full ledger, OAuth tokens included) never outlives the run.
+  if (scratch) fs.rmSync(scratch, { recursive: true, force: true });
+  if (code !== 0 && created) fs.rmSync(created, { recursive: true, force: true });
+});
 
 const base = path.resolve(opt('base') ?? fail('--base required'));
 const daily = flag('daily');
@@ -43,31 +49,34 @@ fs.mkdirSync(backupRoot, { recursive: true, mode: 0o700 }); fs.chmodSync(backupR
 fs.mkdirSync(destination, { mode: 0o700 }); created = destination;
 
 const input = new DatabaseSync(path.join(data, 'panter.sqlite'), { readOnly: true });
-const rows = input.prepare('SELECT name,payload,revision FROM ledger ORDER BY name').all();
-const fingerprint = rows.map(r => ({ name: r.name, sha256: createHash('sha256').update(r.payload).digest('hex'), revision: r.revision }));
-const oauth = JSON.parse(rows.find(r => r.name === 'oauth')?.payload ?? 'null');
-if (!oauth || !Array.isArray(oauth.clients) || !Array.isArray(oauth.grants) || !Array.isArray(oauth.tokens)) fail('OAuth ledger structure missing');
 const copy = path.join(destination, 'panter.sqlite');
 await backup(input, copy); input.close(); fs.chmodSync(copy, 0o600);
+// Everything below is read from the copy itself, so writes to the live ledger meanwhile cannot make it fail.
+const readLedger = file => { const db = new DatabaseSync(file, { readOnly: true });
+  try { const integrity = db.prepare('PRAGMA integrity_check').get().integrity_check;
+    return { integrity, rows: db.prepare('SELECT name,payload,revision FROM ledger ORDER BY name').all() }; } finally { db.close(); } };
+const taken = readLedger(copy);
+if (taken.integrity !== 'ok') fail('backup failed the integrity check');
+const rows = taken.rows;
+const fingerprint = rows.map(r => ({ name: r.name, sha256: createHash('sha256').update(r.payload).digest('hex'), revision: r.revision }));
+const oauthRow = rows.find(r => r.name === 'oauth');
+const oauth = oauthRow ? JSON.parse(oauthRow.payload) : null;
+if (oauthRow && (!Array.isArray(oauth?.clients) || !Array.isArray(oauth?.grants) || !Array.isArray(oauth?.tokens))) fail('OAuth ledger is malformed');
 
-// Restore check: open a copy of the backup elsewhere, as a restore would, and compare every ledger row.
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'panter-restore-check-'));
-try {
-  const restoredPath = path.join(scratch, 'panter.sqlite');
-  fs.copyFileSync(copy, restoredPath);
-  const restored = new DatabaseSync(restoredPath, { readOnly: true });
-  const integrity = restored.prepare('PRAGMA integrity_check').get();
-  if (integrity.integrity_check !== 'ok') fail('backup failed the integrity check');
-  const back = restored.prepare('SELECT name,payload,revision FROM ledger ORDER BY name').all();
-  restored.close();
-  if (back.length !== rows.length || rows.some((r, i) => back[i]?.name !== r.name || back[i]?.payload !== r.payload || back[i]?.revision !== r.revision))
-    fail('restored copy differs from the live ledger');
-} finally { fs.rmSync(scratch, { recursive: true, force: true }); }
+// Restore check: open a copy of the backup elsewhere, as a restore would, and compare every ledger row with the backup.
+scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'panter-restore-check-'));
+const restoredPath = path.join(scratch, 'panter.sqlite');
+fs.copyFileSync(copy, restoredPath);
+const restored = readLedger(restoredPath);
+if (restored.integrity !== 'ok') fail('restored copy failed the integrity check');
+if (restored.rows.length !== rows.length || rows.some((r, i) => restored.rows[i]?.name !== r.name || restored.rows[i]?.payload !== r.payload || restored.rows[i]?.revision !== r.revision))
+  fail('restored copy differs from the backup');
+fs.rmSync(scratch, { recursive: true, force: true }); scratch = null;
 
-// The environment is required; legacy JSON state (pre-SQLite) is copied when present.
+// The environment is required; every JSON store in data/ (native reviews and Panter-RDD still live there, plus the
+// pre-SQLite copies) is copied too, so a restore puts back a consistent set.
 const files = [['etc/panter.env', 'panter.env', true], ['etc/operator.token', 'operator.token', false],
-  ['data/oauth.json', 'oauth.json', false], ['data/harness.json', 'harness.json', false],
-  ['data/native-reviews.json', 'native-reviews.json', false], ['data/panter-rdd.json', 'panter-rdd.json', false]];
+  ...fs.readdirSync(data).filter(n => /^[a-z0-9-]+\.json$/.test(n)).sort().map(n => [`data/${n}`, n, false])];
 const copied = [], missing = [];
 for (const [from, to, required] of files) {
   const abs = path.join(base, from);
@@ -79,7 +88,7 @@ for (const [from, to, required] of files) {
 let currentRelease = null;
 try { currentRelease = fs.readlinkSync(path.join(base, 'current')); } catch { /* fresh install */ }
 const manifest = { createdAt: new Date().toISOString(), label, releaseToBeInstalled: release ?? null, currentRelease,
-  ledgerFingerprint: fingerprint, oauthCounts: { clients: oauth.clients.length, grants: oauth.grants.length, tokens: oauth.tokens.length },
+  ledgerFingerprint: fingerprint, oauthCounts: oauth ? { clients: oauth.clients.length, grants: oauth.grants.length, tokens: oauth.tokens.length } : null,
   copied, missing, restoreCheck: 'ok' };
 fs.writeFileSync(path.join(destination, 'manifest.json'), JSON.stringify(manifest, null, 2), { mode: 0o600 });
 created = null; // finished: keep it

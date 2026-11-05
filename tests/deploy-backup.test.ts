@@ -70,3 +70,23 @@ test('daily backups run once a day, redo an unfinished one and keep only the new
     assert.equal(redone.restoreCheck, 'ok');
   } finally { await rm(base, { recursive: true, force: true }); }
 });
+
+test('a backup taken while the ledger is being written passes, copies every JSON store and leaves no scratch copy', async () => {
+  const base = await install();
+  try {
+    await writeFile(join(base, 'data', 'native-reviews.json'), '{"version":1}');
+    await writeFile(join(base, 'data', 'panter-rdd.json'), '{"version":1}');
+    const writer = new DatabaseSync(join(base, 'data', 'panter.sqlite'));
+    writer.exec('PRAGMA journal_mode=WAL');
+    let n = 0; const timer = setInterval(() => { writer.prepare('UPDATE ledger SET revision=? WHERE name=?').run(++n, 'harness'); }, 2);
+    const before = (await readdir(tmpdir())).filter(x => x.startsWith('panter-restore-check-')).length;
+    try {
+      for (let i = 0; i < 4; i++) {
+        const out = JSON.parse((await backup(base, '--label', `pre-busy-${i}`)).stdout);
+        assert.equal(out.restoreCheck, 'ok');
+        assert.ok(out.copied.includes('native-reviews.json') && out.copied.includes('panter-rdd.json'));
+      }
+    } finally { clearInterval(timer); writer.close(); }
+    assert.equal((await readdir(tmpdir())).filter(x => x.startsWith('panter-restore-check-')).length, before, 'no scratch copy left behind');
+  } finally { await rm(base, { recursive: true, force: true }); }
+});
