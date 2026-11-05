@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink, readlink, copyFile, chmod } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -28,8 +28,8 @@ async function world() {
 [ -e "${base}/etc/quiesce" ] && q=quiesced || q=-
 case "$*" in
   *reset-failed*) exit 0;;
-  *is-active*) [ -f "${root}/up" ]; exit $?;;
-  *" stop "*) echo "stop $q" >> "${root}/calls"; rm -f "${root}/up";;
+  *is-active*) if [ -f "${root}/up" ]; then echo active; exit 0; else echo inactive; exit 3; fi;;
+  *" stop "*) echo "stop $q" >> "${root}/calls"; rm -f "${root}/up"; [ -f "${root}/stop-fails" ] && exit 1;;
   *restart*|*" start "*) echo "start $q" >> "${root}/calls"; rev=$(cat "${base}/current/REVISION" 2>/dev/null); if grep -qs "$rev" "${root}/bad-revisions"; then rm -f "${root}/up"; else printf %s "$rev" > "${root}/up"; fi;;
 esac
 exit 0
@@ -43,7 +43,12 @@ printf '{"status":"ok","name":"panter-ai","version":"0","revision":"%s"}' "$(cat
 exit 0
 `);
   await writeFile(join(bin, 'sleep'), '#!/bin/sh\nexit 0\n');
-  for (const f of ['systemctl', 'curl', 'npm', 'sleep']) await chmod(join(bin, f), 0o755);
+  // node hangs while ${root}/hang exists (to interrupt a deploy in the middle of its backup), otherwise is node.
+  await writeFile(join(bin, 'node'), `#!/bin/sh
+if [ -f "${root}/hang" ]; then touch "${root}/hanging"; exec /bin/sleep 300; fi
+exec "${process.execPath}" "$@"
+`);
+  for (const f of ['systemctl', 'curl', 'npm', 'sleep', 'node']) await chmod(join(bin, f), 0o755);
   const git = (...a: string[]) => run('git', a, { cwd: src });
   await run('git', ['init', '-q', '--bare', '-b', 'main', origin]);
   await run('git', ['clone', '-q', origin, src]);
@@ -59,9 +64,10 @@ exit 0
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, PANTER_BASE: base, PANTER_SOURCE_REPO: src, HOME: root };
   const outcome = (p: Promise<{ stdout: string; stderr: string }>) => p.then(r => ({ ok: true, out: r.stdout + r.stderr }), e => ({ ok: false, out: String(e.stdout) + String(e.stderr) }));
   const deploy = (sha: string) => outcome(run('bash', [deploySh, sha], { env }));
+  const spawnDeploy = (sha: string) => spawn('bash', [deploySh, sha], { env, detached: true, stdio: 'ignore' });
   const daily = () => outcome(run('bash', [join(base, 'current', 'deploy', 'daily-backup.sh')], { env }));
   const calls = async () => { const c = existsSync(join(root, 'calls')) ? (await readFile(join(root, 'calls'), 'utf8')).trim().split('\n') : []; await rm(join(root, 'calls'), { force: true }); return c; };
-  return { root, base, commits, deploy, daily, calls };
+  return { root, base, commits, deploy, daily, calls, spawnDeploy };
 }
 const live = async (base: string) => (await readFile(join(base, 'current', 'REVISION'), 'utf8')).trim();
 
@@ -160,5 +166,50 @@ test('the daily backup stops a running service briefly and leaves a stopped one 
     assert.match(again.out, /already taken today/);
     assert.deepEqual(await w.calls(), []);
     assert.equal(existsSync(join(w.root, 'up')), false);
+  } finally { await rm(w.root, { recursive: true, force: true }); }
+});
+
+test('production is never left stopped: a failing stop or an interrupted backup starts the service again', async () => {
+  const w = await world();
+  try {
+    assert.ok((await w.deploy(w.commits[0]!)).ok);
+    // systemctl stop stops the service but reports a failure.
+    await writeFile(join(w.root, 'stop-fails'), '');
+    const r = await w.deploy(w.commits[1]!);
+    assert.equal(r.ok, false);
+    assert.match(r.out, /starting .* again/);
+    assert.equal((await readFile(join(w.root, 'up'), 'utf8')).trim(), w.commits[0], 'the old release is running again');
+    await rm(join(w.root, 'stop-fails'));
+    // The deploy is killed (a dropped session, a timeout) while the backup runs.
+    await writeFile(join(w.root, 'hang'), '');
+    const child = w.spawnDeploy(w.commits[1]!);
+    const exited = new Promise(done => child.on('exit', done));
+    for (let i = 0; i < 300 && !existsSync(join(w.root, 'hanging')); i++) await new Promise(r => setTimeout(r, 50));
+    assert.ok(existsSync(join(w.root, 'hanging')), 'reached the backup');
+    assert.equal(existsSync(join(w.root, 'up')), false, 'stopped for the backup');
+    await rm(join(w.root, 'hang'));
+    process.kill(-child.pid!, 'SIGTERM');
+    await exited;
+    assert.equal((await readFile(join(w.root, 'up'), 'utf8')).trim(), w.commits[0], 'started again after the interruption');
+    assert.equal(await live(w.base), w.commits[0]);
+    assert.equal(existsSync(join(w.base, 'etc', 'quiesce')), false);
+  } finally { await rm(w.root, { recursive: true, force: true }); }
+});
+
+test('deploy refuses a real current directory and maintenance; the daily backup skips maintenance', async () => {
+  const w = await world();
+  try {
+    await mkdir(join(w.base, 'current'));
+    const d = await w.deploy(w.commits[0]!);
+    assert.equal(d.ok, false); assert.match(d.out, /not a symlink/);
+    await rm(join(w.base, 'current'), { recursive: true });
+    assert.ok((await w.deploy(w.commits[0]!)).ok);
+    await writeFile(join(w.base, 'etc', 'maintenance'), '');
+    const m = await w.deploy(w.commits[1]!);
+    assert.equal(m.ok, false); assert.match(m.out, /maintenance exists/);
+    await w.calls();
+    const b = await w.daily();
+    assert.ok(b.ok); assert.match(b.out, /skipped/);
+    assert.deepEqual(await w.calls(), [], 'nothing stopped');
   } finally { await rm(w.root, { recursive: true, force: true }); }
 });

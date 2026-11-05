@@ -20,6 +20,9 @@ S=${SHA:0:7}
 RELEASES="$BASE/releases"
 REL="$RELEASES/$S"
 
+[ -e "$BASE/etc/maintenance" ] && { echo "deploy: $BASE/etc/maintenance exists (a restore or manual work is in progress)" >&2; exit 2; }
+# `current` must be a symlink into releases/ (or absent on a fresh install): a real directory could not be switched.
+if [ -e "$BASE/current" ] && [ ! -L "$BASE/current" ]; then echo "deploy: $BASE/current is not a symlink; fix it by hand first" >&2; exit 2; fi
 # One deploy at a time.
 mkdir -p "$RELEASES"
 exec 9>"$RELEASES/.deploy.lock"
@@ -60,12 +63,19 @@ restart() { systemctl --user reset-failed "$UNIT" >/dev/null 2>&1 || true; syste
 # The JSON stores are only consistent while the service is stopped, so the backup is taken with it stopped (a few
 # seconds; the restart below was going to interrupt it anyway). etc/quiesce keeps the health check from restarting it
 # meanwhile.
-mkdir -p "$BASE/etc"; touch "$BASE/etc/quiesce"; trap 'rm -f "$BASE/etc/quiesce"' EXIT
+# From the stop until the service is started again, any exit (an error, Ctrl-C, a dropped SSH session) starts
+# whatever `current` points to, so production is never left stopped.
+must_start=0
+on_exit() { if [ "$must_start" = 1 ]; then echo "deploy: interrupted; starting $UNIT again" >&2; restart; fi; rm -f "$BASE/etc/quiesce"; }
+trap on_exit EXIT
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
+mkdir -p "$BASE/etc"; touch "$BASE/etc/quiesce"
 echo "deploy: stopping $UNIT for a consistent backup"
+must_start=1
 systemctl --user stop "$UNIT"
-if ! node "$REL/deploy/backup.mjs" --base "$BASE" --label "pre-$S-$(date -u +%Y%m%d%H%M%S)-$$" --release "$SHA" --stopped; then
+if ! timeout --foreground 600 node "$REL/deploy/backup.mjs" --base "$BASE" --label "pre-$S-$(date -u +%Y%m%d%H%M%S)-$$" --release "$SHA" --stopped; then
   echo "deploy: backup failed; nothing switched, starting ${PREV:-the current release} again" >&2
-  restart; rm -rf -- "$REL"; exit 1
+  restart; must_start=0; rm -rf -- "$REL"; exit 1
 fi
 healthy() { # healthy <revision|any>: poll /health for about a minute
   for _ in $(seq 1 20); do
@@ -78,7 +88,7 @@ healthy() { # healthy <revision|any>: poll /health for about a minute
 }
 
 switch "$S"
-restart
+restart; must_start=0
 if ! healthy "$SHA"; then
   echo "deploy: $S did not come up healthy" >&2
   if [ -z "$PREV" ]; then echo "deploy: ROLLBACK IMPOSSIBLE: there was no previous release; $S stays live and unhealthy" >&2; exit 1; fi
