@@ -1061,12 +1061,15 @@ const handler = createMcpHandler(reqCtx => {
     inputSchema: z.object({ server: z.string().trim().min(2).max(24), ...dsInput }).strict(),
     annotations: { readOnlyHint: false },
   }, async (x: DsInput & { server: string }) => {
-    if (!downstream.names().includes(x.server)) return execute(async () => {
-      const mine = downstream.names().filter(n => downstream.allowed(dsCaller(), n));
-      throw new Error(`Unknown downstream server "${x.server}"${mine.length ? `; you may use: ${mine.join(', ')}` : ''}`);
+    const caller = dsCaller(), { server: name, ...rest } = x;
+    if (downstream.names().includes(name) && downstream.allowed(caller, name)) return dsHandle(name, rest);
+    // A server the caller may not use answers exactly like one that does not exist, so names cannot be probed. The
+    // refusal is still recorded by the gateway (its audit), only its answer is replaced.
+    if (downstream.names().includes(name)) await downstream.call(caller, name, rest.operation, {}, undefined);
+    return execute(async () => {
+      const mine = downstream.names().filter(n => downstream.allowed(caller, n));
+      throw new Error(`No downstream server "${name}" for you${mine.length ? `; you may use: ${mine.join(', ')}` : ''}`);
     });
-    const { server: name, ...rest } = x;
-    return dsHandle(name, rest);
   });
   server.registerTool('panter_downstream_status', { description: 'Downstream MCP servers you may use: state (OK, DEGRADED, CIRCUIT_OPEN, TOKEN_MISSING, NOT_CONTACTED), tool counts by class, write policy, whether it is sensitive, and router name; plus the public keys (JWK set, also at /.well-known/panter-downstream-keys) that verify the signed actor assertions downstream servers receive.',
     inputSchema: z.object({}).strict(), annotations: { readOnlyHint: true } },
