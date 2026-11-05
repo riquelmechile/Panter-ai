@@ -6,7 +6,7 @@ Panter registra más de 100 herramientas. Entregárselas todas a cada host hace 
 
 - **Nada se bloquea.** Todas las herramientas siguen registradas y se pueden llamar por su nombre, igual que antes, con su misma autorización (`requireLeader`, `requireAdmin`, permisos de GitHub, etc.).
 - **Solo cambia `tools/list`.** Cada host ve los 8 routers por dominio más las herramientas de su flujo normal:
-  - **Líder:** harness, revisión, delegación y perfiles, estado del workforce, permisos de GitHub, memoria y Agent Studio (con las herramientas que su UI llama por nombre), unas 47 en total.
+  - **Líder:** harness, revisión, delegación y perfiles, estado del workforce, permisos de GitHub, memoria y Agent Studio (con las herramientas que su UI llama por nombre), unas 50 en total con los routers.
   - **Worker** (GPT-A, GPT-B, Grok, Gemini cuando no son líder): pickup, claim, heartbeat, complete, wait/listen y GitHub del trabajo, unas 29. La memoria de Engram es solo del líder. Se deja amplio a propósito: un host como ChatGPT solo puede llamar herramientas que ve listadas, así que todas las rutas que usan las rutinas de los hosts siguen listadas.
   - **Operador** (token de operador, socket Unix): todo.
 - **Todo es alcanzable desde los routers.** Un host que necesita una herramienta que no ve la usa a través del router de su dominio.

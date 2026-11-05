@@ -2,6 +2,17 @@
 
 Follow [`docs/CANONICAL_HARNESS_POLICY.md`](docs/CANONICAL_HARNESS_POLICY.md) first when any older version-specific text conflicts. Preserve `src/core/policy.ts` host model/effort/Fast/parallellism demands unchanged. All GitHub writes, merges, deployments and privilege grants require their own authorization.
 
+## v1.0 operating rules
+
+They refine the older version sections below; `docs/CANONICAL_HARNESS_POLICY.md` still comes first.
+
+- **Tool surface.** `tools/list` is filtered per role (leader, worker, operator). Nothing is blocked: every tool stays callable by name and through its domain router (`panter_harness`, `panter_review`, `panter_mesh`, `panter_workforce`, `panter_github`, `panter_memory`, `panter_catalog`, `panter_admin`, each with `operation: "index"`). Do not tell a user a tool is missing because it is not listed. See `docs/TOOL_SURFACE.md`.
+- **Remote phases and reviews.** Harness phases, 4R lenses and Judgment Day judges go to the host bound to that specialist when it is connected. Judgment Day judges are never sent to a host that wrote the candidate (its authors and GitHub workforce writers); 4R lenses go to their bound host, and with `PANTER_RDD_TRANSPORT_ATTESTATION=1` Panter-RDD only acknowledges remote lens receipts whose transport it attested, from hosts that did not write the candidate. A host that fails or never picks up falls back to native for that host only.
+- **GitHub grants.** With `PANTER_HARNESS_AUTO_GITHUB_GRANTS=1`, a dispatched work item gets write access scoped to that item, revoked when the work ends, the run is corrected or the run is closed. A grant never extends to merging, labels or deployment.
+- **Closing a run.** `panter_harness_close` (leader only) stops a run for good: queued remote work is withdrawn and its grants revoked, and every later tick returns `HARNESS_CLOSED`.
+- **Merging.** A merge needs CI green, the Codex review clean, an independent review, and the reviewer account's approval on the exact head SHA, then `--match-head-commit`. The operator may give the leader a standing authorization to merge when all of that is green; that standing authorization is the separate human authorization the canonical policy requires, for merges that pass every one of those gates. The leader then merges and reports afterwards. Without it, ask first. Deployments follow `docs/OPERATIONS.md` (`deploy/deploy.sh <sha>`) and need their own authorization.
+- **Downstream MCP servers.** Other MCP servers are mounted behind Panter through the downstream gateway (`docs/DOWNSTREAM_MCP.md`). Their write tools need a Panter grant on top of the downstream server's own approvals. Never call a downstream server directly around the gateway.
+
 # Panter-ai host and agent contract
 
 **Leader:** the single coordinator is the host configured by `PANTER_LEAD_HOST` (default `gpt-a`). Wherever this file says GPT-A coordinates, read "the configured leader"; with another leader, GPT-A is an ordinary worker. See `docs/LEADERSHIP.md`.
