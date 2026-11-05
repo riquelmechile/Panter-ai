@@ -87,6 +87,25 @@ const limitedFetch = (cut: (callId: string | null) => void) => async (url: strin
   } });
   return new Response(res.body.pipeThrough(cap), { status: res.status, statusText: res.statusText, headers: res.headers });
 };
+/** Largest token endpoint answer Panter reads; a longer one is refused without being buffered. */
+const TOKEN_RESPONSE_MAX = 64_000;
+/** A response body as text, refused as soon as it passes `max` bytes. */
+async function readCapped(res: Response, max: number): Promise<string> {
+  if (!res.body) return '';
+  const reader = res.body.getReader(), chunks: Uint8Array[] = [];
+  let seen = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    seen += value.byteLength;
+    if (seen > max) { await reader.cancel().catch(() => undefined); throw new Error(`token endpoint answer larger than ${max} bytes`); }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+/** HTTP Basic client credentials (RFC 6749 2.3.1: id and secret form-encoded, then base64). */
+const formEncode = (v: string) => new URLSearchParams({ v }).toString().slice(2);
+const basicCredentials = (id: string, secret: string) => Buffer.from(`${formEncode(id)}:${formEncode(secret)}`).toString('base64');
 /** An error whose message is already safe to show and store (cleaned, or withheld for a sensitive server). */
 class SafeError extends Error {}
 /** After a failed tool-list fetch, calls fail fast (closed) for this long before Panter asks again. */
@@ -166,6 +185,9 @@ type ServerState = {
   refreshFailedMs: number; refreshError: string | null; cutCalls: Set<string>;
   /** OAuth: the current access token and when to renew it, and the request already getting one. */
   oauthToken: { value: string; renewAt: number } | null; oauthFetch: Promise<string> | null;
+  /** Every token issued for this server and when it really expires: a call that started with an older token can
+   * still echo it after a renewal, so it stays redacted until it is dead. */
+  oauthIssued: Map<string, number>;
 };
 /** Who is calling: the authenticated host (or "admin"), whether it is the operator, and its Panter role. */
 export type Caller = { id: string; operator: boolean; role?: ActorRole };
@@ -175,7 +197,7 @@ export class DownstreamGateway {
   private readonly servers = new Map<string, ServerState>();
   constructor(configs: DownstreamConfig[], private readonly db: SqliteLedger | null,
     private readonly env: Record<string, string | undefined> = process.env, private readonly now: () => number = Date.now) {
-    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null, refreshFailedMs: 0, refreshError: null, cutCalls: new Set(), oauthToken: null, oauthFetch: null });
+    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null, refreshFailedMs: 0, refreshError: null, cutCalls: new Set(), oauthToken: null, oauthFetch: null, oauthIssued: new Map() });
     // Load the sensitive missions now, so the checks other stores run inside their own transactions read no database.
     if (this.db) this.sensitiveSet();
   }
@@ -212,16 +234,21 @@ export class DownstreamGateway {
       if (o.resource) body.set('resource', o.resource);
       const headers: Record<string, string> = { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' };
       if (o.authMethod === 'post') { body.set('client_id', id); body.set('client_secret', secret); }
-      else headers.authorization = `Basic ${Buffer.from(`${encodeURIComponent(id)}:${encodeURIComponent(secret)}`).toString('base64')}`;
+      else headers.authorization = `Basic ${basicCredentials(id, secret)}`;
       const res = await fetch(o.tokenUrl, { method: 'POST', headers, body, redirect: 'error', signal: AbortSignal.timeout(s.config.timeoutMs) });
-      const text = (await res.text()).slice(0, 64_000);
-      if (!res.ok) throw new Error(`token endpoint answered ${res.status}`);
+      if (!res.ok) { await res.body?.cancel().catch(() => undefined); throw new Error(`token endpoint answered ${res.status}`); }
+      const text = await readCapped(res, TOKEN_RESPONSE_MAX);
       let json: any;
       try { json = JSON.parse(text); } catch { throw new Error('token endpoint answered without JSON'); }
       if (typeof json?.access_token !== 'string' || !json.access_token || String(json.token_type ?? 'bearer').toLowerCase() !== 'bearer')
         throw new Error('token endpoint gave no bearer access_token');
       const life = Number.isFinite(json.expires_in) && json.expires_in > 0 ? json.expires_in * 1000 : 300_000;
-      s.oauthToken = { value: json.access_token, renewAt: this.now() + Math.max(life - 60_000, life / 2) };
+      const now = this.now();
+      s.oauthToken = { value: json.access_token, renewAt: now + Math.max(life - 60_000, life / 2) };
+      // Kept until it expires (plus the longest call), whatever the server claimed; at most the last 32 tokens.
+      for (const [t, until] of s.oauthIssued) if (until <= now) s.oauthIssued.delete(t);
+      s.oauthIssued.set(json.access_token, now + Math.min(life, 86_400_000) + s.config.timeoutMs);
+      while (s.oauthIssued.size > 32) s.oauthIssued.delete(s.oauthIssued.keys().next().value!);
       return json.access_token as string;
     })().finally(() => { s.oauthFetch = null; });
     return s.oauthFetch;
@@ -236,17 +263,21 @@ export class DownstreamGateway {
       // No redirects (the token is only ever sent to the configured address) and bounded responses.
       const limited = limitedFetch(id => { if (id && s.cutCalls.size < 1000) s.cutCalls.add(id); });
       // OAuth: each request carries the current token; a 401 renews it once (a token can expire or be revoked early).
+      // Only a body that can be sent twice is retried (the SDK sends JSON-RPC as a string); a refused token means
+      // the server did not act on the request.
       const oauthFetch = async (url: string | URL, init?: RequestInit) => {
         const send = async () => {
+          const used = await this.oauthToken(s);
           const headers = new Headers(init?.headers);
-          headers.set('authorization', `Bearer ${await this.oauthToken(s)}`);
-          return limited(url, { ...init, headers });
+          headers.set('authorization', `Bearer ${used}`);
+          return { used, res: await limited(url, { ...init, headers }) };
         };
         const first = await send();
-        if (first.status !== 401) return first;
-        await first.body?.cancel().catch(() => undefined);
-        s.oauthToken = null;
-        return send();
+        if (first.res.status !== 401 || !(init?.body == null || typeof init.body === 'string')) return first.res;
+        await first.res.body?.cancel().catch(() => undefined);
+        // Forget the refused token only if it is still the current one: a late 401 must not drop a newer token.
+        if (s.oauthToken?.value === first.used) s.oauthToken = null;
+        return (await send()).res;
       };
       const transport = new StreamableHTTPClientTransport(new URL(s.config.url),
         s.config.oauth ? { fetch: oauthFetch as any }
@@ -272,9 +303,14 @@ export class DownstreamGateway {
   private secrets(s: ServerState): string[] {
     const out: string[] = [];
     const t = this.token(s); if (t) out.push(`Bearer ${t}`, t);
-    if (s.oauthToken) out.push(`Bearer ${s.oauthToken.value}`, s.oauthToken.value);
+    for (const v of new Set([...(s.oauthToken ? [s.oauthToken.value] : []), ...s.oauthIssued.keys()])) out.push(`Bearer ${v}`, v);
     const o = s.config.oauth;
-    if (o) for (const k of [o.clientSecretEnv]) { const v = this.env[k]; if (v) out.push(v); }
+    const secret = o ? this.env[o.clientSecretEnv] : undefined;
+    if (o && secret) {
+      out.push(secret, formEncode(secret), encodeURIComponent(secret));
+      const id = this.env[o.clientIdEnv];
+      if (id) out.push(basicCredentials(id, secret));
+    }
     return out;
   }
   /** The text of an error that may be shown and stored: cleaned, or for a sensitive server only its kind (a

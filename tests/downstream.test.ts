@@ -23,6 +23,8 @@ async function downstreamServer() {
   const seen: Array<{ tool: string; args: unknown; meta: unknown }> = [];
   let lastAuth = '';
   let delayMs = 0, down = false, flipDestructive = false, mode: 'ok' | 'echo500' | 'redirect' = 'ok', pad = 0;
+  // Which bearer tokens are accepted, and how long the n-th refusal (from 1) takes to arrive.
+  let accepts = (auth: string) => auth === `Bearer ${TOKEN}`, refusals = 0, refuseDelay = (_n: number) => 0;
   const handler = toNodeHandler(createMcpHandler(() => {
     const s = new McpServer({ name: 'shop', version: '1' });
     const record = (tool: string) => async (args: unknown, ctx: any) => {
@@ -41,6 +43,8 @@ async function downstreamServer() {
     s.registerTool('leaky', { description: 'A broken read that echoes the request headers.', inputSchema: z.object({}), annotations: { readOnlyHint: true } },
       async (_a: unknown, ctx: any) => { const auth = String(ctx?.http?.req?.headers?.authorization ?? ctx?.http?.headers?.get?.('authorization') ?? lastAuth);
         return { isError: true, content: [{ type: 'text' as const, text: `failed; request had ${auth}` }], structuredContent: { echoed: auth } }; });
+    s.registerTool('slow_leaky', { description: 'A slow broken read that echoes the token it was called with.', inputSchema: z.object({}), annotations: { readOnlyHint: true } },
+      async () => { const auth = lastAuth; await new Promise(r => setTimeout(r, 300)); return { isError: true, content: [{ type: 'text' as const, text: `failed; request had ${auth}` }] }; });
     s.registerTool('flip', { description: 'Read until it is not.', inputSchema: z.object({}), annotations: flipDestructive ? { readOnlyHint: false } : { readOnlyHint: true } }, record('flip'));
     return s;
   }));
@@ -49,14 +53,15 @@ async function downstreamServer() {
     if (mode === 'redirect') { res.writeHead(307, { location: 'http://127.0.0.1:9/mcp' }).end(); return; }
     // A broken server that echoes the request's Authorization header back in an error body.
     if (mode === 'echo500') { res.writeHead(500, { 'content-type': 'text/plain' }).end('e'.repeat(pad) + ' echo ' + String(req.headers.authorization)); return; }
-    if (req.headers.authorization !== `Bearer ${TOKEN}`) { res.writeHead(401).end(); return; }
-    lastAuth = req.headers.authorization;
+    if (!accepts(String(req.headers.authorization ?? ''))) { setTimeout(() => res.writeHead(401).end(), refuseDelay(++refusals)); return; }
+    lastAuth = String(req.headers.authorization);
     handler(req, res);
   });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', () => r()));
   const url = `http://127.0.0.1:${(http.address() as { port: number }).port}/mcp`;
   return { url, seen, setDelay: (ms: number) => { delayMs = ms; }, setDown: (v: boolean) => { down = v; }, setFlip: (v: boolean) => { flipDestructive = v; },
-    setMode: (m: typeof mode, p = 0) => { mode = m; pad = p; }, close: () => new Promise(r => { http.closeAllConnections?.(); http.close(r); }) };
+    setMode: (m: typeof mode, p = 0) => { mode = m; pad = p; },
+    setAccepts: (f: (auth: string) => boolean, delay: (n: number) => number = () => 0) => { accepts = f; refusals = 0; refuseDelay = delay; }, close: () => new Promise(r => { http.closeAllConnections?.(); http.close(r); }) };
 }
 
 async function world(over: Partial<DownstreamConfig> = {}, env: Record<string, string> = { PANTER_DOWNSTREAM_SHOP_TOKEN: TOKEN }) {
@@ -101,7 +106,7 @@ test('tools are classified the MCP way: destructive unless they say otherwise', 
 test('reads pass through with the token and the calling host; other hosts are refused', async () => {
   const w = await world();
   try {
-    assert.deepEqual(await w.gw.refresh('shop'), { server: 'shop', tools: 8 });
+    assert.deepEqual(await w.gw.refresh('shop'), { server: 'shop', tools: 9 });
     assert.deepEqual(w.gw.tools('shop').slice(0, 4).map(t => [t.name, t.cls]), [['lookup', 'read'], ['set_price', 'write'], ['delete_item', 'destructive'], ['legacy', 'destructive']]);
     const r = await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' });
     assert.equal(text(r), 'lookup ok');
@@ -601,14 +606,14 @@ test('an ordinary server keeps its diagnostics', async () => {
 });
 
 /** A token endpoint for OAuth client credentials that records what it was sent. */
-async function tokenEndpoint(issue: () => { access_token?: string; expires_in?: number; status?: number }) {
+async function tokenEndpoint(issue: () => { access_token?: string; expires_in?: number; status?: number; pad?: number }) {
   const seen: Array<{ auth: string; body: URLSearchParams }> = [];
   const http: Server = createServer((req, res) => {
     let raw = ''; req.on('data', c => { raw += c; });
     req.on('end', () => {
       seen.push({ auth: String(req.headers.authorization ?? ''), body: new URLSearchParams(raw) });
       const t = issue();
-      res.writeHead(t.status ?? 200, { 'content-type': 'application/json' }).end(JSON.stringify({ access_token: t.access_token, token_type: 'Bearer', expires_in: t.expires_in ?? 3600 }));
+      res.writeHead(t.status ?? 200, { 'content-type': 'application/json' }).end(JSON.stringify({ access_token: t.access_token, token_type: 'Bearer', expires_in: t.expires_in ?? 3600, ...(t.pad ? { pad: 'p'.repeat(t.pad) } : {}) }));
     });
   });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', () => r()));
@@ -660,6 +665,52 @@ test('OAuth: form-field client auth, a missing secret, and a refusing token endp
     assert.match(r, /token endpoint answered 401/);
     assert.ok(!r.includes(env.PANTER_DOWNSTREAM_SHOP_SECRET));
   } finally { await refused.done(); await deny.close(); }
+});
+
+const OAUTH_ENV = { PANTER_DOWNSTREAM_SHOP_ID: 'panter client', PANTER_DOWNSTREAM_SHOP_SECRET: 'client secret/0123456789+abc' };
+const oauthOf = (tokenUrl: string) => ({ tokenUrl, clientIdEnv: 'PANTER_DOWNSTREAM_SHOP_ID', clientSecretEnv: 'PANTER_DOWNSTREAM_SHOP_SECRET', scope: null, resource: null, authMethod: 'basic' as const });
+
+test('OAuth: a token renewed during a call stays redacted in that call\'s result', async () => {
+  let n = 0;
+  const te = await tokenEndpoint(() => ({ access_token: `issued-token-${++n}-0123456789`, expires_in: 3600 }));
+  const w = await world({ tokenEnv: null, oauth: oauthOf(te.url) }, OAUTH_ENV);
+  w.ds.setAccepts(a => /^Bearer issued-token-\d+-0123456789$/.test(a));
+  try {
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok');
+    const slow = w.gw.call(claude, 'shop', 'slow_leaky', {});
+    await new Promise(r => setTimeout(r, 100));
+    w.advance(3_541_000); // past the renewal time of the first token, which is still valid
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A2' })), 'lookup ok');
+    assert.equal(te.seen.length, 2, 'the second call renewed the token');
+    const leak = JSON.stringify(await slow);
+    assert.match(leak, /failed; request had/);
+    assert.ok(!leak.includes('issued-token-1-'), 'the older token is still redacted');
+    // Basic credentials are form-encoded (RFC 6749), and neither their encoding nor the secret ever shows.
+    assert.equal(te.seen[0]!.auth, `Basic ${Buffer.from('panter+client:client+secret%2F0123456789%2Babc').toString('base64')}`);
+  } finally { await w.done(); await te.close(); }
+});
+
+test('OAuth: late 401s for a revoked token do not throw away the renewed one', async () => {
+  let n = 0;
+  const te = await tokenEndpoint(() => ({ access_token: `issued-token-${++n}-0123456789`, expires_in: 3600 }));
+  const w = await world({ tokenEnv: null, oauth: oauthOf(te.url) }, OAUTH_ENV);
+  try {
+    w.ds.setAccepts(a => /^Bearer issued-token-\d+-0123456789$/.test(a));
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok');
+    // The first token is revoked. The first refusal arrives at once, the others after the renewal.
+    w.ds.setAccepts(a => /^Bearer issued-token-\d+-0123456789$/.test(a) && a !== 'Bearer issued-token-1-0123456789', k => k === 1 ? 0 : 300);
+    const results = await Promise.all(['B1', 'B2', 'B3', 'B4'].map(sku => w.gw.call(claude, 'shop', 'lookup', { sku })));
+    assert.deepEqual(results.map(text), ['lookup ok', 'lookup ok', 'lookup ok', 'lookup ok']);
+    assert.equal(te.seen.length, 2, 'one renewal for the whole burst');
+  } finally { await w.done(); await te.close(); }
+});
+
+test('OAuth: an oversized token endpoint answer is refused without being buffered', async () => {
+  const te = await tokenEndpoint(() => ({ access_token: TOKEN, pad: 200_000 }));
+  const w = await world({ tokenEnv: null, oauth: oauthOf(te.url) }, OAUTH_ENV);
+  try {
+    assert.match(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), /token endpoint answer larger than 64000 bytes/);
+  } finally { await w.done(); await te.close(); }
 });
 
 test('OAuth config is validated strictly', () => {
