@@ -599,3 +599,78 @@ test('an ordinary server keeps its diagnostics', async () => {
     assert.ok(w.gw.audit(operator).every(a => /^[0-9a-f]{64}$/.test(a.argsSha256 ?? '') && !a.sensitive));
   } finally { w.ds.setMode('ok'); await w.done(); }
 });
+
+/** A token endpoint for OAuth client credentials that records what it was sent. */
+async function tokenEndpoint(issue: () => { access_token?: string; expires_in?: number; status?: number }) {
+  const seen: Array<{ auth: string; body: URLSearchParams }> = [];
+  const http: Server = createServer((req, res) => {
+    let raw = ''; req.on('data', c => { raw += c; });
+    req.on('end', () => {
+      seen.push({ auth: String(req.headers.authorization ?? ''), body: new URLSearchParams(raw) });
+      const t = issue();
+      res.writeHead(t.status ?? 200, { 'content-type': 'application/json' }).end(JSON.stringify({ access_token: t.access_token, token_type: 'Bearer', expires_in: t.expires_in ?? 3600 }));
+    });
+  });
+  await new Promise<void>(r => http.listen(0, '127.0.0.1', () => r()));
+  return { url: `http://127.0.0.1:${(http.address() as { port: number }).port}/oidc/token`, seen, close: () => new Promise(r => http.close(r)) };
+}
+
+test('OAuth client credentials: Panter gets a token, renews it when refused, and never shows it', async () => {
+  let issued = 0;
+  // The first token is stale (the server refuses it); the next one is good.
+  const te = await tokenEndpoint(() => ({ access_token: issued++ === 0 ? 'stale-token-000000000000' : TOKEN, expires_in: 3600 }));
+  const env = { PANTER_DOWNSTREAM_SHOP_ID: 'panter-client', PANTER_DOWNSTREAM_SHOP_SECRET: 'client-secret-0123456789abcdef' };
+  const w = await world({ tokenEnv: null, oauth: { tokenUrl: te.url, clientIdEnv: 'PANTER_DOWNSTREAM_SHOP_ID', clientSecretEnv: 'PANTER_DOWNSTREAM_SHOP_SECRET',
+    scope: 'mcp:use', resource: 'https://mcp.example/mercadolibre/mcp', authMethod: 'basic' } }, env);
+  try {
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok');
+    assert.equal(te.seen.length, 2, 'the refused token was renewed once');
+    const first = te.seen[0]!;
+    assert.equal(first.auth, `Basic ${Buffer.from('panter-client:client-secret-0123456789abcdef').toString('base64')}`);
+    assert.deepEqual([first.body.get('grant_type'), first.body.get('scope'), first.body.get('resource')], ['client_credentials', 'mcp:use', 'https://mcp.example/mercadolibre/mcp']);
+    // The token is cached: more calls ask the endpoint for nothing.
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A2' })), 'lookup ok');
+    assert.equal(te.seen.length, 2);
+    // Neither the token nor the client secret ever reaches the host.
+    const leak: any = await w.gw.call(claude, 'shop', 'leaky', {});
+    assert.ok(!JSON.stringify(leak).includes(TOKEN) && !JSON.stringify(leak).includes(env.PANTER_DOWNSTREAM_SHOP_SECRET));
+    assert.equal(w.gw.status(claude)[0]!.state, 'OK');
+  } finally { await w.done(); await te.close(); }
+});
+
+test('OAuth: form-field client auth, a missing secret, and a refusing token endpoint', async () => {
+  const te = await tokenEndpoint(() => ({ access_token: TOKEN }));
+  const env = { PANTER_DOWNSTREAM_SHOP_ID: 'panter-client', PANTER_DOWNSTREAM_SHOP_SECRET: 'client-secret-0123456789abcdef' };
+  const oauth = { tokenUrl: te.url, clientIdEnv: 'PANTER_DOWNSTREAM_SHOP_ID', clientSecretEnv: 'PANTER_DOWNSTREAM_SHOP_SECRET', scope: null, resource: null, authMethod: 'post' as const };
+  const w = await world({ tokenEnv: null, oauth }, env);
+  try {
+    assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok');
+    assert.equal(te.seen[0]!.auth, '');
+    assert.deepEqual([te.seen[0]!.body.get('client_id'), te.seen[0]!.body.get('client_secret')], ['panter-client', env.PANTER_DOWNSTREAM_SHOP_SECRET]);
+  } finally { await w.done(); }
+  const missing = await world({ tokenEnv: null, oauth }, { PANTER_DOWNSTREAM_SHOP_ID: 'panter-client' });
+  try {
+    assert.match(text(await missing.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), /PANTER_DOWNSTREAM_SHOP_SECRET is not set/);
+    assert.equal(missing.gw.status(claude)[0]!.state, 'TOKEN_MISSING');
+  } finally { await missing.done(); await te.close(); }
+  const deny = await tokenEndpoint(() => ({ status: 401 }));
+  const refused = await world({ tokenEnv: null, oauth: { ...oauth, tokenUrl: deny.url } }, env);
+  try {
+    const r = text(await refused.gw.call(claude, 'shop', 'lookup', { sku: 'A1' }));
+    assert.match(r, /token endpoint answered 401/);
+    assert.ok(!r.includes(env.PANTER_DOWNSTREAM_SHOP_SECRET));
+  } finally { await refused.done(); await deny.close(); }
+});
+
+test('OAuth config is validated strictly', () => {
+  const base = { name: 'shop', url: 'https://mcp.example/mcp' };
+  const oauth = { tokenUrl: 'https://mcp.example/oidc/token', clientIdEnv: 'PANTER_DOWNSTREAM_ID', clientSecretEnv: 'PANTER_DOWNSTREAM_SECRET' };
+  const parse = (s: object) => parseDownstreamConfig(JSON.stringify({ servers: [{ ...base, ...s }] }), HOSTS)[0]!;
+  assert.deepEqual(parse({ oauth }).oauth, { ...oauth, scope: null, resource: null, authMethod: 'basic' });
+  assert.equal(parse({}).oauth, undefined);
+  for (const [s, why] of [
+    [{ oauth, tokenEnv: 'PANTER_DOWNSTREAM_X' }, /not both/], [{ oauth: { ...oauth, tokenUrl: 'http://example.com/t' } }, /tokenUrl/],
+    [{ oauth: { ...oauth, clientIdEnv: 'HOME' } }, /clientIdEnv/], [{ oauth: { ...oauth, extra: 1 } }, /unknown oauth field/],
+    [{ oauth: { ...oauth, authMethod: 'jwt' } }, /authMethod/], [{ oauth: 'x' }, /must be an object/],
+  ] as const) assert.throws(() => parse(s), why);
+});

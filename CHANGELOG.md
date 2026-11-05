@@ -2,6 +2,11 @@
 
 All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://semver.org/). Releases before 1.0 are described in [docs/HISTORY.md](docs/HISTORY.md).
 
+## 1.2.0 (2026-11-05)
+
+### Downstream gateway
+- OAuth client credentials for downstream servers (`oauth` in the config): cached token, renewed before expiry and once on a 401, never shown. Needed to mount servers that only accept OAuth, such as commerce-control.
+
 ## 1.1.0 (2026-11-04)
 
 ### Downstream gateway

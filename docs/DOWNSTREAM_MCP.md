@@ -14,7 +14,7 @@ host (Claude, GPT, Grok, Gemini) ──MCP/OAuth──▶ Panter ──MCP + tok
 ## Contract for a downstream server
 
 - Serve MCP over Streamable HTTP. Plain `http` is accepted only to `localhost` or a literal private address (`127.0.0.0/8`, 10/8, 172.16/12, 192.168/16, `::1`, `fc00::/7`); a host name is never treated as private, so anything else must be `https`. The URL carries no user, password or query string. Redirects are refused, so the token only ever goes to the configured address.
-- Require a bearer token. Panter reads it from an environment variable named `PANTER_DOWNSTREAM_*` (in `etc/panter.env`); the config file only names the variable.
+- Require a bearer token. Either a fixed token, which Panter reads from an environment variable named `PANTER_DOWNSTREAM_*` (in `etc/panter.env`), or OAuth client credentials (see `oauth` below). The config file only names the variables.
 - Annotate every tool. Panter follows the MCP defaults:
   - `readOnlyHint: true` → **read**
   - `destructiveHint: false` → **write**
@@ -49,7 +49,8 @@ Create a JSON file and point `PANTER_DOWNSTREAM_CONFIG` at it (for example `~/pa
 |---|---|
 | `name` | 2-24 lowercase letters or digits. The router is `panter_ds_<name>`. |
 | `url` | The server's MCP endpoint (see the address rule above). |
-| `tokenEnv` | Optional. Name of the `PANTER_DOWNSTREAM_*` variable that holds the token. |
+| `tokenEnv` | Optional. Name of the `PANTER_DOWNSTREAM_*` variable that holds a fixed token. |
+| `oauth` | Optional, instead of `tokenEnv`: OAuth client credentials. `tokenUrl` (same address rule as `url`), `clientIdEnv` and `clientSecretEnv` (`PANTER_DOWNSTREAM_*` variables), and optionally `scope`, `resource` (the RFC 8707 resource indicator, for servers that bind tokens to their MCP URL) and `authMethod` (`basic`, the default, or `post`). Panter asks for a token, caches it until a minute before it expires, and renews it once when the server answers 401. Neither the token nor the client secret appears in errors, results or the audit. |
 | `hosts` | Hosts that may use it (and see its router). The operator always may. Default: none. |
 | `writes` | `deny`: no write or destructive call through Panter. `grant` (default): a host needs an operator grant. `allow`: allowed hosts write without a grant (only for servers whose own approvals are enough). |
 | `timeoutMs` | Per call, 1000-300000. Default 30000. |

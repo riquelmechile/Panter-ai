@@ -23,8 +23,15 @@ import { ACTOR_TTL_SECONDS, ActorSigner, argsDigest, type ActorRole } from './ac
 
 export type WritePolicy = 'deny' | 'grant' | 'allow';
 export type ToolClass = 'read' | 'write' | 'destructive';
+export type DownstreamOAuth = {
+  tokenUrl: string; clientIdEnv: string; clientSecretEnv: string; scope: string | null; resource: string | null;
+  /** How the client authenticates at the token endpoint: HTTP Basic (default) or form fields. */
+  authMethod: 'basic' | 'post';
+};
 export type DownstreamConfig = {
   name: string; url: string; tokenEnv: string | null; hosts: string[]; writes: WritePolicy; timeoutMs: number; description: string;
+  /** OAuth client credentials instead of a fixed token: Panter gets (and renews) a bearer token from tokenUrl. */
+  oauth?: DownstreamOAuth | null;
   /** Proxy only: keep no content of this server's calls (no argument hash, no error text) and make the mission sensitive. */
   sensitive: boolean;
 };
@@ -114,7 +121,7 @@ export function parseDownstreamConfig(text: string, knownHosts: readonly string[
   return list.map((s: any, i) => {
     const where = `Downstream config server ${i + 1}`;
     if (!s || typeof s !== 'object') throw new Error(`${where}: not an object`);
-    const allowed = new Set(['name', 'url', 'tokenEnv', 'hosts', 'writes', 'timeoutMs', 'description', 'sensitive']);
+    const allowed = new Set(['name', 'url', 'tokenEnv', 'oauth', 'hosts', 'writes', 'timeoutMs', 'description', 'sensitive']);
     for (const k of Object.keys(s)) if (!allowed.has(k)) throw new Error(`${where}: unknown field "${k}"`);
     if (typeof s.name !== 'string' || !NAME.test(s.name)) throw new Error(`${where}: name must be 2-24 lowercase letters or digits`);
     if (seen.has(s.name)) throw new Error(`${where}: duplicate name ${s.name}`); seen.add(s.name);
@@ -130,8 +137,20 @@ export function parseDownstreamConfig(text: string, knownHosts: readonly string[
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 300_000) throw new Error(`${where}: timeoutMs must be 1000-300000`);
     if (s.description !== undefined && (typeof s.description !== 'string' || s.description.length > 300)) throw new Error(`${where}: description too long`);
     if (s.sensitive !== undefined && typeof s.sensitive !== 'boolean') throw new Error(`${where}: sensitive must be true or false`);
+    let oauth: DownstreamOAuth | null = null;
+    if (s.oauth !== undefined) {
+      const o = s.oauth;
+      if (s.tokenEnv !== undefined) throw new Error(`${where}: use tokenEnv or oauth, not both`);
+      if (!o || typeof o !== 'object' || Array.isArray(o)) throw new Error(`${where}: oauth must be an object`);
+      for (const k of Object.keys(o)) if (!['tokenUrl', 'clientIdEnv', 'clientSecretEnv', 'scope', 'resource', 'authMethod'].includes(k)) throw new Error(`${where}: unknown oauth field "${k}"`);
+      if (typeof o.tokenUrl !== 'string' || !allowedUrl(o.tokenUrl)) throw new Error(`${where}: oauth.tokenUrl must be https, or http to localhost or a private address`);
+      for (const k of ['clientIdEnv', 'clientSecretEnv']) if (typeof o[k] !== 'string' || !TOKEN_ENV.test(o[k])) throw new Error(`${where}: oauth.${k} must be a PANTER_DOWNSTREAM_* variable name`);
+      for (const k of ['scope', 'resource']) if (o[k] !== undefined && (typeof o[k] !== 'string' || !o[k] || o[k].length > 500)) throw new Error(`${where}: oauth.${k} must be a short string`);
+      if (o.authMethod !== undefined && o.authMethod !== 'basic' && o.authMethod !== 'post') throw new Error(`${where}: oauth.authMethod must be basic or post`);
+      oauth = { tokenUrl: o.tokenUrl, clientIdEnv: o.clientIdEnv, clientSecretEnv: o.clientSecretEnv, scope: o.scope ?? null, resource: o.resource ?? null, authMethod: o.authMethod ?? 'basic' };
+    }
     return { name: s.name, url: s.url, tokenEnv: s.tokenEnv ?? null, hosts: [...new Set<string>(hosts)], writes, timeoutMs, description: s.description ?? '',
-      sensitive: s.sensitive ?? false };
+      sensitive: s.sensitive ?? false, ...(oauth ? { oauth } : {}) };
   });
 }
 
@@ -145,6 +164,8 @@ type ServerState = {
   config: DownstreamConfig; tools: DownstreamTool[]; fetchedAt: string | null; fetchedMs: number; failures: number; openUntil: number;
   lastError: string | null; client: Promise<Client> | null; refreshing: Promise<{ server: string; tools: number }> | null;
   refreshFailedMs: number; refreshError: string | null; cutCalls: Set<string>;
+  /** OAuth: the current access token and when to renew it, and the request already getting one. */
+  oauthToken: { value: string; renewAt: number } | null; oauthFetch: Promise<string> | null;
 };
 /** Who is calling: the authenticated host (or "admin"), whether it is the operator, and its Panter role. */
 export type Caller = { id: string; operator: boolean; role?: ActorRole };
@@ -154,7 +175,7 @@ export class DownstreamGateway {
   private readonly servers = new Map<string, ServerState>();
   constructor(configs: DownstreamConfig[], private readonly db: SqliteLedger | null,
     private readonly env: Record<string, string | undefined> = process.env, private readonly now: () => number = Date.now) {
-    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null, refreshFailedMs: 0, refreshError: null, cutCalls: new Set() });
+    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null, refreshFailedMs: 0, refreshError: null, cutCalls: new Set(), oauthToken: null, oauthFetch: null });
     // Load the sensitive missions now, so the checks other stores run inside their own transactions read no database.
     if (this.db) this.sensitiveSet();
   }
@@ -172,15 +193,64 @@ export class DownstreamGateway {
     return s;
   }
   private token(s: ServerState): string | null { return s.config.tokenEnv ? this.env[s.config.tokenEnv] ?? null : null; }
+  /** The credential variable that is required but not set, if any. */
+  private missingCredential(s: ServerState): string | null {
+    if (s.config.tokenEnv) return this.token(s) ? null : s.config.tokenEnv;
+    const o = s.config.oauth;
+    if (o) for (const k of [o.clientIdEnv, o.clientSecretEnv]) if (!this.env[k]) return k;
+    return null;
+  }
+  /** OAuth client credentials: a cached access token, renewed a minute before it expires (or when refused). */
+  private async oauthToken(s: ServerState): Promise<string> {
+    const o = s.config.oauth!;
+    if (s.oauthToken && this.now() < s.oauthToken.renewAt) return s.oauthToken.value;
+    if (s.oauthFetch) return s.oauthFetch;
+    const id = this.env[o.clientIdEnv]!, secret = this.env[o.clientSecretEnv]!;
+    s.oauthFetch = (async () => {
+      const body = new URLSearchParams({ grant_type: 'client_credentials' });
+      if (o.scope) body.set('scope', o.scope);
+      if (o.resource) body.set('resource', o.resource);
+      const headers: Record<string, string> = { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' };
+      if (o.authMethod === 'post') { body.set('client_id', id); body.set('client_secret', secret); }
+      else headers.authorization = `Basic ${Buffer.from(`${encodeURIComponent(id)}:${encodeURIComponent(secret)}`).toString('base64')}`;
+      const res = await fetch(o.tokenUrl, { method: 'POST', headers, body, redirect: 'error', signal: AbortSignal.timeout(s.config.timeoutMs) });
+      const text = (await res.text()).slice(0, 64_000);
+      if (!res.ok) throw new Error(`token endpoint answered ${res.status}`);
+      let json: any;
+      try { json = JSON.parse(text); } catch { throw new Error('token endpoint answered without JSON'); }
+      if (typeof json?.access_token !== 'string' || !json.access_token || String(json.token_type ?? 'bearer').toLowerCase() !== 'bearer')
+        throw new Error('token endpoint gave no bearer access_token');
+      const life = Number.isFinite(json.expires_in) && json.expires_in > 0 ? json.expires_in * 1000 : 300_000;
+      s.oauthToken = { value: json.access_token, renewAt: this.now() + Math.max(life - 60_000, life / 2) };
+      return json.access_token as string;
+    })().finally(() => { s.oauthFetch = null; });
+    return s.oauthFetch;
+  }
   private connect(s: ServerState): Promise<Client> {
     if (s.client) return s.client;
+    const missing = this.missingCredential(s);
+    if (missing) return Promise.reject(new Error(`${missing} is not set`));
     const token = this.token(s);
-    if (s.config.tokenEnv && !token) return Promise.reject(new Error(`${s.config.tokenEnv} is not set`));
     const attempt = (async () => {
       const client = new Client({ name: 'panter-ai-gateway', version: '1.0.0' });
       // No redirects (the token is only ever sent to the configured address) and bounded responses.
+      const limited = limitedFetch(id => { if (id && s.cutCalls.size < 1000) s.cutCalls.add(id); });
+      // OAuth: each request carries the current token; a 401 renews it once (a token can expire or be revoked early).
+      const oauthFetch = async (url: string | URL, init?: RequestInit) => {
+        const send = async () => {
+          const headers = new Headers(init?.headers);
+          headers.set('authorization', `Bearer ${await this.oauthToken(s)}`);
+          return limited(url, { ...init, headers });
+        };
+        const first = await send();
+        if (first.status !== 401) return first;
+        await first.body?.cancel().catch(() => undefined);
+        s.oauthToken = null;
+        return send();
+      };
       const transport = new StreamableHTTPClientTransport(new URL(s.config.url),
-        { fetch: limitedFetch(id => { if (id && s.cutCalls.size < 1000) s.cutCalls.add(id); }) as any, requestInit: token ? { headers: { authorization: `Bearer ${token}` } } : {} });
+        s.config.oauth ? { fetch: oauthFetch as any }
+          : { fetch: limited as any, requestInit: token ? { headers: { authorization: `Bearer ${token}` } } : {} });
       let timer: NodeJS.Timeout | undefined;
       try {
         await Promise.race([client.connect(transport), new Promise((_, no) => { timer = setTimeout(() => no(new Error('connect timed out')), s.config.timeoutMs); })]);
@@ -199,7 +269,14 @@ export class DownstreamGateway {
     which.then(x => x.close()).catch(() => undefined);
   }
   private readonly failedConnections = new WeakSet<Promise<Client>>();
-  private secrets(s: ServerState): string[] { const t = this.token(s); return t ? [`Bearer ${t}`, t] : []; }
+  private secrets(s: ServerState): string[] {
+    const out: string[] = [];
+    const t = this.token(s); if (t) out.push(`Bearer ${t}`, t);
+    if (s.oauthToken) out.push(`Bearer ${s.oauthToken.value}`, s.oauthToken.value);
+    const o = s.config.oauth;
+    if (o) for (const k of [o.clientSecretEnv]) { const v = this.env[k]; if (v) out.push(v); }
+    return out;
+  }
   /** The text of an error that may be shown and stored: cleaned, or for a sensitive server only its kind (a
    * downstream error message can echo the call's content). */
   private describe(s: ServerState, error: unknown): string {
@@ -280,7 +357,7 @@ export class DownstreamGateway {
     return this.names().filter(n => this.allowed(caller, n)).map(n => {
       const s = this.state(n);
       return { server: n, description: s.config.description, writes: s.config.writes, sensitive: s.config.sensitive, hosts: s.config.hosts, timeoutMs: s.config.timeoutMs,
-        state: s.config.tokenEnv && !this.token(s) ? 'TOKEN_MISSING' : t < s.openUntil ? 'CIRCUIT_OPEN' : s.lastError ? 'DEGRADED' : s.fetchedAt ? 'OK' : 'NOT_CONTACTED',
+        state: this.missingCredential(s) ? 'TOKEN_MISSING' : t < s.openUntil ? 'CIRCUIT_OPEN' : s.lastError ? 'DEGRADED' : s.fetchedAt ? 'OK' : 'NOT_CONTACTED',
         tools: s.tools.length, byClass: { read: s.tools.filter(x => x.cls === 'read').length, write: s.tools.filter(x => x.cls === 'write').length,
           destructive: s.tools.filter(x => x.cls === 'destructive').length },
         fetchedAt: s.fetchedAt, failures: s.failures, openUntil: t < s.openUntil ? iso(s.openUntil) : null, lastError: s.lastError,
