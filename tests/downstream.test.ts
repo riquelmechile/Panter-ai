@@ -102,7 +102,7 @@ test('reads pass through with the token and the calling host; other hosts are re
     assert.deepEqual(w.gw.tools('shop').slice(0, 4).map(t => [t.name, t.cls]), [['lookup', 'read'], ['set_price', 'write'], ['delete_item', 'destructive'], ['legacy', 'destructive']]);
     const r = await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' });
     assert.equal(text(r), 'lookup ok');
-    assert.deepEqual(w.ds.seen[0], { tool: 'lookup', args: { sku: 'A1' }, meta: { 'panter-ai/host': 'claude' } });
+    assert.deepEqual({ ...w.ds.seen[0], meta: { ...(w.ds.seen[0]!.meta as any), 'panter-ai/callId': undefined } }, { tool: 'lookup', args: { sku: 'A1' }, meta: { 'panter-ai/host': 'claude', 'panter-ai/callId': undefined } });
     const no = await w.gw.call(grok, 'shop', 'lookup', { sku: 'A1' });
     assert.equal(no.isError, true); assert.match(text(no), /may not use/);
     assert.equal(w.ds.seen.length, 1, 'a refused call never reaches the server');
@@ -123,7 +123,7 @@ test('writes need a grant for that host and tool; destructive tools must be name
     assert.match(text(await w.gw.call(claude, 'shop', 'delete_item', { sku: 'A1' }, g.id)), /destructive tools must be named/);
     const ok = await w.gw.call(claude, 'shop', 'set_price', { sku: 'A1', price: 5 }, g.id);
     assert.equal(text(ok), 'set_price ok');
-    assert.deepEqual(w.ds.seen.at(-1)!.meta, { 'panter-ai/host': 'claude', 'panter-ai/grantId': g.id });
+    assert.deepEqual({ ...(w.ds.seen.at(-1)!.meta as any), 'panter-ai/callId': undefined }, { 'panter-ai/host': 'claude', 'panter-ai/grantId': g.id, 'panter-ai/callId': undefined });
     assert.match(text(await w.gw.call(claude, 'shop', 'set_price', { sku: 'A1', price: 6 }, g.id)), /used up/);
     const named = w.gw.grant({ server: 'shop', tools: ['delete_item'], host: 'claude', ttlSeconds: 60, uses: 5, reason: 'cleanup' });
     assert.equal(text(await w.gw.call(claude, 'shop', 'delete_item', { sku: 'A1' }, named.id)), 'delete_item ok');
@@ -244,7 +244,7 @@ test('end to end: the built server mounts a downstream server for the hosts its 
     const peek = await grokClient.callTool({ name: 'panter_ds_shop', arguments: { operation: 'index' } });
     assert.equal(peek.isError, true); assert.match(text(peek), /may not use/);
     assert.equal(text(await lead.callTool({ name: 'panter_ds_shop', arguments: { operation: 'lookup', arguments: { sku: 'A1' } } })), 'lookup ok');
-    assert.deepEqual(ds.seen.at(-1)!.meta, { 'panter-ai/host': 'claude' });
+    assert.equal((ds.seen.at(-1)!.meta as any)['panter-ai/host'], 'claude');
     assert.match(text(await lead.callTool({ name: 'panter_ds_shop', arguments: { operation: 'set_price', arguments: { sku: 'A1', price: 2 } } })), /needs a grantId/);
     assert.match(text(await grokClient.callTool({ name: 'panter_ds_shop', arguments: { operation: 'lookup', arguments: { sku: 'A1' } } })), /may not use/);
     assert.match(text(await lead.callTool({ name: 'panter_downstream_grant', arguments: { server: 'shop', host: 'claude', tools: '*', reason: 'x' } })), /Operator/);
@@ -404,4 +404,24 @@ test('after a failed tool-list fetch, calls fail fast for a while instead of eac
     w.advance(11_000);
     assert.equal(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), 'lookup ok', 'asks again after the retry delay');
   } finally { w.ds.setDown(false); await w.done(); }
+});
+
+test('an oversized answer is pinned on its own call: real timeouts of other calls still count', async () => {
+  const w = await world({ timeoutMs: 1500, hosts: ['claude', 'grok'] });
+  try {
+    await w.gw.refresh('shop');
+    const [big, ...slow] = await Promise.all([w.gw.call(claude, 'shop', 'huge', { bytes: 5_000_000 }),
+      ...[1, 2, 3].map(() => w.gw.call(grok, 'shop', 'slow', {}))]);
+    assert.match(text(big), /larger than/);
+    assert.ok(slow.every(r => r.isError && !/larger than/.test(text(r))), JSON.stringify(slow.map(text)));
+    assert.equal(w.gw.status(claude)[0]!.state, 'CIRCUIT_OPEN', 'the three real timeouts opened the circuit');
+  } finally { await w.done(); }
+});
+
+test('redaction reaches any depth of a result', async () => {
+  const { redactDeep } = await import('../src/core/downstream.js');
+  let deep: any = `Bearer ${TOKEN}`;
+  for (let i = 0; i < 60; i++) deep = { x: [deep] };
+  const out = JSON.stringify(redactDeep({ structuredContent: deep, content: [{ type: 'text', text: `a "${TOKEN}" b` }] }, [`Bearer ${TOKEN}`, TOKEN]));
+  assert.ok(!out.includes(TOKEN)); assert.match(out, /redacted/);
 });

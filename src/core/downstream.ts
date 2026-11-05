@@ -44,14 +44,20 @@ export const clean = (e: unknown, secrets: string[] = []) => {
   for (const x of secrets) if (x) s = s.split(x).join('[redacted]');
   return s.replace(/\s+/g, ' ').slice(0, 300);
 };
-/** fetch that refuses redirects and stops reading a response past MAX_RESPONSE_BYTES (and says so through `cut`). */
-const limitedFetch = (cut: () => void) => async (url: string | URL, init?: RequestInit): Promise<Response> => {
+/** The call a request belongs to: guarded() puts its own id in the request's _meta. */
+const callIdOf = (body: unknown): string | null => {
+  if (typeof body !== 'string' || body.length > 1_000_000) return null;
+  try { const id = JSON.parse(body)?.params?._meta?.['panter-ai/callId']; return typeof id === 'string' ? id : null; } catch { return null; }
+};
+/** fetch that refuses redirects and stops reading a response past MAX_RESPONSE_BYTES, telling `cut` which call it was. */
+const limitedFetch = (cut: (callId: string | null) => void) => async (url: string | URL, init?: RequestInit): Promise<Response> => {
+  const callId = callIdOf(init?.body);
   const res = await fetch(url, { ...init, redirect: 'error' });
   if (!res.body) return res;
   let seen = 0;
   const cap = new TransformStream<Uint8Array, Uint8Array>({ transform(chunk, ctl) {
     seen += chunk.byteLength;
-    if (seen > MAX_RESPONSE_BYTES) { cut(); ctl.error(new Error(`response larger than ${MAX_RESPONSE_BYTES} bytes`)); } else ctl.enqueue(chunk);
+    if (seen > MAX_RESPONSE_BYTES) { cut(callId); ctl.error(new Error(`response larger than ${MAX_RESPONSE_BYTES} bytes`)); } else ctl.enqueue(chunk);
   } });
   return new Response(res.body.pipeThrough(cap), { status: res.status, statusText: res.statusText, headers: res.headers });
 };
@@ -115,7 +121,7 @@ export function classify(annotations: { readOnlyHint?: unknown; destructiveHint?
 type ServerState = {
   config: DownstreamConfig; tools: DownstreamTool[]; fetchedAt: string | null; fetchedMs: number; failures: number; openUntil: number;
   lastError: string | null; client: Promise<Client> | null; refreshing: Promise<{ server: string; tools: number }> | null;
-  refreshFailedMs: number; refreshError: string | null; cutMs: number;
+  refreshFailedMs: number; refreshError: string | null; cutCalls: Set<string>;
 };
 export type Caller = { id: string; operator: boolean };
 
@@ -123,7 +129,7 @@ export class DownstreamGateway {
   private readonly servers = new Map<string, ServerState>();
   constructor(configs: DownstreamConfig[], private readonly db: SqliteLedger | null,
     private readonly env: Record<string, string | undefined> = process.env, private readonly now: () => number = Date.now) {
-    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null, refreshFailedMs: 0, refreshError: null, cutMs: 0 });
+    for (const config of configs) this.servers.set(config.name, { config, tools: [], fetchedAt: null, fetchedMs: 0, failures: 0, openUntil: 0, lastError: null, client: null, refreshing: null, refreshFailedMs: 0, refreshError: null, cutCalls: new Set() });
   }
   get configured(): boolean { return this.servers.size > 0; }
   names(): string[] { return [...this.servers.keys()]; }
@@ -146,7 +152,7 @@ export class DownstreamGateway {
       const client = new Client({ name: 'panter-ai-gateway', version: '1.0.0' });
       // No redirects (the token is only ever sent to the configured address) and bounded responses.
       const transport = new StreamableHTTPClientTransport(new URL(s.config.url),
-        { fetch: limitedFetch(() => { s.cutMs = this.now(); }) as any, requestInit: token ? { headers: { authorization: `Bearer ${token}` } } : {} });
+        { fetch: limitedFetch(id => { if (id && s.cutCalls.size < 1000) s.cutCalls.add(id); }) as any, requestInit: token ? { headers: { authorization: `Bearer ${token}` } } : {} });
       let timer: NodeJS.Timeout | undefined;
       try {
         await Promise.race([client.connect(transport), new Promise((_, no) => { timer = setTimeout(() => no(new Error('connect timed out')), s.config.timeoutMs); })]);
@@ -168,17 +174,18 @@ export class DownstreamGateway {
   private secrets(s: ServerState): string[] { const t = this.token(s); return t ? [`Bearer ${t}`, t] : []; }
   /** Run one transport operation under the circuit breaker. A slow call only fails itself: the shared connection is
    * closed (and a failure counted) only for a broken connection, and only once per connection. */
-  private async guarded<T>(s: ServerState, op: (c: Client) => Promise<T>): Promise<T> {
+  private async guarded<T>(s: ServerState, op: (c: Client, callId: string) => Promise<T>): Promise<T> {
     if (this.now() < s.openUntil) throw new Error(`circuit open until ${iso(s.openUntil)} after ${s.failures} failures: ${s.lastError ?? ''}`);
-    const used = this.connect(s), started = this.now();
+    const used = this.connect(s), callId = randomUUID();
     try {
-      const result = await op(await used);
+      const result = await op(await used, callId);
+      s.cutCalls.delete(callId);
       s.failures = 0; s.lastError = null; s.openUntil = 0;
       return result;
     } catch (error) {
       // An oversized response is the server's answer being refused, not a transport failure (the SDK only notices
       // it at the timeout): it fails this call alone, says why, and counts nothing.
-      if (s.cutMs >= started) throw new Error(`response larger than ${MAX_RESPONSE_BYTES} bytes`);
+      if (s.cutCalls.delete(callId)) throw new Error(`response larger than ${MAX_RESPONSE_BYTES} bytes`);
       const message = clean(error, this.secrets(s));
       // A JSON-RPC error is the server answering: the connection is fine and nothing counts.
       if (error instanceof ProtocolError) throw new Error(message);
@@ -206,11 +213,11 @@ export class DownstreamGateway {
   }
   private async fetchTools(s: ServerState): Promise<{ server: string; tools: number }> {
     const name = s.config.name;
-    const tools = await this.guarded(s, async c => {
+    const tools = await this.guarded(s, async (c, callId) => {
       const out: DownstreamTool[] = [];
       let cursor: string | undefined;
       for (let page = 0; page < 20; page++) {
-        const r = await c.listTools(cursor ? { cursor } : undefined, { timeout: s.config.timeoutMs } as any);
+        const r = await c.listTools({ ...(cursor ? { cursor } : {}), _meta: { 'panter-ai/callId': callId } } as any, { timeout: s.config.timeoutMs } as any);
         for (const t of r.tools) {
           if (out.length >= MAX_TOOLS) break;
           if (typeof t.name !== 'string' || !/^[A-Za-z0-9_.-]{1,64}$/.test(t.name)) continue;
@@ -349,8 +356,8 @@ export class DownstreamGateway {
       }
     }
     try {
-      const result = await this.guarded(s, c => c.callTool({ name: tool, arguments: args,
-        _meta: { ...meta, 'panter-ai/host': caller.id, ...(usedGrant ? { 'panter-ai/grantId': usedGrant } : {}) } } as any,
+      const result = await this.guarded(s, (c, callId) => c.callTool({ name: tool, arguments: args,
+        _meta: { ...meta, 'panter-ai/callId': callId, 'panter-ai/host': caller.id, ...(usedGrant ? { 'panter-ai/grantId': usedGrant } : {}) } } as any,
         { timeout: s.config.timeoutMs } as any));
       if (Buffer.byteLength(JSON.stringify(result)) > MAX_RESULT_BYTES) { finish('FAILED', 'result too large'); return { isError: true, content: [{ type: 'text' as const, text: `${server}.${tool} returned more than ${MAX_RESULT_BYTES} bytes` }] }; }
       finish(result.isError ? 'TOOL_ERROR' : 'OK', null);
@@ -367,11 +374,12 @@ export class DownstreamGateway {
 
 export const routerFor = (name: string) => `panter_ds_${name}`;
 
-/** Every string inside a value with the secrets replaced (bounded depth; other values unchanged). */
-export function redactDeep(value: unknown, secrets: string[], depth = 0): unknown {
-  if (!secrets.length) return value;
-  if (typeof value === 'string') { let s = value; for (const x of secrets) if (x) s = s.split(x).join('[redacted]'); return s; }
-  if (depth > 32 || !value || typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.map(v => redactDeep(v, secrets, depth + 1));
-  return Object.fromEntries(Object.entries(value).map(([k, v]) => [redactDeep(k, secrets, depth + 1) as string, redactDeep(v, secrets, depth + 1)]));
+/** The value with every occurrence of the secrets removed, at any depth: done on its JSON text (raw and as JSON
+ * escapes it), so nothing is left unvisited. */
+export function redactDeep(value: unknown, secrets: string[]): unknown {
+  const list = secrets.filter(Boolean);
+  if (!list.length || value === undefined) return value;
+  let text = JSON.stringify(value);
+  for (const x of list) for (const form of new Set([x, JSON.stringify(x).slice(1, -1)])) text = text.split(form).join('[redacted]');
+  return JSON.parse(text);
 }

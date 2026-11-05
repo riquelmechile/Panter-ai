@@ -19,7 +19,7 @@ host (Claude, GPT, Grok, Gemini) ──MCP/OAuth──▶ Panter ──MCP + tok
   - `destructiveHint: false` → **write**
   - anything else, including no annotations → **destructive**
 - Keep your own approvals (for example a `proposal_hash` the caller must echo back). Panter's grant is a second lock on top, never a replacement.
-- Each call carries `_meta["panter-ai/host"]` (the calling host) and, for granted calls, `_meta["panter-ai/grantId"]`. Use them for your own logs; they are informative, not authentication.
+- Each call carries `_meta["panter-ai/host"]` (the calling host), `_meta["panter-ai/callId"]` (Panter's id for the request) and, for granted calls, `_meta["panter-ai/grantId"]`. Use them for your own logs; they are informative, not authentication.
 - Panter stops reading any single response past 4 MB and refuses a result over 2 MB. A tool's input schema over 64 KB is shown as a plain object.
 
 The reference hosting is the same VM as Panter: one Unix user and one `systemd --user` service per downstream server, listening on a localhost port.
@@ -86,7 +86,7 @@ panter_downstream_revoke { "grantId": "…" }
 ## Health, failures and audit
 
 - `panter_downstream_status`: per server you may use, `OK`, `DEGRADED` (the last call failed), `CIRCUIT_OPEN`, `TOKEN_MISSING` or `NOT_CONTACTED`, with tool counts by class.
-- Three transport failures in a row (timeouts, broken connections) open the circuit for 30 seconds: calls fail fast instead of piling up. A slow call that times out fails alone and never closes the connection other calls are using; calls that fail together because one connection broke count once. Any success resets the count. Tool errors (`isError`) and JSON-RPC errors are the server answering, not transport failures: they count nothing and keep the connection. An answer over 4 MB fails its own call with that reason and counts nothing either.
+- Three transport failures in a row (timeouts, broken connections) open the circuit for 30 seconds: calls fail fast instead of piling up. A slow call that times out fails alone and never closes the connection other calls are using; calls that fail together because one connection broke count once. Any success resets the count. Tool errors (`isError`) and JSON-RPC errors are the server answering, not transport failures: they count nothing and keep the connection. An answer over 4 MB fails its own call (each request carries its own id in `_meta["panter-ai/callId"]`, so a cut is never blamed on another call) with that reason, once the call's timeout runs out, and counts nothing either.
 - `panter_downstream_audit` (leader or operator): for the servers the caller may use, the grants and the last 2000 calls with host, tool, class, grant, outcome (`OK`, `TOOL_ERROR`, `REFUSED`, `FAILED`), duration and error. Arguments are stored only as a keyed hash (HMAC-SHA-256 with a key kept in the ledger), so short values cannot be guessed back. The audit and the grants live in the SQLite ledger (`downstream`), so they are in every backup.
 - Neither error messages nor results include the token: it is removed from the whole error text (also as `Bearer <token>`) before the text is shortened, and from every string of a result before it reaches the host.
 
