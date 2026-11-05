@@ -62,6 +62,8 @@ export class NativeSubagentReview {
     });
     this.chain=p.then(()=>undefined,()=>undefined);return p;
   }
+  /** The mission a review belongs to, or null for an unknown review. */
+  async missionOf(reviewId:string):Promise<string|null>{return this.read(d=>d.reviews.find(r=>r.id===reviewId)?.missionId??null);}
   async create(input:{missionId:string;kind:ReviewKind;objective:string;candidateSha:string;idempotencyKey:string}){
     requireValid(input.missionId.trim().length>0&&input.missionId.length<=120,'Invalid mission');
     requireValid(input.objective.trim().length>0&&input.objective.length<=6000,'Invalid objective');

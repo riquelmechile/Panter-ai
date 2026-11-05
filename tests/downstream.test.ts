@@ -13,6 +13,7 @@ import * as z from 'zod/v4';
 import { DownstreamGateway, classify, parseDownstreamConfig, type DownstreamConfig } from '../src/core/downstream.js';
 import { createToolSurface } from '../src/core/tool-surface.js';
 import { SqliteLedger } from '../src/core/sqlite-ledger.js';
+import { verifyActorAssertion } from '../src/core/actor-assertion.js';
 
 const HOSTS = ['gpt-a', 'gpt-b', 'grok', 'gemini', 'claude'] as const;
 const TOKEN = 'downstream-test-token-0123456789';
@@ -61,17 +62,17 @@ async function downstreamServer() {
 async function world(over: Partial<DownstreamConfig> = {}, env: Record<string, string> = { PANTER_DOWNSTREAM_SHOP_TOKEN: TOKEN }) {
   const ds = await downstreamServer();
   const dir = await mkdtemp(join(tmpdir(), 'panter-ds-'));
-  const config: DownstreamConfig = { name: 'shop', url: ds.url, tokenEnv: 'PANTER_DOWNSTREAM_SHOP_TOKEN', hosts: ['claude'], writes: 'grant', timeoutMs: 2000, description: 'test shop', ...over };
+  const config: DownstreamConfig = { name: 'shop', url: ds.url, tokenEnv: 'PANTER_DOWNSTREAM_SHOP_TOKEN', hosts: ['claude'], writes: 'grant', timeoutMs: 2000, description: 'test shop', sensitive: false, ...over };
   let clock = Date.now();
   const gw = new DownstreamGateway([config], SqliteLedger.open(dir), env, () => clock);
-  return { ds, gw, advance: (ms: number) => { clock += ms; }, done: async () => { await gw.close(); await ds.close(); await rm(dir, { recursive: true, force: true }); } };
+  return { ds, gw, dir, config, env, now: () => clock, advance: (ms: number) => { clock += ms; }, done: async () => { await gw.close(); await ds.close(); await rm(dir, { recursive: true, force: true }); } };
 }
 const text = (r: any) => r.content?.[0]?.text as string;
 const claude = { id: 'claude', operator: false }, grok = { id: 'grok', operator: false }, operator = { id: 'admin', operator: true };
 
 test('config is validated strictly: names, addresses, token variables and hosts', () => {
   const ok = parseDownstreamConfig(JSON.stringify({ servers: [{ name: 'shop', url: 'http://127.0.0.1:18100/mcp', tokenEnv: 'PANTER_DOWNSTREAM_SHOP', hosts: ['claude'] }] }), HOSTS);
-  assert.deepEqual(ok[0], { name: 'shop', url: 'http://127.0.0.1:18100/mcp', tokenEnv: 'PANTER_DOWNSTREAM_SHOP', hosts: ['claude'], writes: 'grant', timeoutMs: 30000, description: '' });
+  assert.deepEqual(ok[0], { name: 'shop', url: 'http://127.0.0.1:18100/mcp', tokenEnv: 'PANTER_DOWNSTREAM_SHOP', hosts: ['claude'], writes: 'grant', timeoutMs: 30000, description: '', sensitive: false });
   const bad = (server: object, why: RegExp) => assert.throws(() => parseDownstreamConfig(JSON.stringify({ servers: [{ name: 'shop', url: 'http://127.0.0.1:1/mcp', ...server }] }), HOSTS), why);
   bad({ url: 'http://example.com/mcp' }, /url must be https/);
   bad({ url: 'https://user:pw@example.com/mcp' }, /url/);
@@ -84,6 +85,8 @@ test('config is validated strictly: names, addresses, token variables and hosts'
   for (const url of ['http://10.0.0.5:8080/mcp', 'http://[::1]:9000/mcp', 'http://[fd12::1]/mcp', 'http://localhost:1/mcp'])
     assert.equal(parseDownstreamConfig(JSON.stringify({ servers: [{ name: 'ok', url }] }), HOSTS)[0]!.url, url);
   bad({ extra: 1 }, /unknown field/);
+  bad({ sensitive: 'yes' }, /sensitive must be true or false/);
+  assert.equal(parseDownstreamConfig('{"servers":[{"name":"clinic","url":"https://c.example/mcp","sensitive":true}]}', HOSTS)[0]!.sensitive, true);
   assert.throws(() => parseDownstreamConfig('{"servers":[{"name":"a1","url":"https://a.example/mcp"},{"name":"a1","url":"https://b.example/mcp"}]}', HOSTS), /duplicate/);
   assert.equal(parseDownstreamConfig('{"servers":[{"name":"remote","url":"https://mcp.example.com/mcp"}]}', HOSTS)[0]!.url, 'https://mcp.example.com/mcp');
 });
@@ -102,7 +105,7 @@ test('reads pass through with the token and the calling host; other hosts are re
     assert.deepEqual(w.gw.tools('shop').slice(0, 4).map(t => [t.name, t.cls]), [['lookup', 'read'], ['set_price', 'write'], ['delete_item', 'destructive'], ['legacy', 'destructive']]);
     const r = await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' });
     assert.equal(text(r), 'lookup ok');
-    assert.deepEqual({ ...w.ds.seen[0], meta: { ...(w.ds.seen[0]!.meta as any), 'panter-ai/callId': undefined } }, { tool: 'lookup', args: { sku: 'A1' }, meta: { 'panter-ai/host': 'claude', 'panter-ai/callId': undefined } });
+    assert.deepEqual({ ...w.ds.seen[0], meta: { ...(w.ds.seen[0]!.meta as any), 'panter-ai/callId': undefined, 'panter-ai/actor': undefined } }, { tool: 'lookup', args: { sku: 'A1' }, meta: { 'panter-ai/host': 'claude', 'panter-ai/role': 'worker', 'panter-ai/callId': undefined, 'panter-ai/actor': undefined } });
     const no = await w.gw.call(grok, 'shop', 'lookup', { sku: 'A1' });
     assert.equal(no.isError, true); assert.match(text(no), /may not use/);
     assert.equal(w.ds.seen.length, 1, 'a refused call never reaches the server');
@@ -110,7 +113,7 @@ test('reads pass through with the token and the calling host; other hosts are re
     const audit = w.gw.audit(operator);
     assert.deepEqual(audit.map(a => [a.host, a.tool, a.outcome]), [['claude', 'lookup', 'OK']], 'a caller without access is counted, not audited');
     assert.deepEqual(w.gw.refusedOutsiders(operator).map(x => [x.host, x.server, x.refused]), [['grok', 'shop', 1]]);
-    assert.ok(audit.every(a => /^[0-9a-f]{64}$/.test(a.argsSha256) && !JSON.stringify(a).includes('A1')), 'arguments are only hashed');
+    assert.ok(audit.every(a => /^[0-9a-f]{64}$/.test(a.argsSha256 ?? '') && !JSON.stringify(a).includes('A1')), 'arguments are only hashed');
   } finally { await w.done(); }
 });
 
@@ -123,7 +126,7 @@ test('writes need a grant for that host and tool; destructive tools must be name
     assert.match(text(await w.gw.call(claude, 'shop', 'delete_item', { sku: 'A1' }, g.id)), /destructive tools must be named/);
     const ok = await w.gw.call(claude, 'shop', 'set_price', { sku: 'A1', price: 5 }, g.id);
     assert.equal(text(ok), 'set_price ok');
-    assert.deepEqual({ ...(w.ds.seen.at(-1)!.meta as any), 'panter-ai/callId': undefined }, { 'panter-ai/host': 'claude', 'panter-ai/grantId': g.id, 'panter-ai/callId': undefined });
+    assert.deepEqual({ ...(w.ds.seen.at(-1)!.meta as any), 'panter-ai/callId': undefined, 'panter-ai/actor': undefined }, { 'panter-ai/host': 'claude', 'panter-ai/role': 'worker', 'panter-ai/grantId': g.id, 'panter-ai/callId': undefined, 'panter-ai/actor': undefined });
     assert.match(text(await w.gw.call(claude, 'shop', 'set_price', { sku: 'A1', price: 6 }, g.id)), /used up/);
     const named = w.gw.grant({ server: 'shop', tools: ['delete_item'], host: 'claude', ttlSeconds: 60, uses: 5, reason: 'cleanup' });
     assert.equal(text(await w.gw.call(claude, 'shop', 'delete_item', { sku: 'A1' }, named.id)), 'delete_item ok');
@@ -257,6 +260,82 @@ test('end to end: the built server mounts a downstream server for the hosts its 
   }
 });
 
+test('end to end: a sensitive server signs who calls and keeps its mission free of personal data', { skip: !existsSync(new URL('../dist/server.js', import.meta.url)) }, async () => {
+  const ds = await downstreamServer();
+  const RUN = '7f4c1a52-3c1e-4c55-9a51-6f1d2b9e0a11';
+  const dir = await mkdtemp(join(tmpdir(), 'panter-ds-e2e-s-'));
+  const config = join(dir, 'downstream.json');
+  await writeFile(config, JSON.stringify({ servers: [{ name: 'clinic', url: ds.url, tokenEnv: 'PANTER_DOWNSTREAM_SHOP_TOKEN', hosts: ['claude', 'grok'], timeoutMs: 5000, sensitive: true }] }));
+  const tokens = { claude: 'panter-actor-claude-ds-token-123456789', grok: 'panter-actor-grok-ds-token-1234567890' };
+  const port = String(22000 + Math.floor(Math.random() * 20000));
+  const proc = spawn(process.execPath, [new URL('../dist/server.js', import.meta.url).pathname], { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env,
+    PANTER_PORT: port, PANTER_BIND_HOST: '127.0.0.1', PANTER_TOKEN: 'panter-admin-ds-token-987654321', PANTER_PEER_TOKENS: JSON.stringify(tokens),
+    PANTER_DATA_DIR: join(dir, 'data'), PANTER_LEAD_HOST: 'claude', PANTER_DOWNSTREAM_CONFIG: config, PANTER_DOWNSTREAM_SHOP_TOKEN: TOKEN } });
+  let stderr = ''; proc.stderr!.on('data', c => { stderr += String(c); });
+  const clients: Client[] = [];
+  const connect = async (host: keyof typeof tokens) => {
+    const c = new Client({ name: host, version: '1' });
+    await c.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { authProvider: { token: async () => tokens[host] } } as any));
+    clients.push(c); return c;
+  };
+  try {
+    for (let i = 0; i < 100; i++) { try { if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) break; } catch {} await new Promise(r => setTimeout(r, 100)); }
+    const keys = await (await fetch(`http://127.0.0.1:${port}/.well-known/panter-downstream-keys`)).json() as { keys: any[] };
+    assert.equal(keys.keys[0].crv, 'Ed25519', stderr);
+    const lead = await connect('claude'), worker = await connect('grok');
+    assert.match(text(await lead.callTool({ name: 'panter_ds_clinic', arguments: { operation: 'lookup', arguments: { sku: 'A1' } } })), /must name its missionId/);
+    assert.equal(text(await lead.callTool({ name: 'panter_ds_clinic', arguments: { operation: 'lookup', arguments: { sku: 'A1' }, missionId: RUN } })), 'lookup ok');
+    assert.equal(text(await worker.callTool({ name: 'panter_ds_clinic', arguments: { operation: 'lookup', arguments: { sku: 'B2' }, missionId: RUN } })), 'lookup ok');
+    const [a, b] = ds.seen.map(x => (x.meta as any)['panter-ai/actor']);
+    const claimsA = verifyActorAssertion(a, keys.keys[0], { aud: 'clinic', tool: 'lookup', args: { sku: 'A1' } });
+    const claimsB = verifyActorAssertion(b, keys.keys[0], { aud: 'clinic', tool: 'lookup', args: { sku: 'B2' } });
+    assert.deepEqual([claimsA.sub, claimsA.role, claimsA.mission, claimsB.sub, claimsB.role], ['claude', 'leader', RUN, 'grok', 'worker']);
+    const st = JSON.parse(text(await lead.callTool({ name: 'panter_downstream_status', arguments: {} })));
+    assert.deepEqual(st.actorKeys, keys);
+    assert.equal(st.servers[0].sensitive, true);
+    // The mission is now sensitive: Panter refuses to store personal data for it, and still stores clean text.
+    const profile = await lead.callTool({ name: 'panter_mesh_profile_set', arguments: { host: 'grok', actorId: 'actor-grok-001', modelRequest: 'host-default', effortRequest: 'max', roles: ['reviewer'], expectedRevision: 0 } });
+    assert.notEqual(profile.isError, true, text(profile));
+    const delegate = (instruction: string, idempotencyKey: string) => lead.callTool({ name: 'panter_mesh_delegate', arguments: { missionId: RUN, target: 'grok', role: 'reviewer', instruction, idempotencyKey } });
+    const refused = await delegate('Check patient 12.345.678-5', 'k1');
+    assert.equal(refused.isError, true); assert.match(text(refused), /seems to contain a Chilean RUT/); assert.doesNotMatch(text(refused), /12\.345/);
+    const clean = await delegate('Check the triage screen with patient P-0042', 'k2');
+    assert.notEqual(clean.isError, true, text(clean));
+    const report = await lead.callTool({ name: 'panter_harness_report', arguments: { runId: RUN, stepId: '0b6f8f0e-8b39-4f3c-9d4f-2a7e7c1d5b22',
+      report: { summary: 'ok', evidence: ['contact ana@clinica.cl'] }, capabilities: { nativeSubagents: false, maxParallelSubagents: 1, toolsAvailable: true } } });
+    assert.equal(report.isError, true); assert.match(text(report), /This report seems to contain an e-mail/);
+    const review = await lead.callTool({ name: 'panter_native_review_create', arguments: { missionId: RUN, kind: '4r', objective: 'Review triage for ana@clinica.cl', candidateSha: 'a'.repeat(40), idempotencyKey: 'r1' } });
+    assert.match(text(review), /This review objective seems to contain an e-mail/);
+    for (const [name, args] of [
+      ['panter_mesh_delegate_auto', { missionId: RUN, role: 'reviewer', instruction: 'Ping 12.345.678-5', idempotencyKey: 'a1' }],
+      ['panter_review_start', { missionId: RUN, kind: '4r', objective: 'Ask ana@clinica.cl', candidateSha: 'a'.repeat(40), idempotencyKey: 'a2' }],
+      ['panter_harness_close', { runId: RUN, reason: 'call +56 9 1234 5678', expectedRevision: 1 }],
+    ] as const) assert.match(text(await lead.callTool({ name, arguments: args as any })), /seems to contain/, name);
+    const created = JSON.parse(text(await lead.callTool({ name: 'panter_native_review_create', arguments: { missionId: RUN, kind: '4r', objective: 'Review the triage screen', candidateSha: 'a'.repeat(40), idempotencyKey: 'r2' } })));
+    const solo = await lead.callTool({ name: 'panter_native_review_submit_solo', arguments: { reviewId: created.reviewId, slotId: '0b6f8f0e-8b39-4f3c-9d4f-2a7e7c1d5b22',
+      report: { agentId: 'lens', candidateSha: 'a'.repeat(40), packetDigest: 'b'.repeat(64), evidence: ['ok'],
+        findings: [{ id: 'f1', location: 'src/a.ts:1', severity: 'WARNING', claim: 'Leaks a row:\n12.345.678-5', proofRefs: ['log'] }] } } });
+    assert.match(text(solo), /This review report seems to contain a Chilean RUT/);
+    // The operator can clear a mark set by mistake; a later report is not checked.
+    const admin = new Client({ name: 'admin', version: '1' });
+    await admin.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { authProvider: { token: async () => 'panter-admin-ds-token-987654321' } } as any));
+    clients.push(admin);
+    assert.match(text(await lead.callTool({ name: 'panter_downstream_unmark', arguments: { missionId: 'other-run', reason: 'x' } })), /Operator/);
+    assert.deepEqual(JSON.parse(text(await admin.callTool({ name: 'panter_downstream_unmark', arguments: { missionId: 'other-run', reason: 'x' } }))), { unmarked: false });
+    // With a sensitive server configured, memory saves are checked too (before Engram is even asked).
+    const memory = await lead.callTool({ name: 'panter_memory_save', arguments: { title: 'triage', type: 'decision', topicKey: 'clinic/triage', content: 'llamar al +56 9 1234 5678' } });
+    assert.match(text(memory), /This memory seems to contain a Chilean phone number/);
+    const audit = JSON.parse(text(await lead.callTool({ name: 'panter_downstream_audit', arguments: {} })));
+    assert.deepEqual(audit.sensitiveMissions.map((m: any) => m.id), [RUN]);
+    assert.deepEqual(JSON.parse(text(await admin.callTool({ name: 'panter_downstream_unmark', arguments: { missionId: RUN, reason: 'test' } }))), { unmarked: true });
+    assert.equal((await delegate('Check patient 12.345.678-5', 'k3')).isError ? 'refused' : 'stored', 'stored', 'after unmark the mission is ordinary again');
+    assert.ok(audit.audit.every((x: any) => x.argsSha256 === null));
+  } finally {
+    for (const c of clients) await c.close().catch(() => undefined);
+    proc.kill('SIGTERM'); await ds.close(); await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('a grant is bound to its host and its server', async () => {
   const w = await world({ hosts: ['claude', 'grok'] });
   try {
@@ -267,8 +346,8 @@ test('a grant is bound to its host and its server', async () => {
     try {
       const ledger = SqliteLedger.open(dir);
       const two = new DownstreamGateway([
-        { name: 'shop', url: w.ds.url, tokenEnv: 'PANTER_DOWNSTREAM_SHOP_TOKEN', hosts: ['claude'], writes: 'grant', timeoutMs: 2000, description: '' },
-        { name: 'shop2', url: ds2.url, tokenEnv: 'PANTER_DOWNSTREAM_SHOP_TOKEN', hosts: ['claude'], writes: 'grant', timeoutMs: 2000, description: '' },
+        { name: 'shop', url: w.ds.url, tokenEnv: 'PANTER_DOWNSTREAM_SHOP_TOKEN', hosts: ['claude'], writes: 'grant', timeoutMs: 2000, description: '', sensitive: false },
+        { name: 'shop2', url: ds2.url, tokenEnv: 'PANTER_DOWNSTREAM_SHOP_TOKEN', hosts: ['claude'], writes: 'grant', timeoutMs: 2000, description: '', sensitive: false },
       ], ledger, { PANTER_DOWNSTREAM_SHOP_TOKEN: TOKEN });
       const g1 = two.grant({ server: 'shop', tools: '*', host: 'claude', ttlSeconds: 600, uses: 5, reason: 'x' });
       assert.match(text(await two.call(claude, 'shop2', 'set_price', { sku: 'A1', price: 1 }, g1.id)), /another server/);
@@ -424,4 +503,99 @@ test('redaction reaches any depth of a result', async () => {
   for (let i = 0; i < 60; i++) deep = { x: [deep] };
   const out = JSON.stringify(redactDeep({ structuredContent: deep, content: [{ type: 'text', text: `a "${TOKEN}" b` }] }, [`Bearer ${TOKEN}`, TOKEN]));
   assert.ok(!out.includes(TOKEN)); assert.match(out, /redacted/);
+});
+
+test('every forwarded call carries a signed actor assertion bound to that call', async () => {
+  const w = await world({ hosts: ['claude', 'grok'] });
+  try {
+    const leader = { id: 'claude', operator: false, role: 'leader' as const };
+    assert.equal(text(await w.gw.call(leader, 'shop', 'lookup', { sku: 'A1' }, undefined, { missionId: 'run-1' })), 'lookup ok');
+    assert.equal(text(await w.gw.call(grok, 'shop', 'lookup', { sku: 'B2' })), 'lookup ok');
+    const [first, second] = w.ds.seen.map(x => x.meta as Record<string, unknown>);
+    const key = w.gw.actorKeys().keys[0]!;
+    const claims = verifyActorAssertion(first!['panter-ai/actor'], key, { aud: 'shop', tool: 'lookup', args: { sku: 'A1' }, now: w.now() });
+    assert.equal(claims.sub, 'claude'); assert.equal(claims.role, 'leader'); assert.equal(claims.mission, 'run-1');
+    assert.equal(claims.jti, first!['panter-ai/callId']);
+    assert.equal(first!['panter-ai/missionId'], 'run-1');
+    const other = verifyActorAssertion(second!['panter-ai/actor'], key, { aud: 'shop', tool: 'lookup', args: { sku: 'B2' }, now: w.now() });
+    assert.equal(other.sub, 'grok'); assert.equal(other.role, 'worker'); assert.equal(other.mission, undefined);
+    // Bound to this call: other arguments, another tool, another server, later, another key all fail.
+    const token = first!['panter-ai/actor'];
+    assert.throws(() => verifyActorAssertion(token, key, { aud: 'shop', tool: 'lookup', args: { sku: 'A2' }, now: w.now() }), /arguments differ/);
+    assert.throws(() => verifyActorAssertion(token, key, { aud: 'shop', tool: 'set_price', args: { sku: 'A1' }, now: w.now() }), /another tool/);
+    assert.throws(() => verifyActorAssertion(token, key, { aud: 'clinic', tool: 'lookup', args: { sku: 'A1' }, now: w.now() }), /another server/);
+    assert.throws(() => verifyActorAssertion(token, key, { aud: 'shop', tool: 'lookup', args: { sku: 'A1' }, now: w.now() + 10 * 60_000 }), /expired/);
+    const { ActorSigner } = await import('../src/core/actor-assertion.js');
+    assert.throws(() => verifyActorAssertion(token, ActorSigner.generate().jwk(), { aud: 'shop', tool: 'lookup', args: { sku: 'A1' }, now: w.now() }), /another key/);
+    const { kid: _kid, ...anonymous } = ActorSigner.generate().jwk();
+    assert.throws(() => verifyActorAssertion(token, anonymous, { aud: 'shop', tool: 'lookup', args: { sku: 'A1' }, now: w.now() }), /bad signature/);
+    const [h, b, sig] = String(token).split('.');
+    const forged = JSON.parse(Buffer.from(b!, 'base64url').toString()); forged.sub = 'gpt-a';
+    assert.throws(() => verifyActorAssertion(`${h}.${Buffer.from(JSON.stringify(forged)).toString('base64url')}.${sig}`, key, { aud: 'shop', tool: 'lookup', args: { sku: 'A1' }, now: w.now() }), /bad signature/);
+    // The key survives a restart: the same ledger signs with the same key.
+    const again = new DownstreamGateway([w.config], SqliteLedger.open(w.dir), w.env);
+    assert.deepEqual(again.actorKeys(), w.gw.actorKeys());
+    // The audit says who and in which role and mission.
+    assert.deepEqual(w.gw.audit(operator).map(a => [a.host, a.role, a.missionId]).reverse(), [['claude', 'leader', 'run-1'], ['grok', 'worker', null]]);
+  } finally { await w.done(); }
+});
+
+test('a sensitive server is proxied without keeping its content, and its mission becomes sensitive', async () => {
+  const w = await world({ sensitive: true, hosts: ['claude', 'gpt-b'] });
+  try {
+    assert.match(text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' })), /every call must name its missionId/);
+    assert.equal(w.ds.seen.length, 0);
+    assert.equal(w.gw.isSensitiveMission('run-9'), false);
+    const ok: any = await w.gw.call(claude, 'shop', 'lookup', { sku: '12.345.678-5' }, undefined, { missionId: 'run-9' });
+    assert.equal(text(ok), 'lookup ok', 'the answer still reaches the host');
+    assert.equal(ok._meta['panter-ai/sensitive'], true);
+    assert.equal(w.gw.isSensitiveMission('run-9'), true);
+    // A downstream error can echo the call: for a sensitive server only its kind is shown and kept.
+    w.ds.setMode('echo500');
+    const failed = await w.gw.call(claude, 'shop', 'lookup', { sku: '12.345.678-5' }, undefined, { missionId: 'run-9' });
+    w.ds.setMode('ok');
+    assert.match(text(failed), /details withheld: sensitive server/);
+    assert.doesNotMatch(text(failed), /echo|500/);
+    assert.match(w.gw.status(claude)[0]!.lastError ?? '', /details withheld/);
+    assert.equal(w.gw.status(claude)[0]!.sensitive, true);
+    const audit = w.gw.audit(operator);
+    assert.ok(audit.length >= 3 && audit.every(a => a.argsSha256 === null && a.sensitive === true), 'no argument hash at all');
+    assert.ok(audit.every(a => a.error === null || /withheld|missionId|^the server|^timed out$/.test(a.error)), JSON.stringify(audit.map(a => a.error)));
+    assert.ok(!JSON.stringify(audit).includes('12.345.678'));
+    // The mark survives a restart, and only hosts that may use the server see it.
+    const again = new DownstreamGateway([w.config], SqliteLedger.open(w.dir), w.env);
+    assert.equal(again.isSensitiveMission('run-9'), true);
+    assert.equal(new DownstreamGateway([], SqliteLedger.open(w.dir), w.env).isSensitiveMission('run-9'), true, 'marks hold with no server configured');
+    assert.deepEqual(again.sensitiveMissions(operator).map(m => [m.id, m.server, m.host]), [['run-9', 'shop', 'claude']]);
+    assert.deepEqual(again.sensitiveMissions(grok), []);
+    // A refused call (no grant) does not mark its mission: nothing came back.
+    assert.match(text(await w.gw.call(claude, 'shop', 'set_price', { sku: 'A1', price: 1 }, undefined, { missionId: 'run-10' })), /needs a grantId/);
+    assert.equal(w.gw.isSensitiveMission('run-10'), false);
+    assert.match(text(await w.gw.call(claude, 'shop', 'lookup', {}, undefined, { missionId: 'bad mission!' })), /missionId must be/);
+    // A run id written in upper case is the same mission.
+    const run = '7f4c1a52-3c1e-4c55-9a51-6f1d2b9e0a11';
+    await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' }, undefined, { missionId: run.toUpperCase() });
+    assert.equal(w.gw.isSensitiveMission(run), true);
+    // The operator can clear a mark set by mistake, durably.
+    assert.deepEqual(w.gw.unmarkSensitive(run, 'marked by mistake'), { unmarked: true });
+    assert.deepEqual(w.gw.unmarkSensitive(run, 'again'), { unmarked: false });
+    assert.equal(w.gw.isSensitiveMission(run), false);
+    assert.equal(new DownstreamGateway([w.config], SqliteLedger.open(w.dir), w.env).isSensitiveMission(run), false);
+    // An open circuit says why without the downstream's words.
+    w.ds.setMode('echo500');
+    for (let i = 0; i < 3; i++) await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' }, undefined, { missionId: 'run-9' });
+    w.ds.setMode('ok');
+    const open = text(await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' }, undefined, { missionId: 'run-9' }));
+    assert.match(open, /circuit open/); assert.doesNotMatch(open, /echo|500|Bearer/);
+  } finally { await w.done(); }
+});
+
+test('an ordinary server keeps its diagnostics', async () => {
+  const w = await world();
+  try {
+    w.ds.setMode('echo500');
+    const failed = await w.gw.call(claude, 'shop', 'lookup', { sku: 'A1' });
+    assert.doesNotMatch(text(failed), /withheld/);
+    assert.ok(w.gw.audit(operator).every(a => /^[0-9a-f]{64}$/.test(a.argsSha256 ?? '') && !a.sensitive));
+  } finally { w.ds.setMode('ok'); await w.done(); }
 });

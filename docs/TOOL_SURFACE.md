@@ -37,4 +37,4 @@ Hay dos niveles: dominio → operación. A propósito no es un árbol más profu
 
 ## Servidores MCP downstream
 
-Cada servidor MCP montado detrás de Panter ([DOWNSTREAM_MCP.md](DOWNSTREAM_MCP.md)) aparece como un router propio, `panter_ds_<nombre>`, fuera de los ocho routers de dominio. Solo se lista para los hosts que su configuración permite (y para el operador). Los hosts no permitidos pueden llamarlo por nombre, pero el gateway lo rechaza y queda en el audit. `panter_downstream_status` y `panter_downstream_audit` están en la lista del líder; `panter_downstream_grant` y `panter_downstream_revoke` son solo del operador.
+Cada servidor MCP montado detrás de Panter ([DOWNSTREAM_MCP.md](DOWNSTREAM_MCP.md)) aparece como un router propio, `panter_ds_<nombre>`, fuera de los ocho routers de dominio. Solo se lista para los hosts que su configuración permite (y para el operador). Los hosts no permitidos pueden llamarlo por nombre, pero el gateway lo rechaza y queda en el audit. `panter_downstream_status` y `panter_downstream_audit` están en la lista del líder; `panter_downstream_grant`, `panter_downstream_revoke` y `panter_downstream_unmark` son solo del operador.

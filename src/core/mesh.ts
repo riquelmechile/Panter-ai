@@ -62,6 +62,11 @@ export class MeshEngine {
   private standingListenerCheck:((host:WorkerHost)=>boolean)|null=null;
   setStandingListenerCheck(check:(host:WorkerHost)=>boolean){this.standingListenerCheck=check;}
   setWriteGuard(guard:(missionId:string,paths:string[])=>Promise<void>){this.writeGuard=guard;}
+  /** Checks text a worker or peer sends for a mission (results, messages); throws to refuse it. Panter uses it to keep
+   * personal data out of missions that called a sensitive downstream server. Leader input is checked at its tools, so
+   * text Panter copies from records it already holds (a harness objective) never stalls a run. */
+  private contentGuard:((missionId:string,texts:string[],where:string)=>void)|null=null;
+  setContentGuard(guard:(missionId:string,texts:string[],where:string)=>void){this.contentGuard=guard;}
   private constructor(dir: string) { this.sqlite = SqliteLedger.open(dir); }
   static async open(dir: string) {
     const x = new MeshEngine(dir);
@@ -990,6 +995,7 @@ export class MeshEngine {
       }
       check(w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
       check(Date.parse(w.leaseUntil!) > Date.now(), 'Lease expired');
+      this.contentGuard?.(w.missionId,[result],'This result');
       w.state = success ? 'COMPLETED' : 'FAILED'; w.result = result; w.receiptDigest = digest;
       w.completedAt = iso(); w.leaseUntil = null; delete w.transportClaim; if (via) w.via = via;
       // A transport closing work it could not deliver is not a receipt from the worker.
@@ -1073,6 +1079,7 @@ export class MeshEngine {
     return this.write(d => {
       const w = input.workId ? d.works.find(x => x.id === input.workId) : null;
       check(w && w.missionId === input.missionId, 'Known work is required for peer messages');
+      this.contentGuard?.(input.missionId,[input.text],'This message');
       check((caller === leaderHost() && w.target === input.to) || (input.to === leaderHost() && w.target === caller), 'Not a member of this delegation');
       const revision = this.notify(d, input.to);
       const msg: MeshMessage = { id: randomUUID(), missionId: input.missionId, from: caller, to: input.to, workId: w.id, kind: input.kind, text: input.text, createdAt: iso(), inboxRevision: revision };
