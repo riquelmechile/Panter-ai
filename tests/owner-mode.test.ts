@@ -195,3 +195,16 @@ test('owner mode: a scheduled poll can claim writer work', () => withOwner('1', 
   const claimed = await m.pickup('grok', 300, false) as { work?: { id: string } } | { id?: string };
   assert.ok(JSON.stringify(claimed).includes(w.id));
 })));
+
+test('owner mode: a PR with more than 100 commits is read in full and stays reviewable', () => withOwner('1', async () => {
+  const commits = Array.from({ length: 120 }, (_, i) => ({ sha: i.toString(16).padStart(40, '0'), commit: { message: `feat: part ${i}` }, author: { login: 'dev' } }));
+  const g = new GitHubDeliveryGate({ allowedRepositories: ['example/project'], requiredChecks: ['test'], independentReviewer: 'rev-account' }, mock({
+    '': { default_branch: 'main' }, 'pulls/12': { ...pr, commits: 120 },
+    'pulls/12/commits?per_page=100': commits.slice(0, 100), 'pulls/12/commits?per_page=100&page=2': commits.slice(100),
+    'pulls/12/reviews?per_page=100': [{ id: 1, user: { login: 'rev-account' }, state: 'APPROVED', commit_id: sha }],
+    [`commits/${sha}/check-runs?per_page=100`]: { total_count: 1, check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', head_sha: sha }] },
+  }));
+  const r = await g.inspect(input);
+  assert.deepEqual(r.blockers, []);
+  assert.equal(r.state, 'REVIEWABLE');
+}));

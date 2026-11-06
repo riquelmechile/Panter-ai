@@ -127,7 +127,8 @@ export class GitHubDeliveryGate {
       const initialBootstrap=input.repository.toLowerCase()==='riquelmechile/panter-ai'&&
         input.prNumber===1&&input.deliveryStrategy==='single-pr'&&
         input.parentAuthorizedSinglePr===true;
-      if(!Number.isInteger(commitCount)||commitCount<1||commitCount>(initialBootstrap?300:100)){
+      // Owner mode reads up to 300 commits (GitHub lists at most 250 per PR) so the reviewer-authorship check still runs.
+      if(!Number.isInteger(commitCount)||commitCount<1||commitCount>(initialBootstrap||ownerMode()?300:100)){
         soft('PR commit history exceeds allowed bounds; inspect all work-unit commits');
       }else{
         const commits:any[]=prCommits=[];
