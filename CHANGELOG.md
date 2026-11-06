@@ -2,6 +2,16 @@
 
 All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://semver.org/). Releases before 1.0 are described in [docs/HISTORY.md](docs/HISTORY.md).
 
+## 1.4.0 (2026-11-06)
+
+### Owner mode
+- `PANTER_OWNER_MODE=1` for a single-owner deployment (see [docs/OWNER_MODE.md](docs/OWNER_MODE.md)): write grants become optional and the leader delegates `implementer` work directly (before, `panter_mesh_delegate` with that role always failed with `Authorized run required`); writers may cover the whole repository; wake routes accept writers and queue work behind a busy peer; `panter_mesh_delegate_auto` picks the least-loaded reachable worker; keyword and unknown-scope risk become advice; the GitHub delivery gate keeps blocking only on exact SHA, open non-draft PR, authorized base, required CI and the independent reviewer, and reports the conventions as warnings; automatic per-phase GitHub grants are on; up to 10 corrections per run.
+- What stays in every mode: workers never merge, approve, force-push or write default/protected branches, CI and git config files; secrets stay on the server; sensitive-mission checks.
+
+### Workforce
+- `panter_workforce_status` adds `wakeRoutes`, `last24h` and `reachable` per worker, so a 2-minute `STALE` presence no longer reads as "the worker is down".
+- `panter_mesh_withdraw` (mesh router): the leader withdraws queued work no worker started and revokes its GitHub grant.
+
 ## 1.3.0 (2026-11-05)
 
 ### Workforce

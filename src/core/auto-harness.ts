@@ -1,4 +1,5 @@
 import { leaderHost, leaderLabel, leaderPolicyProfile } from './leadership.js';
+import { ownerMode } from './owner-mode.js';
 import { SqliteLedger } from './sqlite-ledger.js';
 /** Panter automatic ODD harness: the user chooses an objective, not agents.
  * GPT-A/host-owned models execute packets. This engine never launches inference.
@@ -87,11 +88,17 @@ export function chooseHarness(input:HarnessInput){
   const o=input.observations??{};
   if(o.independentWorkUnits!==undefined)ensure(Number.isInteger(o.independentWorkUnits)&&o.independentWorkUnits>=0&&o.independentWorkUnits<=32,'Invalid unit count');
   const reasons:string[]=[];
-  const unknown=o.unknownCodeArea===true||(!paths.length&&input.writesAuthorized);
-  const risk:'LOW'|'HIGH'=input.writesAuthorized&&(unknown||o.requirementsClear===false||o.resumableFromDiff===false||
-    paths.some(p=>risky.test(p))||riskyGoal.test(input.objective))?'HIGH':'LOW';
+  const owner=ownerMode();
+  // In owner mode the whole repository is a valid scope: no listed surfaces means "anywhere", not "unknown".
+  const unknown=o.unknownCodeArea===true||(!owner&&!paths.length&&input.writesAuthorized);
+  const keywordRisk=paths.some(p=>risky.test(p))||riskyGoal.test(input.objective);
+  // Owner mode: keywords and unknown areas are advice; only an explicit observation (or Judgment Day) raises risk.
+  const risk:'LOW'|'HIGH'=input.writesAuthorized&&(owner?
+    (o.requirementsClear===false||o.resumableFromDiff===false):
+    (unknown||o.requirementsClear===false||o.resumableFromDiff===false||keywordRisk))?'HIGH':'LOW';
   if(unknown)reasons.push('Code surfaces unknown: run read-only discovery before any edit');
-  if(paths.some(p=>risky.test(p))||riskyGoal.test(input.objective))reasons.push('Security, data, delivery, or other high-impact surface');
+  if(keywordRisk)reasons.push(owner?'Advice: security, data, delivery, or other high-impact surface (owner mode: not a gate)':'Security, data, delivery, or other high-impact surface');
+  if(owner&&!paths.length&&input.writesAuthorized)reasons.push('Owner mode: no edit surfaces listed, the whole repository is in scope');
   if(o.requirementsClear===false)reasons.push('Requirements need exploration/clarification');
   if(o.resumableFromDiff===false)reasons.push('Durable ODD tracking required');
   const tier:'passive'|'medium'|'high'=risk==='HIGH'?'high':!input.writesAuthorized||
@@ -459,8 +466,8 @@ export class AutomaticHarness {
     let retired:string[]=[],retiredWorks:string[]=[];
     const corrected=await this.write(s=>{const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');ensure(!r.closedAt,'Harness run is closed');
       ensure(r.revision===expectedRevision,'Stale correction revision');
-      ensure(r.permission==='WRITE_APPROVED'&&r.paths.length>0,'Correction is not authorized within a scoped writable run');
-      ensure((r.correctionAttempts??0)<2,'Correction attempt budget exhausted');
+      ensure(r.permission==='WRITE_APPROVED'&&(ownerMode()||r.paths.length>0),'Correction is not authorized within a scoped writable run');
+      ensure((r.correctionAttempts??0)<(ownerMode()?10:2),'Correction attempt budget exhausted');
       ensure(r.candidateSha&&r.candidateSha!==payload.candidateSha,'Corrected candidate requires a fresh SHA');
       const review=r.steps.find(st=>st.phase==='REVIEW');const judgment=r.steps.find(st=>st.phase==='JUDGMENT');
       ensure(review||judgment,'No review requiring correction');
@@ -550,7 +557,7 @@ export class AutomaticHarness {
       if(step.phase==='IMPLEMENT'){
         ensure(!r.units||r.units.every(u=>u.state==='REPORTED'),'All isolated implementation units must finish before integration');
         ensure(r.permission==='WRITE_APPROVED','Unauthorized implementation');
-        ensure(r.paths.length>0,'No discovery-confirmed edit surfaces');
+        ensure(ownerMode()||r.paths.length>0,'No discovery-confirmed edit surfaces');
         if(r.risk==='HIGH'||r.judgmentRequested||!!r.githubRepository||githubProject.test(r.project))ensure(!!payload.candidateSha,'GitHub/high-risk implementation needs frozen candidate SHA');
         if(r.githubRepository||githubProject.test(r.project))ensure(!!payload.candidateSha&&/^[a-f0-9]{40}$/.test(payload.candidateSha),'GitHub requires an exact 40-character Git commit SHA');
         r.candidateSha=payload.candidateSha??null;
@@ -703,7 +710,7 @@ export class AutomaticHarness {
       if(work&&(work.state==='QUEUED'||work.state==='RUNNING'))await this.dispatched(record,work.id,phase.phase,work.target);
       return {...common,status:'WAITING_REMOTE_PEER',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
     }
-    if(phase.phase==='IMPLEMENT'&&(!record.paths.length||record.permission!=='WRITE_APPROVED'))
+    if(phase.phase==='IMPLEMENT'&&((!record.paths.length&&!ownerMode())||record.permission!=='WRITE_APPROVED'))
       return {...common,status:'BLOCKED_EDIT_SCOPE_OR_AUTHORIZATION',phaseId:phase.id,next:[]};
     if(phase.phase==='IMPLEMENT'&&!(await this.activeWriteGrant(runId,record.paths)))
       return {...common,status:'BLOCKED_WRITE_GRANT_EXPIRED',phaseId:phase.id,next:[],instruction:'Obtain fresh operator authorization before issuing new writer tasks.'};

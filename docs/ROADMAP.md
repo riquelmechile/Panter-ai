@@ -227,3 +227,9 @@ La interfaz read-only no ejecuta código, no hace cambios en producción y no re
 - [x] Servidores downstream `sensitive` (proxy sin guardar contenido, misiones sensibles sin datos personales) e identidad del actor firmada (Ed25519) en cada llamada. Ver [DOWNSTREAM_MCP.md](DOWNSTREAM_MCP.md).
 - [ ] Montar commerce-control como primer servidor downstream (su propio repo, servicio, token y aprobaciones), empezando con `writes: "deny"`.
 - [ ] Siguientes downstream: XanxitoSpA y los demás proyectos, cada uno con el mismo contrato (`sensitive: true` para los que traen datos que Panter no debe guardar).
+
+## v1.4 modo dueño
+
+- [x] `PANTER_OWNER_MODE=1`: permisos de escritura opcionales, escritores directos y sobre todo el repo, despertares que aceptan escritores y encolan, auto-delegación al trabajador alcanzable con menos carga, riesgo por palabras y convenciones de entrega como avisos. Ver [OWNER_MODE.md](OWNER_MODE.md).
+- [x] Estado del workforce con rutas de despertar y actividad de 24 h; `panter_mesh_withdraw` para retirar trabajo en cola.
+- [ ] Kimi como host de la fuerza laboral.
