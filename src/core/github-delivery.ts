@@ -1,4 +1,5 @@
 import {validRefName} from './github-workforce.js';
+import { ownerMode } from './owner-mode.js';
 /** Read-only GitHub destination gate, adapted from Gentle Shell branch-pr and
  * work-unit-commits. Evidence is fetched from GitHub, never from a model report.
  * This module never commits, pushes, merges, labels, or opens pull requests.
@@ -95,6 +96,9 @@ export class GitHubDeliveryGate {
       expectedSha:input.expectedSha,satisfied:[],blockers:[],warnings:[],
       approvals:{review:false,commit:false,push:false,merge:false,deploy:false}};
     const blocked=result.blockers,ok=result.satisfied;
+    // Owner mode keeps the gates that decide whether the code is right (exact SHA, open PR on the authorized base,
+    // required CI, independent review) and turns process conventions into warnings.
+    const soft=(message:string)=>{if(ownerMode())result.warnings.push(`Owner mode (not blocking): ${message}`);else blocked.push(message);};
     let prCommits:any[]|null=null;
     try{
       const [repoData,prData]=await Promise.all([
@@ -107,7 +111,7 @@ export class GitHubDeliveryGate {
       result.headSha=head;result.baseBranch=base;result.draft=prData.draft===true;
        if(result.draft)blocked.push('Pull request is still draft; mark ready before review');
       const branch=String(prData.head?.ref??'');
-      if(!inspectBranchName(branch))blocked.push('Branch violates Gentle Shell type/description naming (or Panter workforce panter/...)');else ok.push('branch');
+      if(!inspectBranchName(branch))soft('Branch violates Gentle Shell type/description naming (or Panter workforce panter/...)');else ok.push('branch');
       if(head!==input.expectedSha)blocked.push('Pull request HEAD differs from frozen candidate SHA');else ok.push('exact_sha');
       if(input.expectedBase&&base!==input.expectedBase)blocked.push('PR base differs from operator-authorized base');
       else if(!input.expectedBase&&base!==defaultBranch)result.warnings.push('PR targets a non-default base; verify intended stacked-PR dependency');
@@ -116,15 +120,16 @@ export class GitHubDeliveryGate {
       if(prData.head?.repo?.full_name && prData.head.repo.full_name!==input.repository)
         result.warnings.push('PR is from a fork; verify fork provenance before GitHub writes');
       const labels=labelNames(prData.labels),types=labels.filter(x=>x.startsWith('type:'));
-      if(types.length!==1||!acceptedTypes.has(types[0]!))blocked.push('PR must have exactly one valid type:* label');else ok.push('type_label');
+      if(types.length!==1||!acceptedTypes.has(types[0]!))soft('PR must have exactly one valid type:* label');else ok.push('type_label');
       const commitCount=Number(prData.commits);
       // One-time exception for the owner-approved initial repository bootstrap;
       // NEVER generalize this to subsequent or unrelated PRs.
       const initialBootstrap=input.repository.toLowerCase()==='riquelmechile/panter-ai'&&
         input.prNumber===1&&input.deliveryStrategy==='single-pr'&&
         input.parentAuthorizedSinglePr===true;
-      if(!Number.isInteger(commitCount)||commitCount<1||commitCount>(initialBootstrap?300:100)){
-        blocked.push('PR commit history exceeds allowed bounds; inspect all work-unit commits');
+      // Owner mode reads up to 300 commits (GitHub lists at most 250 per PR) so the reviewer-authorship check still runs.
+      if(!Number.isInteger(commitCount)||commitCount<1||commitCount>(initialBootstrap||ownerMode()?300:100)){
+        soft('PR commit history exceeds allowed bounds; inspect all work-unit commits');
       }else{
         const commits:any[]=prCommits=[];
         for(let page=1;page<=Math.ceil(commitCount/100);page++){
@@ -136,8 +141,8 @@ export class GitHubDeliveryGate {
         else {
           const invalid=commits.filter((x:any)=>!inspectCommitMessage(String(x.commit?.message??'')));
           const coauthored=commits.filter((x:any)=>/^co-authored-by:/im.test(String(x.commit?.message??'')));
-          if(invalid.length)blocked.push(`${invalid.length} commits violate Conventional Commits`);
-          if(coauthored.length)blocked.push(`${coauthored.length} commits include disallowed Co-Authored-By trailers`);
+          if(invalid.length)soft(`${invalid.length} commits violate Conventional Commits`);
+          if(coauthored.length)soft(`${coauthored.length} commits include disallowed Co-Authored-By trailers`);
           if(!invalid.length&&!coauthored.length)ok.push('work_unit_commit_format');
         }
         if(commitCount>100&&initialBootstrap)
@@ -146,12 +151,12 @@ export class GitHubDeliveryGate {
       const body=String(prData.body??''),issue=linkedIssue(body,input.repository);
       result.issueNumber=issue??undefined;
       if(this.issueRequired){
-        if(!issue)blocked.push('PR must reference a target-approved issue (Closes/Fixes/Resolves/Refs #N)');
+        if(!issue)soft('PR must reference a target-approved issue (Closes/Fixes/Resolves/Refs #N)');
         else{
           const issueData=await this.api(input.repository,`issues/${issue}`) as any;
           const issueLabels=labelNames(issueData?.labels);
-          if(issueData?.pull_request)blocked.push('PR references another PR, not an approved issue');
-          else if(!issueLabels.includes('status:approved'))blocked.push('Linked issue missing status:approved');
+          if(issueData?.pull_request)soft('PR references another PR, not an approved issue');
+          else if(!issueLabels.includes('status:approved'))soft('Linked issue missing status:approved');
           else ok.push('approved_issue');
         }
       }
@@ -161,9 +166,9 @@ export class GitHubDeliveryGate {
         result.reviewLoad=load;
         if(load>this.budget){
           result.warnings.push(`Review load ${load} lines exceeds Gentle Shell advisory ${this.budget}; do not code-golf`);
-          if(!input.deliveryStrategy)blocked.push('Oversize PR requires an explicit delivery strategy');
+          if(!input.deliveryStrategy)soft('Oversize PR requires an explicit delivery strategy');
           else if(input.deliveryStrategy==='single-pr'&&!input.parentAuthorizedSinglePr)
-            blocked.push('Oversize single-PR strategy needs user authorization');
+            soft('Oversize single-PR strategy needs user authorization');
         }else ok.push('review_budget');
       }
       if(!this.required.length){
@@ -182,7 +187,9 @@ export class GitHubDeliveryGate {
         if(Number(checks?.total_count)>100)blocked.push('GitHub checks are paginated; full required-check proof unavailable');
       }
       if(!this.reviewer){
-        result.warnings.push('Independent reviewer identity not configured (PANTER_GITHUB_INDEPENDENT_REVIEWER); no GitHub review evidence checked');
+        // Owner mode relaxes conventions only because the independent reviewer still gates: without one it blocks.
+        if(ownerMode())blocked.push('Owner mode requires PANTER_GITHUB_INDEPENDENT_REVIEWER: the independent review is its hard gate');
+        else result.warnings.push('Independent reviewer identity not configured (PANTER_GITHUB_INDEPENDENT_REVIEWER); no GitHub review evidence checked');
       }else{
         const evidence=await this.independentReview(input.repository,input.prNumber,head,prData,prCommits);
         result.independentReview=evidence;

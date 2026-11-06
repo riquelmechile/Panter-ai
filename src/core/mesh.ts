@@ -1,6 +1,7 @@
 import { leaderHost, leaderLabel, isWorker, leaderPolicyProfile } from './leadership.js';
 import { hostRequest } from './policy.js';
 import { SqliteLedger } from './sqlite-ledger.js';
+import { ownerMode } from './owner-mode.js';
 import { summarizeWorkforce, validateRouteReport, type WorkerHost, type WorkerObservation, type WorkerRouteReport } from './workforce-readiness.js';
 /** Original, provider-independent collaboration ledger for authenticated MCP hosts. */
 import { createHash, randomUUID } from 'node:crypto';
@@ -482,6 +483,27 @@ export class MeshEngine {
       specialist:{agentId:packet.agentId,skillIds:packet.skillIds,packetDigest:packet.digest,assetDigests:packet.assetDigests,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,bindingRevision:binding.revision,candidateSha:input.candidateSha,allowedEditSurfaces:packet.allowedEditSurfaces}});
   }
   /** Whether a delegate with this mission and idempotency key already exists (a delegate call would replay it). */
+  /** Open work (queued, running or of unknown outcome) per host: owner-mode routing sends new work to the least loaded. */
+  async loadByHost(): Promise<Partial<Record<Host, number>>> {
+    return this.read(d => {
+      const load: Partial<Record<Host, number>> = {};
+      for (const w of d.works) if (['QUEUED', 'RUNNING', 'OUTCOME_UNKNOWN'].includes(w.state)) load[w.target] = (load[w.target] ?? 0) + 1;
+      return load;
+    });
+  }
+  /** Completed and failed work per host since a moment (ISO): what the status reports as recent activity. */
+  async activitySince(sinceMs: number): Promise<Partial<Record<Host, { completed: number; failed: number; lastCompletedAt: string | null }>>> {
+    return this.read(d => {
+      const out: Partial<Record<Host, { completed: number; failed: number; lastCompletedAt: string | null }>> = {};
+      for (const w of d.works) {
+        if (!w.completedAt || Date.parse(w.completedAt) < sinceMs || !['COMPLETED', 'FAILED'].includes(w.state)) continue;
+        const a = out[w.target] ??= { completed: 0, failed: 0, lastCompletedAt: null };
+        if (w.state === 'COMPLETED') a.completed++; else a.failed++;
+        if (!a.lastCompletedAt || Date.parse(w.completedAt) > Date.parse(a.lastCompletedAt)) a.lastCompletedAt = w.completedAt;
+      }
+      return out;
+    });
+  }
   async hasDelegation(missionId: string, idempotencyKey: string): Promise<boolean> {
     return this.read(d => d.works.some(w => w.missionId === missionId && w.idempotencyKey === idempotencyKey));
   }
@@ -515,22 +537,31 @@ export class MeshEngine {
         const observation=d.workforce?.[input.target as WorkerHost];
         const interval=profile?.scheduledPollIntervalSeconds;
         const age=Date.now()-Date.parse(observation?.lastScheduledPollAt??'');
-        check(input.role!=='implementer'&&profile?.scheduledPickupEnabled===true&&
+        check((ownerMode()||input.role!=='implementer')&&profile?.scheduledPickupEnabled===true&&
           interval!==undefined&&observation?.reportedRoute?.deliveryMode==='SCHEDULED_POLL'&&
           observation.reportedRoute.pollIntervalSeconds===interval&&
           Number.isFinite(age)&&age>=0&&age<=2*interval*1000+120_000,
           'Scheduled worker has no recent authenticated scheduled pickup');
-        check(!d.works.some(w=>w.target===input.target&&
+        // Owner mode: work queues behind a busy peer instead of being refused.
+        check(ownerMode()||!d.works.some(w=>w.target===input.target&&
           ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state)),
           'Scheduled worker busy');
       }
       if(input.wakeOnly){
-        check(isWorker(input.target) && input.role!=='implementer','External wake cannot authorize remote writes');
-        check(!d.works.some(w=>w.target===input.target &&
+        check(isWorker(input.target) && (ownerMode()||input.role!=='implementer'),'External wake cannot authorize remote writes');
+        check(ownerMode()||!d.works.some(w=>w.target===input.target &&
           ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state)),
           input.target==='grok'?'Grok wake peer busy':input.target==='claude'?'Claude wake peer busy':'MCP event peer busy');
       }
-      if(input.specialist?.allowedEditSurfaces?.length){
+      if(input.role==='implementer'&&ownerMode()){
+        // Owner mode: an empty scope is the whole repository, so it overlaps every other active writer of the mission,
+        // in either order.
+        const mine=input.specialist?.allowedEditSurfaces??[];
+        const conflict=d.works.find(w=>w.missionId===input.missionId && w.role==='implementer' && ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state) &&
+          (()=>{const theirs=w.specialist?.allowedEditSurfaces??[];
+            return !mine.length||!theirs.length||theirs.some(a=>mine.some(b=>a===b || a.startsWith(b+'/') || b.startsWith(a+'/')));})());
+        check(!conflict,'Overlapping active writer edit surfaces');
+      }else if(input.specialist?.allowedEditSurfaces?.length){
         const conflict=d.works.find(w=>w.missionId===input.missionId && w.role==='implementer' && ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state) && (w.specialist?.allowedEditSurfaces??[]).some(a=>input.specialist!.allowedEditSurfaces.some(b=>a===b || a.startsWith(b+'/') || b.startsWith(a+'/'))));
         check(!conflict,'Overlapping active writer edit surfaces');
       }
@@ -624,7 +655,7 @@ export class MeshEngine {
       if(replay)return {replay};
       if(d.profiles.some(p=>p.host===leaderHost()&&p.coordinationMode==='GPT_A_ONLY'))
         return {reason:'GPT_A_ONLY' as const};
-      if(input.role==='implementer')return {reason:'SCHEDULED_WRITES_NOT_ENABLED' as const};
+      if(input.role==='implementer'&&!ownerMode())return {reason:'SCHEDULED_WRITES_NOT_ENABLED' as const};
       const now=Date.now();
       const ready=d.profiles.filter(p=>{
         if(p.host===leaderHost()||!p.roles.includes(input.role)||p.scheduledPickupEnabled!==true)
@@ -636,8 +667,8 @@ export class MeshEngine {
           age<=interval*2000+120_000&&
           ob?.reportedRoute?.deliveryMode==='SCHEDULED_POLL'&&
           ob.reportedRoute.pollIntervalSeconds===interval&&
-          !d.works.some(w=>w.target===p.host&&
-            ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state));
+          (ownerMode()||!d.works.some(w=>w.target===p.host&&
+            ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state)));
       }).sort((a,b)=>{
         const aAge=Date.parse(d.workforce?.[a.host as WorkerHost]?.lastScheduledPollAt??'');
         const bAge=Date.parse(d.workforce?.[b.host as WorkerHost]?.lastScheduledPollAt??'');

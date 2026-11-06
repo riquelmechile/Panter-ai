@@ -1,4 +1,5 @@
-import { leaderHost, leaderLabel, appEventHosts, freezeLeaderHost, leaderPolicyProfile, adoptPendingLeaderPhases } from './core/leadership.js';
+import { leaderHost, leaderLabel, appEventHosts, workerHosts, freezeLeaderHost, leaderPolicyProfile, adoptPendingLeaderPhases } from './core/leadership.js';
+import { freezeOwnerMode } from './core/owner-mode.js';
 import { ExternalOAuthVerifier, staticBearerMatch } from './core/oauth.js';
 import { isAdminPrincipal, parseOwnerTrustedHosts } from './core/owner-trust.js';
 import { createToolSurface, DOMAINS, routerName, workflowTools, type SurfaceRole } from './core/tool-surface.js';
@@ -15,7 +16,8 @@ import { resolve, dirname, join } from 'node:path';
 import { ClientAddressPolicy, rateLimitIdentity } from './core/trusted-proxy.js';
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { MeshEngine, HOSTS, isHost } from './core/mesh.js';
+import { MeshEngine, HOSTS, isHost, type Host, type MeshRole } from './core/mesh.js';
+import { type WorkerHost } from './core/workforce-readiness.js';
 import { GitHubWorkforce, GITHUB_WRITE_OPS } from './core/github-workforce.js';
 import { registerTaskWire } from './core/workforce-task-wire.js';
 import { WorkforceLongPoll, withListenHint } from './core/workforce-long-poll.js';
@@ -48,6 +50,9 @@ import { MODEL_REQUEST_PATTERN, EFFORT_REQUEST_PATTERN } from './core/mesh.js';
 // for this process and never comes from tool input.
 const configuredLeader = freezeLeaderHost();
 console.error(`Panter leader host: ${configuredLeader}`);
+// Owner mode (single owner operates every host): see src/core/owner-mode.ts. Frozen for the process like the leader.
+const owner = freezeOwnerMode();
+if (owner) console.error('Panter owner mode: write grants optional, direct writers, keyword risk and delivery conventions are advice');
 const port = Number(process.env.PANTER_PORT ?? '8080');
 const bind = process.env.PANTER_BIND_HOST ?? '127.0.0.1';
 const authMode = process.env.PANTER_AUTH_MODE ?? 'dev-static';
@@ -172,13 +177,14 @@ const localGit=process.env.PANTER_RDD_LOCAL_WORKTREES_FILE?await LocalGitVerifie
 const rddTransportAttestation = process.env.PANTER_RDD_TRANSPORT_ATTESTATION === '1';
 const panterRdd = await PanterRdd.open(dataDir,nativeSubagentReview,mesh,githubGate,rddRunnerKeys,localGit,rddTransportAttestation,
   ()=>githubWorkforce.writerHosts());
-const harness = await AutomaticHarness.open(dataDir,mesh,nativeSubagentReview,githubGate,nativeReview,panterRdd,true);
+// Owner mode: the leader's delegation is the write authorization; an operator grant is optional.
+const harness = await AutomaticHarness.open(dataDir,mesh,nativeSubagentReview,githubGate,nativeReview,panterRdd,!owner);
 // Bound hosts run the harness phases. Hosts reached only by e-mail (no repository access) get the candidate diff
 // as packet material; every other host gets a work-scoped GitHub grant for its phase; a host that does not start
 // a dispatched phase in time loses it to native execution.
 // Work-scoped GitHub grants are issued automatically only when the operator opted in (a standing, separate
 // authorization for GitHub writes); otherwise hosts keep the manual, leader-issued grant flow.
-const autoGithubGrants = process.env.PANTER_HARNESS_AUTO_GITHUB_GRANTS === '1';
+const autoGithubGrants = process.env.PANTER_HARNESS_AUTO_GITHUB_GRANTS === '1' || owner;
 const materialHosts = new Set((process.env.PANTER_MATERIAL_HOSTS ?? 'gemini').split(',').map(x => x.trim()).filter(Boolean));
 const pickupSeconds = Number(process.env.PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS ?? '180');
 const pickupMailSeconds = Number(process.env.PANTER_REMOTE_PICKUP_TIMEOUT_SECONDS_MAIL ?? '1200');
@@ -200,7 +206,8 @@ harness.setHostHooks({
       await githubWorkforce.grant(leaderHost(), { workId, repository: run.githubRepository, auto: true,
         ops: phase === 'IMPLEMENT' ? ['commit', 'pr'] : comment, numbers: comment.length ? [run.githubPrNumber!] : [],
         // The implementer commits only inside the run's approved edit surfaces.
-        ...(phase === 'IMPLEMENT' ? { paths: run.paths } : {}),
+        // An empty scope (owner mode: whole repository) leaves the grant without a path restriction.
+        ...(phase === 'IMPLEMENT' && run.paths.length ? { paths: run.paths } : {}),
         // The worker branches from, and opens its PR against, the run's target base.
         ...(phase === 'IMPLEMENT' && run.githubExpectedBase ? { base: run.githubExpectedBase } : {}) });
     };
@@ -229,8 +236,8 @@ harness.setHostHooks({
   pickupTimeoutMs: host => (pickupPerHost.get(host) ?? (materialHosts.has(host) ? pickupMailSeconds : pickupSeconds)) * 1000,
   abandoned: async ({ workId }) => { if (githubWorkforce.configured) await githubWorkforce.revoke(leaderHost(), workId); },
 });
-// Legacy/direct A2A writers cannot bypass the operator-issued harness grant.
-mesh.setWriteGuard((missionId,paths)=>harness.authorizeDelegatedWrite(missionId,paths));
+// Legacy/direct A2A writers cannot bypass the operator-issued harness grant (owner mode: the leader delegates writers directly).
+if (!owner) mesh.setWriteGuard((missionId,paths)=>harness.authorizeDelegatedWrite(missionId,paths));
 const engramEnabled = process.env.PANTER_ENGRAM_ENABLED === '1';
 const memory = engramEnabled ? await openEngramBridge(dataDir, process.env.PANTER_ENGRAM_COMMAND ?? 'engram') : null;
 const projectMemories=new Map<string,Promise<EngramMemory>>();
@@ -256,6 +263,41 @@ async function checkpoint(runId:string){
   if(Buffer.byteLength(body)>15500)return 'MIRROR_TOO_LARGE';
   try{await (await memoryFor(run.project)).save(leaderHost(),{title:`ODD ${run.id}`,type:'architecture',topicKey:`odd/${run.id}/tasks`,content:body});
     return 'ENGRAM_SAVED';}catch{return 'ENGRAM_UNAVAILABLE';}
+}
+
+/** How each worker can be woken right now (server-side facts: listeners, subscriptions, configured doorbells). */
+function wakeRoutes(host: string, events: { hosts: Array<{ host: string; activeSubscriptions: number }> }): string[] {
+  const routes: string[] = [];
+  if (isHost(host) && host !== leaderHost() && workforceLongPoll.isListening(host as WorkerHost)) routes.push('LIVE_MCP_LISTENER');
+  if (events.hosts.some(h => h.host === host && h.activeSubscriptions > 0)) routes.push('MCP_EVENTS');
+  if (host === 'grok' && grokRoutineWake.configured) routes.push('GROK_WEBHOOK');
+  if (host === 'claude' && claudeRoutineWake.configured) routes.push('CLAUDE_ROUTINE');
+  if (host === 'gemini' && geminiMailWake.configured) routes.push('GMAIL_RELAY');
+  return routes;
+}
+/** Owner mode auto-delegation: any reachable worker with the role, least loaded first; writers included, and a busy
+ * worker queues the work instead of refusing it. Grok and Claude get their doorbell; app hosts get their MCP event;
+ * Gemini's mail relay picks up queued work on its own (never for sensitive missions). */
+async function ownerAutoDelegate(caller: Host, x: { missionId: string; role: MeshRole; instruction: string; idempotencyKey: string }) {
+  const profiles = await mesh.profiles(), load = await mesh.loadByHost(), events = workforceEvents.status(caller);
+  const sensitive = downstream.isSensitiveMission(x.missionId);
+  const candidates = workerHosts().filter(h => profiles.some(p => p.host === h && p.roles.includes(x.role)))
+    // Gemini's mail relay never carries sensitive missions nor writers (it has no repository access).
+    .map(h => ({ host: h, routes: wakeRoutes(h, events).filter(r => !(r === 'GMAIL_RELAY' && (sensitive || x.role === 'implementer'))) }))
+    .filter(c => c.routes.length > 0)
+    .sort((a, b) => (load[a.host] ?? 0) - (load[b.host] ?? 0) || workerHosts().indexOf(a.host) - workerHosts().indexOf(b.host));
+  const chosen = candidates[0];
+  if (!chosen) return mesh.delegateScheduled(caller, x);
+  const work = await mesh.delegate(caller, { ...x, target: chosen.host });
+  let wake: unknown = null;
+  if (chosen.host === 'grok') wake = await ringGrokForWork(mesh, grokRoutineWake, work.id).catch(() => ({ rung: false, reason: 'ERROR' }));
+  else if (chosen.host === 'claude' && claudeRoutineWake.configured) {
+    const reserved = await mesh.reserveClaudeWake(caller, work.id);
+    if (reserved.send) { const r = await claudeRoutineWake.dispatch(work.id); await mesh.finishClaudeWake(caller, work.id, r.accepted, r.statusCode, r.sessionId); }
+    wake = await mesh.claudeWakeStatus(caller, work.id);
+  }
+  return { status: 'DELEGATED' as const, selectedHost: chosen.host, work, wakeRoutes: chosen.routes, queuedBehind: load[chosen.host] ?? 0,
+    selectionEvidence: 'OWNER_MODE_LEAST_LOADED_REACHABLE' as const, wake, autonomousWakeVerified: false as const };
 }
 
 const principalContext = new AsyncLocalStorage<string>();
@@ -577,7 +619,8 @@ const handler = createMcpHandler(reqCtx => {
     const caller=hostPrincipal();
     const direct=await mesh.delegateAuto(caller,x);
     if(direct.status!=='LOCAL_FALLBACK_REQUIRED'||
-       direct.reason!=='NO_FRESH_STANDBY_PEER'||x.role==='implementer')return direct;
+       direct.reason!=='NO_FRESH_STANDBY_PEER'||(x.role==='implementer'&&!owner))return direct;
+    if(owner)return ownerAutoDelegate(caller,x);
     // A real connected live waiter takes priority. Without one, use only
     // native host Routines that have been explicitly configured by operator.
     // All remote wake is fail-closed, pointer-only, read-only.
@@ -629,6 +672,11 @@ const handler = createMcpHandler(reqCtx => {
     }
     return mesh.delegateScheduled(caller,x);
   }));
+  server.registerTool('panter_mesh_withdraw',{
+    description:`${leaderLabel()} withdraws queued work that no worker started (stuck, sent to the wrong host, no longer wanted). Its GitHub grant is revoked. Started work is never withdrawn.`,
+    inputSchema:z.object({workId:z.uuid(),reason:bounded(300)}).strict(),
+  },async x=>execute(async()=>{const caller=hostPrincipal();const out=await mesh.withdrawUnstarted(caller,x.workId,x.reason);
+    if(out.withdrawn&&githubWorkforce.configured)await githubWorkforce.revoke(caller,x.workId).catch(()=>undefined);return out;}));
   server.registerTool('panter_workforce_event_status',{
     description:`${leaderLabel()} reads redacted event subscription and delivery counts; HTTP acceptance does not prove worker execution.`,
     inputSchema:z.object({}).strict(),annotations:{readOnlyHint:true}
@@ -668,7 +716,8 @@ const handler = createMcpHandler(reqCtx => {
     });
     if(!poll.next)return {status:'EMPTY' as const,
       delivery:'AUTHENTICATED_SCHEDULE_POLL' as const,autonomousWakeVerified:false as const};
-    const claim=await mesh.pickup(actor,x.leaseSeconds,true);
+    // Owner mode: a scheduled-only worker can take writer work too (it may be delegated one).
+    const claim=await mesh.pickup(actor,x.leaseSeconds,!owner);
     return {...claim,delivery:'AUTHENTICATED_SCHEDULE_POLL' as const,
       autonomousWakeVerified:false as const};
   }));
@@ -702,7 +751,15 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_workforce_status',{
     description:`${leaderLabel()} read-only four-worker presence, claims, receipts and unverified wake-route reports. No invented READY or wake proof.`,
     inputSchema:z.object({}),annotations:{readOnlyHint:true},
-  },async()=>execute(()=>mesh.workforceStatus(hostPrincipal())));
+  },async()=>execute(async()=>{
+    const rows=await mesh.workforceStatus(hostPrincipal());
+    // Presence alone (2 minutes) says nothing about whether a worker can be reached: add how each one is woken
+    // and what it actually finished in the last 24 hours.
+    const since=Date.now()-24*3600_000,activity=await mesh.activitySince(since),events=workforceEvents.status(hostPrincipal());
+    return rows.map(r=>({...r,wakeRoutes:wakeRoutes(r.host,events),
+      last24h:activity[r.host]??{completed:0,failed:0,lastCompletedAt:null},
+      reachable:wakeRoutes(r.host,events).length>0||r.presence==='FRESH'}));
+  }));
   // Task schema bridge (NOT extension-native tasks/get): transport pointers only.
   // Client must re-arm after a terminal receipt; no server-side model execution.
   server.registerTool('panter_workforce_pickup',{
@@ -899,7 +956,8 @@ const handler = createMcpHandler(reqCtx => {
         note:hosts.length?'Event subscriptions are per host: any other live connection of these hosts must subscribe again.':undefined};}));
   }
   server.registerTool('panter_harness_write_grant',{
-    description:`Admin-only explicit bounded write authorization for a particular project/objective; ${leaderLabel()} cannot issue its own permission.`,
+    description:owner?`Optional in owner mode: writes need no grant (the leader delegates writers directly). Still usable to pin a run to bounded paths.`:
+      `Admin-only explicit bounded write authorization for a particular project/objective; ${leaderLabel()} cannot issue its own permission.`,
     inputSchema:z.object({project:bounded(100),objective:bounded(6000),allowedPaths:z.array(bounded(256)).min(1).max(16),ttlSeconds:z.number().int().min(60).max(86400)})
   },async x=>execute(async()=>{requireAdmin();return harness.grantWrite(x)}));
   server.registerTool('panter_harness_start',{ 

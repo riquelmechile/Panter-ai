@@ -1,4 +1,5 @@
 import { leaderHost, leaderLabel, leaderPolicyProfile } from './leadership.js';
+import { ownerMode } from './owner-mode.js';
 import { SqliteLedger } from './sqlite-ledger.js';
 /** Panter automatic ODD harness: the user chooses an objective, not agents.
  * GPT-A/host-owned models execute packets. This engine never launches inference.
@@ -20,6 +21,8 @@ const risky=/(^|\/)(auth|oauth|security|secrets|permissions?|rbac|payments?|bill
 const riskyGoal=/\b(authentication|authorization|security|secret|payment|migration|deploy|permission|credentials|autenticaci[oó]n|seguridad|contraseñas|pagos|migraci[oó]n|permisos|despliegue)\b/i;
 const codeAgent=new Set(GENTLE_AGENTS.map(x=>x.id));
 const hash=(x:unknown)=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
+/** Bounded corrections per run: 2, or 10 in owner mode (the same limit for packets and reports). */
+const correctionBudget=()=>ownerMode()?10:2;
 function ensure(c:unknown,reason:string):asserts c {if(!c)throw new Error(reason);}
 function safePath(p:string){
   ensure(p.length>0&&p.length<=256&&!p.startsWith('/')&&!p.includes('\\')&&!p.includes('\0')&&!p.split('/').some(x=>!x||x==='.'||x==='..'||/[\*?\[\]{}]/.test(x)),'Unsafe change surface');
@@ -87,11 +90,17 @@ export function chooseHarness(input:HarnessInput){
   const o=input.observations??{};
   if(o.independentWorkUnits!==undefined)ensure(Number.isInteger(o.independentWorkUnits)&&o.independentWorkUnits>=0&&o.independentWorkUnits<=32,'Invalid unit count');
   const reasons:string[]=[];
-  const unknown=o.unknownCodeArea===true||(!paths.length&&input.writesAuthorized);
-  const risk:'LOW'|'HIGH'=input.writesAuthorized&&(unknown||o.requirementsClear===false||o.resumableFromDiff===false||
-    paths.some(p=>risky.test(p))||riskyGoal.test(input.objective))?'HIGH':'LOW';
+  const owner=ownerMode();
+  // In owner mode the whole repository is a valid scope: no listed surfaces means "anywhere", not "unknown".
+  const unknown=o.unknownCodeArea===true||(!owner&&!paths.length&&input.writesAuthorized);
+  const keywordRisk=paths.some(p=>risky.test(p))||riskyGoal.test(input.objective);
+  // Owner mode: keywords and unknown areas are advice; only an explicit observation (or Judgment Day) raises risk.
+  const risk:'LOW'|'HIGH'=input.writesAuthorized&&(owner?
+    (o.requirementsClear===false||o.resumableFromDiff===false):
+    (unknown||o.requirementsClear===false||o.resumableFromDiff===false||keywordRisk))?'HIGH':'LOW';
   if(unknown)reasons.push('Code surfaces unknown: run read-only discovery before any edit');
-  if(paths.some(p=>risky.test(p))||riskyGoal.test(input.objective))reasons.push('Security, data, delivery, or other high-impact surface');
+  if(keywordRisk)reasons.push(owner?'Advice: security, data, delivery, or other high-impact surface (owner mode: not a gate)':'Security, data, delivery, or other high-impact surface');
+  if(owner&&!paths.length&&input.writesAuthorized)reasons.push('Owner mode: no edit surfaces listed, the whole repository is in scope');
   if(o.requirementsClear===false)reasons.push('Requirements need exploration/clarification');
   if(o.resumableFromDiff===false)reasons.push('Durable ODD tracking required');
   const tier:'passive'|'medium'|'high'=risk==='HIGH'?'high':!input.writesAuthorized||
@@ -362,7 +371,8 @@ export class AutomaticHarness {
       const old=s.runs.find(r=>r.project===input.project&&r.key===input.idempotencyKey);
       if(old){ensure(old.inputDigest===digest,'Harness start idempotency conflict');return old;}
       let grant:WriteGrant|undefined;
-      if(input.writesAuthorized&&this.requireWriteGrant){
+      // An explicitly supplied grant is always enforced (owner mode only makes it optional).
+      if(input.writesAuthorized&&(this.requireWriteGrant||!!input.writeGrantId)){
         ensure(!!input.writeGrantId,'Operator write grant required');
         grant=s.grants?.find(g=>g.id===input.writeGrantId);
         ensure(grant&&grant.project===input.project&&grant.objectiveDigest===hash(input.objective)&&grant.expiresAt>Date.now()&&!grant.boundRunId,
@@ -374,7 +384,8 @@ export class AutomaticHarness {
         status:'PENDING'});
       const run:HarnessRun={id:randomUUID(),project:input.project,githubRepository:input.githubRepository,githubPrNumber:input.githubPrNumber,githubExpectedBase:input.githubExpectedBase,objective:input.objective,key:input.idempotencyKey,inputDigest:digest,
         permission:input.writesAuthorized?'WRITE_APPROVED':'READ_ONLY',writeGrantId:grant?.id,mode:selected.mode,
-        paths:selected.paths,risk:selected.risk,reviewTier:selected.tier,reason:selected.reasons,candidateSha:null,reviewKind:selected.reviewKind,
+        // Owner mode with a bounded grant and no listed surfaces: the grant's paths are the scope, not the whole repository.
+        paths:selected.paths.length||!grant?selected.paths:[...grant.allowedPaths],risk:selected.risk,reviewTier:selected.tier,reason:selected.reasons,candidateSha:null,reviewKind:selected.reviewKind,
         reviewId:null,reviewTransport:null,judgmentRequested:input.judgmentDayRequested===true,judgmentId:null,correctionAttempts:0,steps:selected.phases.map(step),createdAt:new Date().toISOString(),revision:1};
       if(grant)grant.boundRunId=run.id;
       s.runs.push(run);return run;
@@ -397,7 +408,7 @@ export class AutomaticHarness {
   }
   /** Bound grant checks are repeated at each new write packet, not just mission start. */
   private async activeWriteGrant(runId:string,paths:string[]):Promise<boolean>{
-    if(!this.requireWriteGrant)return true;
+    if(!this.requireWriteGrant&&!(await this.get(runId))?.writeGrantId)return true;
     try{await this.authorizeDelegatedWrite(runId,paths);return true;}catch{return false;}
   }
 
@@ -459,8 +470,8 @@ export class AutomaticHarness {
     let retired:string[]=[],retiredWorks:string[]=[];
     const corrected=await this.write(s=>{const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');ensure(!r.closedAt,'Harness run is closed');
       ensure(r.revision===expectedRevision,'Stale correction revision');
-      ensure(r.permission==='WRITE_APPROVED'&&r.paths.length>0,'Correction is not authorized within a scoped writable run');
-      ensure((r.correctionAttempts??0)<2,'Correction attempt budget exhausted');
+      ensure(r.permission==='WRITE_APPROVED'&&(ownerMode()||r.paths.length>0),'Correction is not authorized within a scoped writable run');
+      ensure((r.correctionAttempts??0)<correctionBudget(),'Correction attempt budget exhausted');
       ensure(r.candidateSha&&r.candidateSha!==payload.candidateSha,'Corrected candidate requires a fresh SHA');
       const review=r.steps.find(st=>st.phase==='REVIEW');const judgment=r.steps.find(st=>st.phase==='JUDGMENT');
       ensure(review||judgment,'No review requiring correction');
@@ -499,7 +510,8 @@ export class AutomaticHarness {
       ensure(r.steps.find(x=>x.phase==='DESIGN')?.status==='COMPLETE','Design phase must finish before splitting work');
       ensure(!r.units,'Implementation units already frozen');
       for(const u of derived)for(const path of u.paths)
-        ensure(r.paths.some(scope=>path===scope||path.startsWith(scope+'/')),'Unit scope exceeds authorized work surface');
+        // Owner mode with no listed surfaces: the parent scope is the whole repository (units stay disjoint).
+        ensure((ownerMode()&&!r.paths.length)||r.paths.some(scope=>path===scope||path.startsWith(scope+'/')),'Unit scope exceeds authorized work surface');
       r.units=derived;r.revision++;return r;});
   }
   async reportUnit(runId:string,unitId:string,result:{runId:string;summary:string;evidence:string[]}){
@@ -540,7 +552,7 @@ export class AutomaticHarness {
       if(step.status==='COMPLETE'){ensure(step.result?.digest===digest,'Conflicting immutable harness report');return r;}
       ensure(step.status==='ISSUED','Phase packet must be issued before reporting');
       if(step.phase==='DISCOVER' && discovered.length){
-        if(this.requireWriteGrant&&r.permission==='WRITE_APPROVED'){
+        if((this.requireWriteGrant||!!r.writeGrantId)&&r.permission==='WRITE_APPROVED'){
           const grant=s.grants?.find(g=>g.id===r.writeGrantId);ensure(grant,'Missing original grant');
           for(const path of discovered)ensure(grant.allowedPaths.some(allowed=>path===allowed||path.startsWith(allowed+'/')),
             'Discovered edit surface exceeds operator grant');
@@ -550,7 +562,7 @@ export class AutomaticHarness {
       if(step.phase==='IMPLEMENT'){
         ensure(!r.units||r.units.every(u=>u.state==='REPORTED'),'All isolated implementation units must finish before integration');
         ensure(r.permission==='WRITE_APPROVED','Unauthorized implementation');
-        ensure(r.paths.length>0,'No discovery-confirmed edit surfaces');
+        ensure(ownerMode()||r.paths.length>0,'No discovery-confirmed edit surfaces');
         if(r.risk==='HIGH'||r.judgmentRequested||!!r.githubRepository||githubProject.test(r.project))ensure(!!payload.candidateSha,'GitHub/high-risk implementation needs frozen candidate SHA');
         if(r.githubRepository||githubProject.test(r.project))ensure(!!payload.candidateSha&&/^[a-f0-9]{40}$/.test(payload.candidateSha),'GitHub requires an exact 40-character Git commit SHA');
         r.candidateSha=payload.candidateSha??null;
@@ -703,7 +715,7 @@ export class AutomaticHarness {
       if(work&&(work.state==='QUEUED'||work.state==='RUNNING'))await this.dispatched(record,work.id,phase.phase,work.target);
       return {...common,status:'WAITING_REMOTE_PEER',phaseId:phase.id,workId:phase.remoteWorkId,next:[]};
     }
-    if(phase.phase==='IMPLEMENT'&&(!record.paths.length||record.permission!=='WRITE_APPROVED'))
+    if(phase.phase==='IMPLEMENT'&&((!record.paths.length&&!ownerMode())||record.permission!=='WRITE_APPROVED'))
       return {...common,status:'BLOCKED_EDIT_SCOPE_OR_AUTHORIZATION',phaseId:phase.id,next:[]};
     if(phase.phase==='IMPLEMENT'&&!(await this.activeWriteGrant(runId,record.paths)))
       return {...common,status:'BLOCKED_WRITE_GRANT_EXPIRED',phaseId:phase.id,next:[],instruction:'Obtain fresh operator authorization before issuing new writer tasks.'};
@@ -721,7 +733,7 @@ export class AutomaticHarness {
         const severe=partialSolo4R?[]:nativeStatus?.severeFindings??[];
         if(severe.length||rddRecord?.state==='NEEDS_CORRECTION'){
           const findings=severe.length?severe.map(f=>`${f.id}: ${f.location}: ${f.claim}`):['See Panter-RDD severe findings'];
-          if((record.correctionAttempts??0)>=2)return {...common,status:'CORRECTION_BUDGET_EXHAUSTED',phaseId:phase.id,next:[],findings};
+          if((record.correctionAttempts??0)>=correctionBudget())return {...common,status:'CORRECTION_BUDGET_EXHAUSTED',phaseId:phase.id,next:[],findings};
           if(record.permission!=='WRITE_APPROVED'||!(await this.activeWriteGrant(runId,record.paths)))return {...common,status:'CORRECTION_REQUIRES_WRITE_GRANT',phaseId:phase.id,next:[],findings};
           const packet=await specialistPacket({agentId:'gentle-ai-worker',objective:`Fix only the review findings within the existing authorization for ${record.objective}. ${findings.join(' | ')}`,
             skillIds:['gentle-ai','rdd-defect-workflow'],candidateSha:record.candidateSha!,
