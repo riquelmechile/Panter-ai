@@ -3,7 +3,7 @@ import {createHash} from 'node:crypto';
 import {test} from 'node:test';
 import {planWorktree, UnsafeWorktreePlan} from '../src/core/runner-worktree.js';
 
-const good={repository:'riquelmechile/Panter-ai',candidateSha:'a'.repeat(40),
+const good={repository:'example-org/panter-ai',candidateSha:'a'.repeat(40),
   missionId:'mission-1',workId:'work-1',attemptId:'attempt-1'};
 const digest=(s:string)=>createHash('sha256').update(s,'utf8').digest('hex');
 
@@ -20,7 +20,7 @@ test('deterministic detached-SHA plan binds repo and full SHA in path and attemp
 test('different repositories or exact SHA with the same IDs yield distinct paths and keys',()=>{
   const root='/tmp/panter-isolated';
   const first=planWorktree(root,good);
-  const differentRepo=planWorktree(root,{...good,repository:'riquelmechile/plasticov-store'});
+  const differentRepo=planWorktree(root,{...good,repository:'example-org/other-repo'});
   const differentSha=planWorktree(root,{...good,candidateSha:'b'.repeat(40)});
   for(const other of [differentRepo,differentSha]){
     assert.notEqual(other.worktreePath,first.worktreePath);

@@ -66,7 +66,7 @@ test('single writer prepares grant, durable intent and off-host signed audit; no
     const now=Date.now();
     const ctx:RunnerGrantContext={
       subject:'gpt-a',missionId:'mission-one',workId:'work-one',attemptId:'attempt-one',
-      leaseGeneration:1,repository:'riquelmechile/Panter-ai',
+      leaseGeneration:1,repository:'example-org/panter-ai',
       candidateSha:'a'.repeat(40),operation:'workspace.prepare',effectClass:'WORKTREE_WRITE',
     };
     const claim:RunnerGrant={version:1,grantId:randomUUID(),issuer:'panter-ai',

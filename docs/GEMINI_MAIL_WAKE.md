@@ -1,6 +1,6 @@
 # Despertar a Gemini por correo (Gmail)
 
-Gemini no envía `events/subscribe` y no tiene webhooks. Su único disparador por evento es un **monitor de Gmail** de sus tareas programadas. Panter lo usa así, sin API de Gemini (el mismo patrón que Xanxittoo usaba con Spark):
+Gemini no envía `events/subscribe` y no tiene webhooks. Su único disparador por evento es un **monitor de Gmail** de sus tareas programadas. Panter lo usa así, sin API de Gemini:
 
 1. Una tarea de solo lectura para Gemini queda en cola y ningún chat de Gemini está esperando en vivo.
 2. Pasados `PANTER_GEMINI_MAIL_MIN_AGE_SECONDS` (20 s por defecto), Panter reclama la tarea por una hora para ese intento y crea un **token de un solo uso** ligado a ese lease.

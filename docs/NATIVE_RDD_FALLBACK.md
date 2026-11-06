@@ -39,11 +39,11 @@ Do **not** expose a general shell tool to models. Verify candidate tree hash and
 - Integrate verified Git candidate evidence, authorized correction transitions and true runtime-identity receipt checks, then wire to protected delivery gate.
 
 
-## GPT-A maximum-capability contract (v0.10, Xanxittoo parity)
+## GPT-A maximum-capability contract (v0.10)
 
 **No remote workforce never means downgraded reasoning.** Operator selection `GPT_A_ONLY` (saved in Agent Studio or supplied per `panter_native_plan` turn) **disables remote A2A dispatch even when peers are CONNECTED**. `AUTO` uses remote specialists only when they are explicitly connected and assigned. If no eligible peers are present, GPT-A operates alone automatically. This choice is independent of request quality and native fanout.
 
-For **both** conditions Panter explicitly requests the same host control posture as Xanxittoo's `host_policy.py`:
+For **both** conditions Panter explicitly requests this host control posture:
 - Root: `gpt-6-astra` (model request), `max` reasoning, `xhigh` fallback **only if the host does not expose `max`**, ordinary root service tier. Do not switch to a weaker model merely because peers are absent.
 - Native branches: prefer Fast/priority processing with full model/effort; when Fast is unavailable, standard processing **preserves reasoning quality**.
 - Parallelism: request up to 32 native workers, bounded by observed support, independent tasks, and allowed file/worktree isolation. Keep host-native fanout distinct from remote peer count. Never invent workers.

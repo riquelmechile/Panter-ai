@@ -71,7 +71,7 @@ Source: https://support.google.com/gemini/answer/17094710
 ## Grok
 
 Keep the previously approved native webhook Routine configured on Oracle.
-Do not edit the separate Xanxittoo Grok Routine or copy its keys.
+Do not reuse another service's Grok Routine or copy its keys.
 Grok webhook accepted != worker executed.
 
 ## Readiness acceptance

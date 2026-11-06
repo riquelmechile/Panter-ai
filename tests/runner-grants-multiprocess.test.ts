@@ -57,7 +57,7 @@ test('two OS processes concurrently initialize a new WAL and reserve the same on
   const now=Date.now(),sha='a'.repeat(40);
   const ctx:RunnerGrantContext={
     subject:'gpt-a',missionId:'mission-test',workId:'work-test',attemptId:'attempt-test',
-    leaseGeneration:1,repository:'riquelmechile/Panter-ai',
+    leaseGeneration:1,repository:'example-org/panter-ai',
     candidateSha:sha,operation:'workspace.prepare',effectClass:'WORKTREE_WRITE',
   };
   for(let iteration=0;iteration<15;iteration++){

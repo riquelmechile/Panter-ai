@@ -11,7 +11,7 @@ const pair=generateKeyPairSync('ed25519');
 const wrong=generateKeyPairSync('ed25519');
 const keys=independentOutcomeKeys({independent:pair.publicKey.export({format:'pem',type:'spki'}).toString()});
 const baseline=():OutcomeIntent=>({
-  operationId:randomUUID(),subject:'gpt-a',repository:'riquelmechile/Panter-ai',
+  operationId:randomUUID(),subject:'gpt-a',repository:'example-org/panter-ai',
   candidateSha:'a'.repeat(40),missionId:'mission-1',workId:'work-1',attemptId:'attempt-1',
   leaseGeneration:5,operation:'workspace.prepare',grantDigest:'b'.repeat(64),
 });

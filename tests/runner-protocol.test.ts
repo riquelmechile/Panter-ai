@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { parseRunnerIntent, InvalidRunnerIntent, runnerExecutionAvailable, RUNNER_MESSAGE_MAX_BYTES } from '../src/core/runner-protocol.js';
 
 const base=()=>({version:1,requestId:randomUUID(),operation:'git.inspect',
-  repository:'riquelmechile/Panter-ai',candidateSha:'a'.repeat(40),
+  repository:'example-org/panter-ai',candidateSha:'a'.repeat(40),
   workId:'work-1',attemptId:'attempt-1',arguments:{}});
 test('protocol accepts typed intent but never provides executable dispatcher',()=>{
   assert.equal(parseRunnerIntent(JSON.stringify(base())).operation,'git.inspect');

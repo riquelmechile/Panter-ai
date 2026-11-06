@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/riquelmechile/Panter-ai/main/docs/assets/panter-banner.svg" alt="Panter-ai: one leader, every model, every MCP" width="100%">
+  <img src="docs/assets/panter-banner.svg" alt="Panter-ai: one leader, every model, every MCP" width="100%">
 </p>
 
 <p align="center">
@@ -22,13 +22,13 @@ The server never calls a model API. Each host (Claude, ChatGPT, Grok, Gemini) br
 The mascot is a panther with a mouse's face. The panther is patient and precise and does not let go of a job until it is done. The mouse is small and curious and gets into every corner. Its tail ends in a connector node, because that is how Panter works: every host and every MCP server plugs into it.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/riquelmechile/Panter-ai/main/docs/assets/panter-mascot.svg" alt="Panter, a black panther with mouse ears, a pink nose and whiskers, and a tail ending in a teal connector" width="180">
+  <img src="docs/assets/panter-mascot.svg" alt="Panter, a black panther with mouse ears, a pink nose and whiskers, and a tail ending in a teal connector" width="180">
 </p>
 
 ## How it fits together
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/riquelmechile/Panter-ai/main/docs/assets/panter-architecture.svg" alt="AI hosts connect to Panter-ai over MCP. Panter runs the harness, review gate, mesh, GitHub workforce, memory and tool surface, reaches downstream MCP servers through a gateway, and gates merges through GitHub." width="100%">
+  <img src="docs/assets/panter-architecture.svg" alt="AI hosts connect to Panter-ai over MCP. Panter runs the harness, review gate, mesh, GitHub workforce, memory and tool surface, reaches downstream MCP servers through a gateway, and gates merges through GitHub." width="100%">
 </p>
 
 - **AI hosts** connect over MCP with OAuth. The leader is set by `PANTER_LEAD_HOST`; every other host is a worker.
@@ -86,6 +86,8 @@ The script builds and tests that commit, stops the service for a consistent back
 
 Panter keeps its state in one SQLite ledger plus a few JSON stores. Run **one process** per data directory.
 
+To run your own instance, see [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md): your accounts, domain and secrets live only in your server's `panter.env`, never in this repository.
+
 ## Documentation
 
 | Topic | Read |
@@ -98,6 +100,7 @@ Panter keeps its state in one SQLite ledger plus a few JSON stores. Run **one pr
 | Waking hosts | [CLAUDE_ROUTINE_WAKE.md](docs/CLAUDE_ROUTINE_WAKE.md), [GROK_BOT_WAKE.md](docs/GROK_BOT_WAKE.md), [GEMINI_MAIL_WAKE.md](docs/GEMINI_MAIL_WAKE.md) |
 | Tools and routers | [TOOL_SURFACE.md](docs/TOOL_SURFACE.md) |
 | Downstream MCP servers | [DOWNSTREAM_MCP.md](docs/DOWNSTREAM_MCP.md) |
+| Your own instance | [SELF_HOSTING.md](docs/SELF_HOSTING.md), [OWNER_MODE.md](docs/OWNER_MODE.md) |
 | Operations | [OPERATIONS.md](docs/OPERATIONS.md), [ORACLE_ARM.md](docs/ORACLE_ARM.md) |
 | History (v0.1 to v0.15) | [HISTORY.md](docs/HISTORY.md) |
 

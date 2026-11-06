@@ -1,6 +1,6 @@
 # Operación de Panter-ai en producción
 
-Producción corre en la VM de Oracle (`zana-main`) como servicio `systemd --user`, detrás de un túnel de Cloudflare. Este documento cubre el despliegue, los backups y el healthcheck.
+El despliegue de referencia corre en una VM Linux como servicio `systemd --user`, detrás de un túnel de Cloudflare. Este documento cubre el despliegue, los backups y el healthcheck.
 
 ## Estructura
 

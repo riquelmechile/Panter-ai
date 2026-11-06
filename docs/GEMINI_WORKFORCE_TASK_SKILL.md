@@ -2,7 +2,7 @@
 
 ## Host configuration (Gemini Apps, not the Panter backend)
 
-This is a host-native cloud Task schedule, **not** the historical Xanxittoo
+This is a host-native cloud Task schedule, **not** a
 Spark Gmail/Cloudflare callback relay and not a Grok Bot webhook.
 The connected Gemini account must already have its own approved Panter OAuth
 connector and may retain the operator's preconfigured "Always allow" app-action
@@ -78,11 +78,11 @@ including **two independent scheduled invocations** and one terminal receipt.
 - **Grok Bot:** keep the independently approved bearer-webhook Routine and
   native fallback already merged in PR #64.
 - **Gemini:** a scheduled Task + Skill + custom app is the primary wake path.
-  Xanxittoo's Spark email relay remains historical compatibility; do not
+  The Gmail relay (docs/GEMINI_MAIL_WAKE.md) is a fallback; do not
   configure it as Panter's primary path.
 
 **Do not deploy Oracle based on this document alone.** The PR must pass
-CI, exact-SHA independent GitHub review and Xanxittoo RDD 4R. Then run
+CI, exact-SHA independent GitHub review and Panter-RDD 4R. Then run
 host E2E before reporting autonomous readiness.
 
 Official Google docs:

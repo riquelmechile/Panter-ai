@@ -29,7 +29,7 @@ PANTER_DATA_DIR=/data
 The bridge launches `engram mcp --tools=agent --project panter-ai` over **local
 stdio** with a dedicated `ENGRAM_DATA_DIR=/data/engram/data` and workspace
 project configuration. Its child environment disables optional cloud autosync
-and update checks. Do not point this instance at Xanxittoo's Engram DB. Run
+and update checks. Do not point this instance at another service's Engram DB. Run
 only one Panter replica until multi-process transaction and sync semantics
 are implemented. Back up the whole `/data` volume before upgrading Engram.
 

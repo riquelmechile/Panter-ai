@@ -31,7 +31,7 @@ The checked-in upstream files are **instructions/catalog**, not authority to byp
 
 ```dotenv
 # Read-only GitHub API gate. Nothing is queried outside the allowlist.
-PANTER_GITHUB_ALLOWED_REPOS=riquelmechile/Panter-ai
+PANTER_GITHUB_ALLOWED_REPOS=your-org/panter-ai
 # These are actual check-run names (not arbitrary CI run URLs).
 PANTER_GITHUB_REQUIRED_CHECKS=test
 # Optional fine-grained read-only token, supplied through secret manager only.

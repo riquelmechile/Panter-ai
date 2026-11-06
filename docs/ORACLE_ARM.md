@@ -23,7 +23,7 @@ Clone the repository only after the reviewed PR is merged or use the explicit fe
 
 ```sh
 # Test branch; switch to the reviewed release branch for later deployments.
-git clone --branch feat/initial-a2a-mesh-v0.3.0 https://github.com/riquelmechile/Panter-ai.git
+git clone --branch feat/initial-a2a-mesh-v0.3.0 https://github.com/<your-org>/panter-ai.git
 cd Panter-ai
 cp .env.example .env
 chmod 600 .env
@@ -37,7 +37,7 @@ docker compose -f compose.dev.yml ps
 curl -fsS http://127.0.0.1:18080/health
 ```
 
-The container listens internally on port 8080; Docker publishes it only to **127.0.0.1 of the Oracle host** at port **18080 by default** (set `PANTER_HOST_PORT` to another free local port in `.env`). Do not collide with an existing Xanxittoo or other Oracle service. To inspect remotely, use SSH local forwarding from a separate trusted workstation:
+The container listens internally on port 8080; Docker publishes it only to **127.0.0.1 of the Oracle host** at port **18080 by default** (set `PANTER_HOST_PORT` to another free local port in `.env`). Do not collide with another service on the host. To inspect remotely, use SSH local forwarding from a separate trusted workstation:
 
 ```sh
 ssh -N -L 18080:127.0.0.1:18080 user@oracle-host
@@ -82,7 +82,7 @@ In embedded or external OAuth mode, `PANTER_OPERATOR_TOKEN` is a **separate** ad
 
 ## Security follow-up after independent Claude review (30 October 2026)
 
-Operator access was isolated in code onto a Unix-domain socket with `0600` filesystem permissions and an additional operator token. A bearer presented to the **public TCP** listener never becomes an administrator (even if nginx sends `Host: 127.0.0.1` and hides its forwarding chain). Set the socket within the writable, dedicated Panter volume, not Xanxittoo's directories. Because Docker binds can alter remote addresses, never expose the private socket with a port mapping: use a locally controlled socket-aware MCP client inside the Panter network namespace or an operator-owned private filesystem mount with strict ACLs.
+Operator access was isolated in code onto a Unix-domain socket with `0600` filesystem permissions and an additional operator token. A bearer presented to the **public TCP** listener never becomes an administrator (even if nginx sends `Host: 127.0.0.1` and hides its forwarding chain). Set the socket within the writable, dedicated Panter volume, not another service's directories. Because Docker binds can alter remote addresses, never expose the private socket with a port mapping: use a locally controlled socket-aware MCP client inside the Panter network namespace or an operator-owned private filesystem mount with strict ACLs.
 
 The OAuth upstream's rate identity now uses `PANTER_TRUSTED_PROXY_CIDRS`, with an overwritten single-IP `X-Panter-Client-IP` header required from pinned proxy peers. Nginx/Cloudflare must enforce real-client IP provenance and independent rate limits. See `docs/nginx-panter.conf.example`; it is a template, **not** a deployed Cloudflare configuration. Verify the exact OCI proxy layout, health, 401/403 boundaries, DNS, TLS, client quotas, owner-only socket and end-to-end login before public exposure.
 

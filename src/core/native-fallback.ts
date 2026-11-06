@@ -46,7 +46,7 @@ export function planHostNative(input: {
     throw new Error('Invalid host-native worker count');
   if(input.assignments.length===0||input.assignments.length>32)throw new Error('Invalid assignment count');
   const configured = new Map(input.bindings.map(x=>[x.agentId,x]));
-  // Xanxittoo parity: always request maximum GPT-A reasoning and fast native branches;
+  // Always request maximum GPT-A reasoning and fast native branches;
   // external peers cannot lower the root capability request in solo mode.
   const reportedNativeSlots=capabilities.nativeSubagents?Math.min(capabilities.maxParallelSubagents,requestedNativeWorkers):0;
   const workerSlots=route.mode==='COORDINATED'?Math.min(reportedNativeSlots,input.assignments.length):0;

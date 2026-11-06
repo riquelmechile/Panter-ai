@@ -104,11 +104,11 @@ Para regresar de release: respaldar los datos antes del cambio; detener Panter; 
 
 Repetir exactamente las mismas mediciones de procesos, listeners y hashes de configuración del preflight. Los procesos preexistentes deben conservar sus PID, sus hashes deben ser idénticos y el **único listener agregado** debe ser el del canary en loopback. Cualquier diferencia ajena a Panter exige detenerse y reportar, sin modificar servicios ajenos. Los PID/hashes reales son evidencia privada y nunca se comiten.
 
-## Compatibilidad OAuth ChatGPT (referencia DevZana)
+## Compatibilidad OAuth ChatGPT
 
-El servidor OAuth está integrado en Panter y funciona sobre Node con datos persistentes del canary. **No utiliza Railway ni requiere copiar PostgreSQL, el proveedor multi-tenant o secretos de DevZana.** La URL pública debe apuntar a la entrada HTTPS real del túnel; el servicio nativo continúa vinculado a loopback.
+El servidor OAuth está integrado en Panter y funciona sobre Node con datos persistentes del canary. **No utiliza Railway ni requiere copiar PostgreSQL, el proveedor multi-tenant ni secretos de otro proyecto.** La URL pública debe apuntar a la entrada HTTPS real del túnel; el servicio nativo continúa vinculado a loopback.
 
-El repositorio `DevZana` demostró el patrón de OAuth 2.1 con DCR, PKCE S256, redirect exacto y **RFC 9207**. En Panter, `/.well-known/oauth-authorization-server` anuncia `authorization_response_iss_parameter_supported: true` porque las respuestas de consentimiento autorizado y denegado incluyen `iss` idéntico al emisor del discovery; las dos rutas de protected-resource metadata deben referir al mismo emisor. Panter **no** anuncia CIMD, ya que no implementa client metadata documents.
+Un proyecto previo demostró el patrón de OAuth 2.1 con DCR, PKCE S256, redirect exacto y **RFC 9207**. En Panter, `/.well-known/oauth-authorization-server` anuncia `authorization_response_iss_parameter_supported: true` porque las respuestas de consentimiento autorizado y denegado incluyen `iss` idéntico al emisor del discovery; las dos rutas de protected-resource metadata deben referir al mismo emisor. Panter **no** anuncia CIMD, ya que no implementa client metadata documents.
 
 Verificación de compatibilidad antes de intentar el alta desde ChatGPT:
 

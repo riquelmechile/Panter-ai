@@ -36,7 +36,7 @@
 - PR 2/3: servidor AF_UNIX, credenciales de pares verificadas en kernel, UID separado, denegación de operaciones no autorizadas, límites de recursos, reparación de estado incierto y **worktrees por intento**. En Node sin API nativa de `SO_PEERCRED`, el servicio debe usar una capa nativa revisada o fallar cerrado: permisos de socket por sí solos no satisfacen el ADR.
 - PR 3/3: sandbox rootless real para ejecutar `npm ci`/build/test sin secretos ni red libre, pruebas adversariales de filesystem y red, y controlador de release separado por allowlist de servicios. Crear `panter-review` en fase 3, con llave Ed25519 independiente.
 
-**No modificar ni apagar Xanxittoo en este PR.** Referencia normativa: [ADR-001](architecture/ADR-001-ISOLATED-RUNNER.md).
+Referencia normativa: [ADR-001](architecture/ADR-001-ISOLATED-RUNNER.md).
 
 
 ## Fase 2 — PR incremental de admisión Unix sin efectos (posterior a #25)

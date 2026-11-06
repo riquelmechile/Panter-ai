@@ -119,7 +119,7 @@ with a dedicated persistent project and no inference API. GPT-A alone may
 search/recover curated project knowledge or store verified decisions; other
 hosts return candidate discoveries as A2A messages/receipts. The official
 Engram ARM64 binary must be installed separately; the bridge does not share
-Xanxittoo's database or make unsupported autonomous-memory claims.
+another service's database or make unsupported autonomous-memory claims.
 See [docs/ENGRAM_MEMORY.md](ENGRAM_MEMORY.md).
 
 

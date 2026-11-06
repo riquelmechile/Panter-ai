@@ -5,7 +5,7 @@
 GPT-A is the orchestrator. GPT-B is an independent connected ChatGPT
 application account, and Gemini is an independently connected Gemini
 application account. Each uses its already approved OAuth grant to
-`https://panter.quintoestado.com/mcp`. The same Panter-ai MCP HTTP endpoint
+`https://panter.example.com/mcp`. The same Panter-ai MCP HTTP endpoint
 is the only control plane. No Codex CLI, Antigravity CLI, OpenAI/Google
 model-provider APIs, ChatGPT Work, Gmail relay or additional local worker.
 
@@ -58,7 +58,7 @@ alone**. A real host-side unattended event is required to promote
 model inference API merely to manufacture that proof.
 
 Do not merge or deploy before exact-SHA CI, independent GitHub APPROVED,
-Xanxito 4R and owner authorization for the Oracle service switch.
+Panter-RDD 4R and owner authorization for the service switch.
 
 Official sources:
 - https://developers.openai.com/plugins/concepts/mcp-server
