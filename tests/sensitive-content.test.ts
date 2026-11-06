@@ -78,18 +78,18 @@ test('the mesh refuses personal data in worker results and messages of a guarded
     assert.equal((await m.resultGet('gpt-a', w.id)).result, 'Screen reviewed; patient ids are pseudonymous (P-0042)');
     const other = await m.delegate('gpt-a', { missionId: 'normal-run', target: 'grok', role: 'reviewer', instruction: 'Ping', idempotencyKey: 'k2' });
     const oc = await m.claim('grok', other.id);
-    await m.complete('grok', other.id, oc.attemptId!, oc.leaseGeneration, 'mailed ana@example.com');
-    assert.equal((await m.resultGet('gpt-a', other.id)).result, 'mailed ana@example.com', 'other missions are not checked');
+    await m.complete('grok', other.id, oc.attemptId!, oc.leaseGeneration, 'mailed ana@tienda-ficticia.cl');
+    assert.equal((await m.resultGet('gpt-a', other.id)).result, 'mailed ana@tienda-ficticia.cl', 'other missions are not checked');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test("Panter's own mailboxes are not personal data; anyone else's still is", async () => {
   const { allowSystemAddresses } = await import('../src/core/sensitive-content.js');
-  const quote = 'Gemini wakes when gemini-panter@plasticov.cl writes to Gemini-Inbox@gmail.com';
+  const quote = 'Gemini wakes when gemini-panter@tienda-ficticia.cl writes to Gemini-Inbox@gmail.com';
   assert.match(findSensitive(quote) ?? 'none', /e-mail/);
-  allowSystemAddresses(['gemini-panter@plasticov.cl', ' gemini-inbox@gmail.com ', 'not an address', undefined]);
+  allowSystemAddresses(['gemini-panter@tienda-ficticia.cl', ' gemini-inbox@gmail.com ', 'not an address', undefined]);
   assert.equal(findSensitive(quote), null);
-  assert.match(findSensitive('paciente ana@plasticov.cl') ?? 'none', /e-mail/, 'only the exact addresses, never the domain');
+  assert.match(findSensitive('paciente ana@tienda-ficticia.cl') ?? 'none', /e-mail/, 'only the exact addresses, never the domain');
   allowSystemAddresses([]);
   assert.match(findSensitive(quote) ?? 'none', /e-mail/);
 });

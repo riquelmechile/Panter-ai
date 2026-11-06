@@ -49,8 +49,8 @@ function logOAuthReject(stage: string, err: unknown) {
  * navigate to gemini.google.com. Chrome enforces the consent page's form-action CSP
  * over the whole redirect chain after a POST, so a 302 to the relay is blocked and
  * Gemini never receives the code. Answer with a no-script HTML handoff instead,
- * decoupling the form submission from the cross-origin navigation (same approach as
- * DevZana). Only these exact Google relay hosts qualify; the URI itself was already
+ * decoupling the form submission from the cross-origin navigation (a proven
+ * pattern). Only these exact Google relay hosts qualify; the URI itself was already
  * validated against the configured callback allowlist.
  */
 const GEMINI_RELAY_HOSTS = new Set(['oauth-redirect.googleusercontent.com', 'oauth-redirect-sandbox.googleusercontent.com', 'oauth-redirect-test.googleusercontent.com']);

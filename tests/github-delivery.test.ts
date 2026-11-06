@@ -101,19 +101,22 @@ test('bootstrap PR #1 accepts 117 commits only with single-PR operator consent a
   const items=(count:number)=>Array.from({length:count},(_,i)=>({sha:String(i).padStart(40,'a'),commit:{message:'feat: bootstrap change '+i}}));
   const entries:Record<string,unknown>={
     '':{default_branch:'main'},
-    'pulls/1':{...pr,commits:117,body:'Refs #2',head:{...pr.head,repo:{full_name:'riquelmechile/Panter-ai'}}},
+    'pulls/1':{...pr,commits:117,body:'Refs #2',head:{...pr.head,repo:{full_name:'example-org/panter-ai'}}},
     'issues/2':issue,
     'pulls/1/commits?per_page=100':items(100),
     'pulls/1/commits?per_page=100&page=2':items(17),
     [`commits/${sha}/check-runs?per_page=100`]:checks
   };
   const request=(async(url:string|URL|Request)=>{
-    const key=String(url).split('/repos/riquelmechile/Panter-ai/')[1]??'';
+    const key=String(url).split('/repos/example-org/panter-ai/')[1]??'';
     const payload=entries[key];return {ok:payload!==undefined,status:payload===undefined?404:200,
       text:async()=>JSON.stringify(payload)} as Response;
   }) as typeof fetch;
-  const g=new GitHubDeliveryGate({allowedRepositories:['riquelmechile/Panter-ai'],requiredChecks:['test']},request);
-  const input={repository:'riquelmechile/Panter-ai',prNumber:1,expectedSha:sha};
+  const g=new GitHubDeliveryGate({allowedRepositories:['example-org/panter-ai'],requiredChecks:['test'],bootstrapRepository:'example-org/panter-ai'},request);
+  // Without the configured bootstrap repository the exception never applies.
+  const plain=new GitHubDeliveryGate({allowedRepositories:['example-org/panter-ai'],requiredChecks:['test']},request);
+  assert.equal((await plain.inspect({repository:'example-org/panter-ai',prNumber:1,expectedSha:sha,deliveryStrategy:'single-pr',parentAuthorizedSinglePr:true})).state,'BLOCKED');
+  const input={repository:'example-org/panter-ai',prNumber:1,expectedSha:sha};
   assert.equal((await g.inspect(input)).state,'BLOCKED');
   const approved=await g.inspect({...input,deliveryStrategy:'single-pr',parentAuthorizedSinglePr:true});
   assert.equal(approved.state,'REVIEWABLE');

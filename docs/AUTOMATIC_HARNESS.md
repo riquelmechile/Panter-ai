@@ -25,7 +25,7 @@ Panter-ai follows the **organic** work routing of Gentle Shell: GPT-A receives t
 
 ## Maximum-capacity policy
 
-Same model request as Xanxittoo: `gpt-6-astra`, `max` (fallback `xhigh`), native workers with Fast processing when exposed, observed native capacity up to a planner ceiling of 32. A capability request is not evidence of an actual ChatGPT model switch or of subagent creation. GPT-A continues inline when no subagents exist. A transition to `GPT_A_ONLY` prohibits fresh remote delegations even for a previously created `AUTO` run, without silently reassigning uncertain in-flight remote writes.
+Model request: `gpt-6-astra`, `max` (fallback `xhigh`), native workers with Fast processing when exposed, observed native capacity up to a planner ceiling of 32. A capability request is not evidence of an actual ChatGPT model switch or of subagent creation. GPT-A continues inline when no subagents exist. A transition to `GPT_A_ONLY` prohibits fresh remote delegations even for a previously created `AUTO` run, without silently reassigning uncertain in-flight remote writes.
 
 ## Authority and limitations
 

@@ -1,4 +1,4 @@
-/** Gemini wake over Gmail, without any Gemini API (same pattern Xanxittoo used for Spark).
+/** Gemini wake over Gmail, without any Gemini API (Gmail monitor pattern).
  *
  * Gemini's only event trigger is a Gmail monitor. Panter therefore claims a READ-ONLY Gemini work for
  * one mail attempt, sends the task through the operator's Cloudflare email relay to the Gmail inbox

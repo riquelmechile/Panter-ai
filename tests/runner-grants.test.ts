@@ -18,7 +18,7 @@ const now=Date.now();
 function claims(override:Partial<RunnerGrant>={}):RunnerGrant {
   return {version:1, grantId:randomUUID(), issuer:'panter-ai', audience:'panter-runner',
     subject:'gpt-a', missionId:'mission-1', workId:'work-1',attemptId:'attempt-1',
-    leaseGeneration:1,repository:'riquelmechile/Panter-ai',candidateSha:sha,
+    leaseGeneration:1,repository:'example-org/panter-ai',candidateSha:sha,
     notBefore:now-1000,expiresAt:now+60_000,maxUses:1,operations:['workspace.prepare'],
     paths:['src/core'],effectClass:'WORKTREE_WRITE',...override};
 }
@@ -26,7 +26,7 @@ function signed(x:RunnerGrant, privateKey=keys.privateKey):SignedRunnerGrant {
   return {keyId:'panter-owner-1',claims:x,signature:sign(null,grantPayload(x),privateKey).toString('base64url')};
 }
 const ctx:RunnerGrantContext={subject:'gpt-a',missionId:'mission-1',workId:'work-1',
-  attemptId:'attempt-1',leaseGeneration:1,repository:'riquelmechile/Panter-ai',
+  attemptId:'attempt-1',leaseGeneration:1,repository:'example-org/panter-ai',
   candidateSha:sha,operation:'workspace.prepare',effectClass:'WORKTREE_WRITE'};
 const rejects=(fn:()=>unknown)=>assert.throws(fn,GrantRejected);
 

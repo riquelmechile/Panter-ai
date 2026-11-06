@@ -101,7 +101,7 @@ The checkboxes below are a **historical per-release backlog** and should not be 
 - [x] Supuesto de seguridad: todas las cuentas conectadas pertenecen al mismo dueño. Si se usa, el registro de clientes (`/register`, `/authorize`, `/oauth/consent`) debe quedar cerrado en el borde (en producción: 403 en el túnel) y abrirse solo para reconectar.
 - [ ] Riesgo aceptado: un token robado de cualquiera de esos hosts tiene poder de operador hasta que se revoque su cliente. Mitigación: revocación por cliente, refresh rotativo con detección de reuso y quitar la variable para volver al modo restringido.
 
-## v0.16 SQLite WAL transaccional — fase 1 Xanxittoo → Panter
+## v0.16 SQLite WAL transaccional — fase 1
 
 - [x] Esquema SQLite versionado (`user_version=1`, `schema_migrations`) y WAL para `state`, `agents`, `mesh`, `harness` y `oauth`; importación transaccional de los JSON, preservando las conexiones OAuth sin volver a registrar los clientes.
 - [x] Lecturas y escrituras desde SQLite, `BEGIN IMMEDIATE` contra pérdidas de actualización entre conexiones, `busy_timeout`, integridad y pruebas de reinicio.
@@ -111,7 +111,7 @@ The checkboxes below are a **historical per-release backlog** and should not be 
 
 Guía: [SQLITE_MIGRATION.md](SQLITE_MIGRATION.md). Node 22 `node:sqlite` aún es experimental; fijar y validar la versión del runtime.
 
-## v0.16 Xanxittoo 2.0 — Workforce/Wake Gateway (fase 1)
+## v0.16 Workforce/Wake Gateway (fase 1)
 
 - [x] GPT-A orquestador y cuatro peers GPT-B, Claude, Grok y Gemini, sin Kimi.
   Peek actor-bound `panter_workforce_next`, estado agregado `panter_workforce_status`,
@@ -226,7 +226,7 @@ La interfaz read-only no ejecuta código, no hace cambios en producción y no re
 - [x] Gateway de MCP downstream: registro en `PANTER_DOWNSTREAM_CONFIG`, un router `panter_ds_<nombre>` por servidor listado solo para sus hosts, clasificación lectura/escritura/destructiva desde las anotaciones MCP, política `writes` y grants del operador, timeout, circuit breaker, límites de tamaño, redacción del token y audit. Ver [DOWNSTREAM_MCP.md](DOWNSTREAM_MCP.md).
 - [x] Servidores downstream `sensitive` (proxy sin guardar contenido, misiones sensibles sin datos personales) e identidad del actor firmada (Ed25519) en cada llamada. Ver [DOWNSTREAM_MCP.md](DOWNSTREAM_MCP.md).
 - [ ] Montar commerce-control como primer servidor downstream (su propio repo, servicio, token y aprobaciones), empezando con `writes: "deny"`.
-- [ ] Siguientes downstream: XanxitoSpA y los demás proyectos, cada uno con el mismo contrato (`sensitive: true` para los que traen datos que Panter no debe guardar).
+- [ ] Siguientes downstream: otros proyectos, cada uno con el mismo contrato (`sensitive: true` para los que traen datos que Panter no debe guardar).
 
 ## v1.4 modo dueño
 

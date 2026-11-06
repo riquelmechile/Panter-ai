@@ -2,6 +2,14 @@
 
 All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://semver.org/). Releases before 1.0 are described in [docs/HISTORY.md](docs/HISTORY.md).
 
+## Unreleased
+
+### Public, generic repository
+- No owner accounts, domains, server paths or store names in code, tests, examples or docs: example configs use `your-org/*` and `<reviewer-account>`, tests use `example-org/*`, README images use relative paths.
+- The one-time bootstrap exception of the delivery gate is configured with `PANTER_GITHUB_BOOTSTRAP_REPOSITORY` instead of a repository written in the code.
+- Removed operator-specific logs and migration notes from `docs/`. New [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md): what goes in your server's `panter.env` and what never goes in the repository.
+- `tests/public-repo-hygiene.test.ts` fails CI on a tracked credential in a real format or a real value in the example configs.
+
 ## 1.4.0 (2026-11-06)
 
 ### Owner mode

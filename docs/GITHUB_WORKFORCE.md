@@ -6,7 +6,7 @@ Los trabajadores (GPT-A, GPT-B, Grok, Gemini) pueden leer y dejar trabajo en Git
 
 ```
 PANTER_GITHUB_WORKFORCE_TOKEN=<token del operador; nunca en el repo>
-PANTER_GITHUB_WORKFORCE_REPOS=riquelmechile/*        # obligatoria: "owner/repo" u "owner/*", separados por coma
+PANTER_GITHUB_WORKFORCE_REPOS=your-org/*        # obligatoria: "owner/repo" u "owner/*", separados por coma
 ```
 
 El repositorio es público: el token va solo en el entorno del servicio (por ejemplo `etc/panter.env` o el lanzador `bin/run`), nunca en el código, la documentación, los paquetes A2A ni los resultados. Sin token o sin lista de repos la capacidad queda apagada.

@@ -1,6 +1,6 @@
 # Workforce / Wake Gateway — fases 1–2C (sin activación externa)
 
-Panter-ai es Xanxittoo 2.0. GPT-A es el único orquestador; GPT-B, Claude,
+GPT-A es el único orquestador; GPT-B, Claude,
 Grok y Gemini son los cuatro trabajadores. Kimi no forma parte del contrato.
 Las cuentas pueden estar conectadas al producto y aun así su presencia MCP
 actual y su capacidad de wake permanecen desconocidas.
@@ -39,7 +39,7 @@ actual y su capacidad de wake permanecen desconocidas.
 ## Próximos cortes
 
 1. Incorporar adaptadores de entrega/pickup y capacidad verificada por
-   protocolo 2025/2026, usando componentes de Xanxittoo y DevZana ADR-002/M5.
+   protocolo 2025/2026, 
    Mantener **una sola cola autoritativa** y no enviar instrucciones por wake.
 2. Incorporar controles de wake externo por superficie y validación anti-replay,
    anti-SSRF, autenticación, cuotas, circuit breaker y revocación.
@@ -50,7 +50,7 @@ actual y su capacidad de wake permanecen desconocidas.
    prueba de disponibilidad; caso contrario continuar inline/nativo o
    `WAITING_CAPABILITY` sin crear workers ficticios.
 
-**No se instala ni se activa un servicio. No modifica Xanxittoo, Oracle o
+**No se instala ni se activa un servicio. No modifica otros servicios del host ni
 Cloudflare.** Revisar PR y CI SHA exacto antes de merge y E2E antes de producción.
 
 ## Fase 2A: long-poll por actor (sin wake externo)

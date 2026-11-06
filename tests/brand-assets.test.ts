@@ -55,8 +55,9 @@ test('every image the README embeds is a file in this repository', () => {
   const urls = [...readme.matchAll(/<img\s[^>]*src="([^"]+)"/g)].map(m => m[1]!);
   assert.ok(urls.length >= 3);
   for (const url of urls) {
-    const m = /^https:\/\/raw\.githubusercontent\.com\/riquelmechile\/Panter-ai\/main\/(.+\.svg)$/.exec(url);
-    assert.ok(m, `canonical raw URL: ${url}`);
+    // Relative paths: they render on GitHub and in any fork, with no owner baked into the README.
+    const m = /^(docs\/assets\/[A-Za-z0-9_.-]+\.svg)$/.exec(url);
+    assert.ok(m, `relative asset path: ${url}`);
     assert.ok(existsSync(join(root, m[1]!)), `maps to a real file: ${m[1]}`);
   }
   for (const link of readme.matchAll(/<a\s[^>]*href="([^"#:]+)"/g)) assert.ok(existsSync(join(root, link[1]!)), `README navigation link resolves: ${link[1]}`);

@@ -106,13 +106,13 @@ Reference: https://developers.google.com/connected-apps/mcp/server-optimization
 ## Security and rollout
 
 - Never expose a model-provider API or add a CLI/worker to Oracle.
-- Do not modify `xanxittoo.service`, current production, or OAuth client
+- Do not modify other services on the host, current production, or OAuth client
   registrations.
 - New event subscription state is saved in Panter's 0600 SQLite file;
   callback URL and signing secret are not returned to ordinary MCP tools.
 - Observe delivery and real host execution with **two events** without
   human interaction and no duplicate claims before declaring the wake live.
-- CI, independent GitHub review, and Xanxito 4R approval on exact SHA
+- CI, independent GitHub review, and Panter-RDD 4R approval on exact SHA
   are required before deployment.
 
 ## Revocar una conexión

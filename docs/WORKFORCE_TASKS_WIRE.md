@@ -37,5 +37,5 @@ Do not configure provider webhooks, Gmail/Slack/GitHub doorbells or model
 API keys as prerequisites for Tasks/Listen. Reuse the backend-only receipt
 and rearm contract already shipped in PR #60.
 
-References: Xanxittoo `docs/workforce-mesh.md` and official
+References: official
 `modelcontextprotocol/ext-tasks/specification/2026-07-28/tasks.md`.

@@ -13,6 +13,8 @@ export type GitHubGateConfig = {
   /** Dedicated GitHub login whose APPROVE on the exact head SHA is the
    * independent-review evidence (see docs/INDEPENDENT_REVIEW_IDENTITY.md). */
   independentReviewer?: string;
+  /** owner/repo whose PR #1 may be the one-time initial bootstrap (up to 300 commits with single-PR consent). */
+  bootstrapRepository?: string;
 };
 export type IndependentReviewEvidence = {
   login: string;
@@ -122,9 +124,10 @@ export class GitHubDeliveryGate {
       const labels=labelNames(prData.labels),types=labels.filter(x=>x.startsWith('type:'));
       if(types.length!==1||!acceptedTypes.has(types[0]!))soft('PR must have exactly one valid type:* label');else ok.push('type_label');
       const commitCount=Number(prData.commits);
-      // One-time exception for the owner-approved initial repository bootstrap;
+      // One-time exception for the owner-approved initial repository bootstrap (PANTER_GITHUB_BOOTSTRAP_REPOSITORY);
       // NEVER generalize this to subsequent or unrelated PRs.
-      const initialBootstrap=input.repository.toLowerCase()==='riquelmechile/panter-ai'&&
+      const bootstrap=this.cfg.bootstrapRepository?.trim().toLowerCase();
+      const initialBootstrap=!!bootstrap&&input.repository.toLowerCase()===bootstrap&&
         input.prNumber===1&&input.deliveryStrategy==='single-pr'&&
         input.parentAuthorizedSinglePr===true;
       // Owner mode reads up to 300 commits (GitHub lists at most 250 per PR) so the reviewer-authorship check still runs.

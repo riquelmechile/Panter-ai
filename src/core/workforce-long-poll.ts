@@ -1,4 +1,4 @@
-/** Single-process, actor-scoped MCP long-poll for Xanxittoo 2.0 Workforce.
+/** Single-process, actor-scoped MCP long-poll for the Panter workforce.
  * This is a live tool wait, NOT MCP Tasks, a provider wake, or a scheduler.
  * All work/leases remain authoritative in the existing Mesh SQLite ledger.
  */

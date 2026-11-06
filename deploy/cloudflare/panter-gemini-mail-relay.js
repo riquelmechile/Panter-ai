@@ -1,4 +1,4 @@
-// Panter Gemini mail relay (Cloudflare Worker). Separate from Xanxittoo's relay.
+// Panter Gemini mail relay (Cloudflare Worker). Deploy one relay per Panter instance.
 // POST /wake: Panter asks to e-mail one Gemini task. The Worker sends only envelopes that Panter itself
 //   confirms (POST /a2a/gemini/email-validate), to the single Gmail inbox that Gemini monitors.
 // email(): Gemini's reply to RELAY_ADDRESS is forwarded raw to Panter (/a2a/gemini/email-result), which

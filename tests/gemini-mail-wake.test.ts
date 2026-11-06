@@ -26,7 +26,7 @@ const delegate = (mesh: MeshEngine, key: string, role: 'explorer' | 'implementer
   mesh.delegate('claude', { missionId: 'm', target: 'gemini', role, instruction: 'Read file X and report', idempotencyKey: key });
 const qp = (s: string) => s.replace(/=/g, '=3D').replace(/"/g, '=22');
 const mime = (body: string) => Buffer.from([
-  'From: worker@gmail.com', 'To: relay@plasticov.cl', 'Subject: Re: [PANTER_GEMINI]', 'MIME-Version: 1.0',
+  'From: worker@gmail.com', 'To: relay@example.com', 'Subject: Re: [PANTER_GEMINI]', 'MIME-Version: 1.0',
   'Content-Type: multipart/alternative; boundary="b1"', '', '--b1', 'Content-Type: text/plain; charset="UTF-8"',
   'Content-Transfer-Encoding: quoted-printable', '', qp(body), '--b1--', ''].join('\r\n'), 'latin1').toString('base64');
 
@@ -330,7 +330,7 @@ test('attempt numbers never repeat, even after old tickets are purged', () => fi
 
 test('a reply wrapped at spaces keeps its spaces; a word broken at full width is rejoined without one', () => {
   const sha = '3c4ec64f01f32e60868424833addb9a9a9b73fd0';
-  const json = JSON.stringify({ agentId: 'jd-judge-b', candidateSha: sha, evidence: ['Read leader-supplied diff main...' + sha + ' in riquelmechile/panter-e2e (2 files modified, 1 commit ahead).',
+  const json = JSON.stringify({ agentId: 'jd-judge-b', candidateSha: sha, evidence: ['Read leader-supplied diff main...' + sha + ' in example-org/panter-e2e (2 files modified, 1 commit ahead).',
     'Verified add(a, b) remains unchanged and export function multiply(a, b) returns a * b.'] });
   // Word wrap at <=76 columns, dropping the space at each break (what the Gemini relay produced).
   const words = json.split(' '); const lines: string[] = []; let line = '';
@@ -375,7 +375,7 @@ test('a fixed-width or byte-width cut never changes the result, and a word wrap 
     JSON.stringify({ lens: 'risk', candidateSha: sha, findings: [{ severity: 'low', claim: 'a small thing in the code worth a second look later on' }] }),
     'Read the diff and found nothing to change in the work. Revisión completa: sin hallazgos críticos en el código de la función.',
     'Revisé la función principal 🐆🐭 y el módulo de pagos 🧾: todo en orden, sin hallazgos críticos ni advertencias pendientes en este cambio.',
-    JSON.stringify({ agentId: 'jd-judge-b', candidateSha: sha, evidence: [`Read leader-supplied diff main...${sha} in riquelmechile/panter-e2e (2 files modified).`, 'Verified add(a, b) remains unchanged and multiply(a, b) returns a * b.'] }),
+    JSON.stringify({ agentId: 'jd-judge-b', candidateSha: sha, evidence: [`Read leader-supplied diff main...${sha} in example-org/panter-e2e (2 files modified).`, 'Verified add(a, b) remains unchanged and multiply(a, b) returns a * b.'] }),
   ];
   const cutChars = (w: number) => (s: string) => s.split('\n').flatMap(l => l.match(new RegExp(`.{1,${w}}`, 'g')) ?? ['']).join('\r\n');
   const cutBytes = (w: number) => (s: string) => s.split('\n').flatMap(l => { const b = Buffer.from(l), o: string[] = []; let i = 0;

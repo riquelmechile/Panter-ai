@@ -25,7 +25,7 @@ Authoritative docs:
    once-only per-routine token. It is not an Anthropic model API key.
 4. Store the URL and token directly on Oracle under the private Panter-ai
    systemd `EnvironmentFile`, currently
-   `/home/zana/panter-ai/etc/panter.env`:
+   `~/panter-ai/etc/panter.env`:
 
    `PANTER_WAKE_CLAUDE_URL=<official https://api.anthropic.com/v1/claude_code/routines/{routine_id}/fire URL>`
 
@@ -33,7 +33,7 @@ Authoritative docs:
 
    Never commit values or return them from MCP tools. Keep the file owner
    controlled, mode `0600`. Both keys are required; when absent the
-   adapter is disabled. **Do not modify Xanxittoo's Claude setup.**
+   adapter is disabled. **Do not modify other services' Claude setups.**
 5. In Claude Code Routine instructions:
 
    > When triggered by a Panter-ai Workforce pointer, connect to the already
@@ -96,4 +96,4 @@ normal write-grant, independent review and delivery gates remain in force.
 - `panter_workforce_claude_wake_status` shows only the attempt status,
   HTTP status and session ID and whether an authenticated claim followed.
 - A runtime deploy to Oracle is separately gated; do not change
-  `xanxittoo.service`.
+  other services on the host.

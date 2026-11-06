@@ -19,7 +19,7 @@ const pinned=new Map([['offline-test',pair.publicKey]]);
 const event=()=>({requestId:randomUUID(),operation:'git.inspect' as const,
   grantDigest:'a'.repeat(64),status:'RESERVED' as const,outputDigest:'b'.repeat(64)});
 const intent=():OutcomeIntent=>({operationId:randomUUID(),subject:'gpt-a',
-  repository:'riquelmechile/Panter-ai',candidateSha:'c'.repeat(40),
+  repository:'example-org/panter-ai',candidateSha:'c'.repeat(40),
   missionId:'mission-1',workId:'work-1',attemptId:'attempt-1',
   leaseGeneration:1,operation:'git.inspect',grantDigest:'a'.repeat(64)});
 class FakeRemote implements AsyncSealAuthority{
