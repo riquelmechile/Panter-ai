@@ -2,7 +2,7 @@
 
 All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://semver.org/). Releases before 1.0 are described in [docs/HISTORY.md](docs/HISTORY.md).
 
-## Unreleased
+## 1.5.0 (2026-11-06)
 
 ### Public, generic repository
 - No owner accounts, domains, server paths or store names in code, tests, examples or docs: example configs use `your-org/*` and `<reviewer-account>`, tests use `example-org/*`, README images use relative paths.
