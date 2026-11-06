@@ -1,0 +1,12 @@
+{
+  "name": "panter-brand",
+  "private": true,
+  "type": "module",
+  "description": "Generators for the animated SVGs in docs/assets. Not part of the server build.",
+  "scripts": { "build": "sh build.sh" },
+  "dependencies": {
+    "@fontsource/space-grotesk": "^5.3.0",
+    "opentype.js": "^2.0.0",
+    "svg-path-properties": "^2.2.0"
+  }
+}
