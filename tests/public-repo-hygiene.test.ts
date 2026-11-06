@@ -1,13 +1,28 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, relative } from 'node:path';
 
 /** The repository is public and generic: no real credentials, and example configs carry placeholders only. */
 const root = join(import.meta.dirname, '..');
-const tracked = execFileSync('git', ['ls-files'], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean)
-  .filter(f => !/\.(svg|png|jpg|ico)$/.test(f) && f !== 'package-lock.json');
+const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'coverage', '.panter-data']);
+/** Files in Git; a release built by deploy/deploy.sh comes from `git archive` and has no .git, so walk the tree. */
+function inventory(): string[] {
+  try { return execFileSync('git', ['ls-files'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').filter(Boolean); }
+  catch {
+    const out: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.isDirectory()) { if (!SKIP_DIRS.has(e.name)) walk(join(dir, e.name)); }
+        else if (e.isFile()) out.push(relative(root, join(dir, e.name)));
+      }
+    };
+    walk(root);
+    return out;
+  }
+}
+const tracked = inventory().filter(f => !/\.(svg|png|jpg|ico)$/.test(f) && f !== 'package-lock.json' && f !== 'REVISION');
 
 const CREDENTIAL = [
   /\bgh[pousr]_[A-Za-z0-9]{36,}\b/, /\bgithub_pat_[A-Za-z0-9_]{60,}\b/, /\bAKIA[0-9A-Z]{16}\b/,
