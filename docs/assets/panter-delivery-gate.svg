@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" width="1200" height="600" role="img" aria-labelledby="pgen-title pgen-desc">
+  <title id="pgen-title">The delivery gate: what blocks a merge</title>
+  <desc id="pgen-desc">Diagram. A pull request goes through the delivery gate. Always blocking, in every mode: the exact frozen commit, an open non-draft pull request on the authorized base, required CI green, and the independent reviewer account approving that exact commit. Blocking by default and only warnings in owner mode: branch naming, one type label, an approved linked issue, conventional commits, no Co-Authored-By trailers, and pull request size. Then the leader merges with match-head-commit. Workers never merge, approve, force-push, write the default or protected branches, CI or git config, or read secrets.</desc>
+  <defs>
+    <marker id="pgen-arrow-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#2dd4bf"/></marker>
+    <marker id="pgen-arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#f5b301"/></marker>
+    <marker id="pgen-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#9aa3b5"/></marker>
+  </defs>
+  <rect width="1200" height="600" rx="24" fill="#0d1117"/>
+  <rect x="40" y="150" width="220" height="100" rx="12" fill="#161b26" stroke="#2dd4bf" stroke-width="2"/>
+  <text x="56" y="175" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Pull request</text>
+  <text x="56" y="196" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">opened by a worker</text>
+  <text x="56" y="214.5" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">from panter/&lt;host&gt;-&lt;id&gt;</text>
+  <line x1="266" y1="200" x2="322" y2="200" stroke="#2dd4bf" stroke-width="3" marker-end="url(#pgen-arrow-teal)"/>
+  <rect x="330" y="40" width="450" height="210" rx="16" fill="#111722" stroke="#f87171" stroke-width="2"/>
+  <text x="352" y="74" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Always blocks</text>
+  <circle cx="360" cy="106" r="5" fill="#f87171"/>
+  <text x="376" y="111" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" fill="#f5f0e6">exact frozen commit (SHA)</text>
+  <circle cx="360" cy="142" r="5" fill="#f87171"/>
+  <text x="376" y="147" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" fill="#f5f0e6">open, non-draft, authorized base</text>
+  <circle cx="360" cy="178" r="5" fill="#f87171"/>
+  <text x="376" y="183" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" fill="#f5f0e6">required CI checks green</text>
+  <circle cx="360" cy="214" r="5" fill="#f87171"/>
+  <text x="376" y="219" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" fill="#f5f0e6">independent reviewer approved that SHA</text>
+  <rect x="330" y="270" width="450" height="210" rx="16" fill="#111722" stroke="#f5b301" stroke-width="2" stroke-dasharray="7 6"/>
+  <text x="352" y="304" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Blocks by default · warning in owner mode</text>
+  <circle cx="360" cy="336" r="5" fill="#f5b301"/>
+  <text x="376" y="341" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" fill="#f5f0e6">branch naming, one type:* label</text>
+  <circle cx="360" cy="372" r="5" fill="#f5b301"/>
+  <text x="376" y="377" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" fill="#f5f0e6">approved linked issue</text>
+  <circle cx="360" cy="408" r="5" fill="#f5b301"/>
+  <text x="376" y="413" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" fill="#f5f0e6">Conventional Commits, no Co-Authored-By</text>
+  <circle cx="360" cy="444" r="5" fill="#f5b301"/>
+  <text x="376" y="449" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" fill="#f5f0e6">PR size and commit count</text>
+  <line x1="786" y1="200" x2="842" y2="200" stroke="#2dd4bf" stroke-width="3" marker-end="url(#pgen-arrow-teal)"/>
+  <rect x="850" y="150" width="310" height="100" rx="12" fill="#161b26" stroke="#4ade80" stroke-width="2"/>
+  <text x="866" y="175" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Leader merges</text>
+  <text x="866" y="196" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">--match-head-commit</text>
+  <text x="866" y="214.5" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">never a worker</text>
+  <rect x="850" y="270" width="310" height="210" rx="16" fill="#111722" stroke="#2a3142" stroke-width="2"/>
+  <text x="872" y="304" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Workers can never</text>
+  <text x="872" y="338" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#f87171">✕</text>
+  <text x="894" y="338" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" fill="#9aa3b5">merge or approve</text>
+  <text x="872" y="368" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#f87171">✕</text>
+  <text x="894" y="368" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" fill="#9aa3b5">force-push or delete branches</text>
+  <text x="872" y="398" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#f87171">✕</text>
+  <text x="894" y="398" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" fill="#9aa3b5">write main or protected branches</text>
+  <text x="872" y="428" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#f87171">✕</text>
+  <text x="894" y="428" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" fill="#9aa3b5">touch .github/workflows or git config</text>
+  <text x="872" y="458" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#f87171">✕</text>
+  <text x="894" y="458" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" fill="#9aa3b5">read secrets</text>
+  <rect x="40" y="500" width="1120" height="64" rx="12" fill="#111722" stroke="#2a3142" stroke-width="2"/>
+  <text x="600" y="527" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#9aa3b5">Owner mode (PANTER_OWNER_MODE=1) turns the dashed box into warnings. The red box and the worker limits never change.</text>
+  <text x="600" y="549" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#9aa3b5">Without an independent reviewer configured, owner mode blocks every delivery.</text>
+</svg>
