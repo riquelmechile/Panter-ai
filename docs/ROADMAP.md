@@ -233,3 +233,8 @@ La interfaz read-only no ejecuta código, no hace cambios en producción y no re
 - [x] `PANTER_OWNER_MODE=1`: permisos de escritura opcionales, escritores directos y sobre todo el repo, despertares que aceptan escritores y encolan, auto-delegación al trabajador alcanzable con menos carga, riesgo por palabras y convenciones de entrega como avisos. Ver [OWNER_MODE.md](OWNER_MODE.md).
 - [x] Estado del workforce con rutas de despertar y actividad de 24 h; `panter_mesh_withdraw` para retirar trabajo en cola.
 - [ ] Kimi como host de la fuerza laboral.
+
+## v1.5 repositorio público y genérico
+
+- [x] Sin cuentas, dominios, rutas ni nombres del dueño en el repo; la configuración real vive solo en el `panter.env` del servidor ([SELF_HOSTING.md](SELF_HOSTING.md)).
+- [x] Prueba de higiene en CI contra credenciales con formato real y valores reales en los ejemplos.
