@@ -553,7 +553,15 @@ export class MeshEngine {
           ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state)),
           input.target==='grok'?'Grok wake peer busy':input.target==='claude'?'Claude wake peer busy':'MCP event peer busy');
       }
-      if(input.specialist?.allowedEditSurfaces?.length){
+      if(input.role==='implementer'&&ownerMode()){
+        // Owner mode: an empty scope is the whole repository, so it overlaps every other active writer of the mission,
+        // in either order.
+        const mine=input.specialist?.allowedEditSurfaces??[];
+        const conflict=d.works.find(w=>w.missionId===input.missionId && w.role==='implementer' && ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state) &&
+          (()=>{const theirs=w.specialist?.allowedEditSurfaces??[];
+            return !mine.length||!theirs.length||theirs.some(a=>mine.some(b=>a===b || a.startsWith(b+'/') || b.startsWith(a+'/')));})());
+        check(!conflict,'Overlapping active writer edit surfaces');
+      }else if(input.specialist?.allowedEditSurfaces?.length){
         const conflict=d.works.find(w=>w.missionId===input.missionId && w.role==='implementer' && ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state) && (w.specialist?.allowedEditSurfaces??[]).some(a=>input.specialist!.allowedEditSurfaces.some(b=>a===b || a.startsWith(b+'/') || b.startsWith(a+'/'))));
         check(!conflict,'Overlapping active writer edit surfaces');
       }

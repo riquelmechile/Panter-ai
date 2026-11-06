@@ -73,9 +73,35 @@ test('owner mode: implementer delegated directly, through a wake route and behin
   const first = await m.delegate('gpt-a', { missionId: 'm1', target: 'grok', role: 'implementer', instruction: 'Edit the repo', idempotencyKey: 'w1' });
   assert.equal(first.state, 'QUEUED');
   // A wake route accepts a writer and queues it behind the busy peer instead of refusing it.
-  const second = await m.delegate('gpt-a', { missionId: 'm1', target: 'grok', role: 'implementer', instruction: 'Second edit', idempotencyKey: 'w2', wakeOnly: true });
+  const second = await m.delegate('gpt-a', { missionId: 'm2', target: 'grok', role: 'implementer', instruction: 'Second edit', idempotencyKey: 'w2', wakeOnly: true });
   assert.equal(second.state, 'QUEUED');
   assert.equal((await m.loadByHost()).grok, 2);
+  // A whole-repository writer overlaps every other writer of the same mission, in either order.
+  await assert.rejects(m.delegate('gpt-a', { missionId: 'm1', target: 'grok', role: 'implementer', instruction: 'Third edit', idempotencyKey: 'w3' }), /Overlapping active writer/);
+})));
+
+test('owner mode: a scoped writer and a whole-repository writer of one mission never run together', () => withOwner('1', () => withDir(async dir => {
+  const m = await MeshEngine.open(dir);
+  await m.setProfile('gpt-a', profile, 0);
+  await m.bindSpecialist('gpt-a', { agentId: 'gentle-ai-worker', host: 'grok', modelRequest: 'host-default', effortRequest: 'max', skillIds: ['gentle-ai'] }, 0);
+  await m.delegateBoundSpecialist('gpt-a', { missionId: 'mx', agentId: 'gentle-ai-worker', objective: 'Scoped', idempotencyKey: 's1', allowedEditSurfaces: ['src/core'] });
+  await assert.rejects(m.delegateBoundSpecialist('gpt-a', { missionId: 'mx', agentId: 'gentle-ai-worker', objective: 'Whole', idempotencyKey: 's2' }), /Overlapping active writer/);
+  await m.delegateBoundSpecialist('gpt-a', { missionId: 'my', agentId: 'gentle-ai-worker', objective: 'Whole', idempotencyKey: 's3' });
+  await assert.rejects(m.delegateBoundSpecialist('gpt-a', { missionId: 'my', agentId: 'gentle-ai-worker', objective: 'Scoped', idempotencyKey: 's4', allowedEditSurfaces: ['docs'] }), /Overlapping active writer/);
+  // Disjoint scoped writers still run side by side.
+  await m.delegateBoundSpecialist('gpt-a', { missionId: 'mx', agentId: 'gentle-ai-worker', objective: 'Docs', idempotencyKey: 's5', allowedEditSurfaces: ['docs'] });
+})));
+
+test('owner mode: an explicitly supplied grant is still enforced', () => withOwner('1', () => withDir(async dir => {
+  const mesh = await MeshEngine.open(dir), native = await NativeSubagentReview.open(dir);
+  const h = await AutomaticHarness.open(dir, mesh, native, undefined, undefined, undefined, false);
+  const objective = 'Edit foo only';
+  const grant = await h.grantWrite({ project: 'app', objective, allowedPaths: ['src/foo'], ttlSeconds: 600 });
+  await assert.rejects(h.start({ project: 'app', objective, idempotencyKey: 'g1', writesAuthorized: true, writeGrantId: grant.grantId, changeSurfaces: ['src/bar.ts'] }), /exceeds operator grant/);
+  const run = await h.start({ project: 'app', objective, idempotencyKey: 'g2', writesAuthorized: true, writeGrantId: grant.grantId });
+  assert.deepEqual(run.paths, ['src/foo']);
+  await assert.rejects(h.authorizeDelegatedWrite(run.id, ['src/bar.ts']), /Out-of-scope writer/);
+  await h.authorizeDelegatedWrite(run.id, ['src/foo/a.ts']);
 })));
 
 test('without owner mode a wake route still refuses writers and busy peers', () => withOwner('0', () => withDir(async dir => {

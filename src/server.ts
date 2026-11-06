@@ -282,7 +282,8 @@ async function ownerAutoDelegate(caller: Host, x: { missionId: string; role: Mes
   const profiles = await mesh.profiles(), load = await mesh.loadByHost(), events = workforceEvents.status(caller);
   const sensitive = downstream.isSensitiveMission(x.missionId);
   const candidates = workerHosts().filter(h => profiles.some(p => p.host === h && p.roles.includes(x.role)))
-    .map(h => ({ host: h, routes: wakeRoutes(h, events).filter(r => !(sensitive && r === 'GMAIL_RELAY')) }))
+    // Gemini's mail relay never carries sensitive missions nor writers (it has no repository access).
+    .map(h => ({ host: h, routes: wakeRoutes(h, events).filter(r => !(r === 'GMAIL_RELAY' && (sensitive || x.role === 'implementer'))) }))
     .filter(c => c.routes.length > 0)
     .sort((a, b) => (load[a.host] ?? 0) - (load[b.host] ?? 0) || workerHosts().indexOf(a.host) - workerHosts().indexOf(b.host));
   const chosen = candidates[0];

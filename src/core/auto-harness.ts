@@ -369,7 +369,8 @@ export class AutomaticHarness {
       const old=s.runs.find(r=>r.project===input.project&&r.key===input.idempotencyKey);
       if(old){ensure(old.inputDigest===digest,'Harness start idempotency conflict');return old;}
       let grant:WriteGrant|undefined;
-      if(input.writesAuthorized&&this.requireWriteGrant){
+      // An explicitly supplied grant is always enforced (owner mode only makes it optional).
+      if(input.writesAuthorized&&(this.requireWriteGrant||!!input.writeGrantId)){
         ensure(!!input.writeGrantId,'Operator write grant required');
         grant=s.grants?.find(g=>g.id===input.writeGrantId);
         ensure(grant&&grant.project===input.project&&grant.objectiveDigest===hash(input.objective)&&grant.expiresAt>Date.now()&&!grant.boundRunId,
@@ -381,7 +382,8 @@ export class AutomaticHarness {
         status:'PENDING'});
       const run:HarnessRun={id:randomUUID(),project:input.project,githubRepository:input.githubRepository,githubPrNumber:input.githubPrNumber,githubExpectedBase:input.githubExpectedBase,objective:input.objective,key:input.idempotencyKey,inputDigest:digest,
         permission:input.writesAuthorized?'WRITE_APPROVED':'READ_ONLY',writeGrantId:grant?.id,mode:selected.mode,
-        paths:selected.paths,risk:selected.risk,reviewTier:selected.tier,reason:selected.reasons,candidateSha:null,reviewKind:selected.reviewKind,
+        // Owner mode with a bounded grant and no listed surfaces: the grant's paths are the scope, not the whole repository.
+        paths:selected.paths.length||!grant?selected.paths:[...grant.allowedPaths],risk:selected.risk,reviewTier:selected.tier,reason:selected.reasons,candidateSha:null,reviewKind:selected.reviewKind,
         reviewId:null,reviewTransport:null,judgmentRequested:input.judgmentDayRequested===true,judgmentId:null,correctionAttempts:0,steps:selected.phases.map(step),createdAt:new Date().toISOString(),revision:1};
       if(grant)grant.boundRunId=run.id;
       s.runs.push(run);return run;
@@ -404,7 +406,7 @@ export class AutomaticHarness {
   }
   /** Bound grant checks are repeated at each new write packet, not just mission start. */
   private async activeWriteGrant(runId:string,paths:string[]):Promise<boolean>{
-    if(!this.requireWriteGrant)return true;
+    if(!this.requireWriteGrant&&!(await this.get(runId))?.writeGrantId)return true;
     try{await this.authorizeDelegatedWrite(runId,paths);return true;}catch{return false;}
   }
 
@@ -547,7 +549,7 @@ export class AutomaticHarness {
       if(step.status==='COMPLETE'){ensure(step.result?.digest===digest,'Conflicting immutable harness report');return r;}
       ensure(step.status==='ISSUED','Phase packet must be issued before reporting');
       if(step.phase==='DISCOVER' && discovered.length){
-        if(this.requireWriteGrant&&r.permission==='WRITE_APPROVED'){
+        if((this.requireWriteGrant||!!r.writeGrantId)&&r.permission==='WRITE_APPROVED'){
           const grant=s.grants?.find(g=>g.id===r.writeGrantId);ensure(grant,'Missing original grant');
           for(const path of discovered)ensure(grant.allowedPaths.some(allowed=>path===allowed||path.startsWith(allowed+'/')),
             'Discovered edit surface exceeds operator grant');
