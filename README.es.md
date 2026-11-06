@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="docs/assets/panter-banner.es.svg" alt="Panter-ai: un líder, todos los modelos, todos los MCP" width="100%">
+  <img src="docs/assets/panter-hero.es.svg" alt="Panter-ai: un líder, todos los modelos, todos los MCP. Banner animado con Panter, una pantera negra con cara de ratón cuya cola termina en un conector que brilla." width="100%">
+</p>
+
+<p align="center">
+  <img src="docs/assets/panter-typing.es.svg" alt="Una terminal escribe una tarea recorriendo Panter-ai: Claude delega, Panter despierta a Grok, Grok toma el trabajo y abre un pull request con evidencia, el revisor aprueba el commit exacto y Claude mergea." width="100%">
 </p>
 
 <p align="center">
@@ -195,6 +199,8 @@ La mayoría de las guías de `docs/` está en inglés o en español; este README
 ## Contribuir
 
 Ver [CONTRIBUTING.md](CONTRIBUTING.md). Los hosts y agentes que trabajan en este repositorio siguen [AGENTS.md](AGENTS.md).
+
+Las imágenes de `docs/assets` salen de [scripts/brand](scripts/brand/README.md): cambia el texto ahí y regenera en vez de editar los SVG a mano.
 
 ## Licencia
 

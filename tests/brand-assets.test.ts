@@ -50,6 +50,19 @@ test('brand SVGs are accessible, pure vector and self-contained', () => {
   }
 });
 
+test('animated SVGs stand still for readers who ask for reduced motion', () => {
+  const animated = svgs.filter(f => /<animate|@keyframes/.test(readFileSync(join(assets, f), 'utf8')));
+  assert.ok(animated.length >= 4);
+  for (const file of animated) {
+    const svg = readFileSync(join(assets, file), 'utf8');
+    // SMIL outranks CSS in Chrome, so a reduced-motion rule must hide the moving parts with display.
+    const rule = /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{([^@]*)\}/.exec(svg)?.[1] ?? '';
+    assert.match(rule, /display:\s*none/, `${file}: prefers-reduced-motion hides the animation`);
+    const smil = [...svg.matchAll(/<animate(?:Transform|Motion)?\b/g)].length;
+    if (smil) assert.ok(/class="(?:motion|pkt)"/.test(svg), `${file}: SMIL lives inside a hideable group`);
+  }
+});
+
 for (const name of ['README.md', 'README.es.md'])
 test(`every image ${name} embeds is a file in this repository`, () => {
   const readme = readFileSync(join(root, name), 'utf8');

@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="docs/assets/panter-banner.svg" alt="Panter-ai: one leader, every model, every MCP" width="100%">
+  <img src="docs/assets/panter-hero.svg" alt="Panter-ai: one leader, every model, every MCP. Animated banner with Panter, a black panther with a mouse face whose tail ends in a glowing connector." width="100%">
+</p>
+
+<p align="center">
+  <img src="docs/assets/panter-typing.svg" alt="A terminal types a task moving through Panter-ai: Claude delegates, Panter wakes Grok, Grok claims the work and opens a pull request with evidence, the reviewer approves the exact commit, Claude merges." width="100%">
 </p>
 
 <p align="center">
@@ -195,6 +199,8 @@ Most guides under `docs/` are written in English or Spanish; this README is avai
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Hosts and agents working in this repository follow [AGENTS.md](AGENTS.md).
+
+The images in `docs/assets` are generated from [scripts/brand](scripts/brand/README.md): change the text there and rebuild instead of editing the SVGs by hand.
 
 ## License
 

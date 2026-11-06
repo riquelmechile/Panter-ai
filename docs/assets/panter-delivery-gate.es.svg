@@ -5,6 +5,9 @@
     <marker id="pges-arrow-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#2dd4bf"/></marker>
     <marker id="pges-arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#f5b301"/></marker>
     <marker id="pges-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#9aa3b5"/></marker>
+    <radialGradient id="pges-halo"><stop offset="0" stop-color="#ffffff" stop-opacity=".9"/><stop offset=".35" stop-color="#2dd4bf" stop-opacity=".55"/><stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/></radialGradient>
+    <radialGradient id="pges-haloa"><stop offset="0" stop-color="#ffffff" stop-opacity=".9"/><stop offset=".35" stop-color="#f5b301" stop-opacity=".6"/><stop offset="1" stop-color="#f5b301" stop-opacity="0"/></radialGradient>
+    <style>@media (prefers-reduced-motion: reduce){.pkt{display:none}}</style>
   </defs>
   <rect width="1200" height="600" rx="24" fill="#0d1117"/>
   <rect x="40" y="150" width="220" height="100" rx="12" fill="#161b26" stroke="#2dd4bf" stroke-width="2"/>
@@ -52,4 +55,7 @@
   <rect x="40" y="500" width="1120" height="64" rx="12" fill="#111722" stroke="#2a3142" stroke-width="2"/>
   <text x="600" y="527" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#9aa3b5">El modo dueño (PANTER_OWNER_MODE=1) convierte la caja punteada en avisos. La caja roja y los límites de los trabajadores nunca cambian.</text>
   <text x="600" y="549" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle" fill="#9aa3b5">Sin una cuenta revisora configurada, el modo dueño bloquea toda entrega.</text>
+  <g class="pkt" opacity="0"><circle r="11" fill="url(#pges-halo)"/><circle r="3.5" fill="#ffffff"/><animateMotion path="M 262 200 L 324 200" keyPoints="0;1;1" keyTimes="0;0.1600;1" calcMode="linear" dur="5s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;1;1;0;0" keyTimes="0;0.0048;0.1552;0.1600;1" dur="5s" repeatCount="indefinite"/></g>
+  <g class="pkt" opacity="0"><circle r="11" fill="url(#pges-haloa)"/><circle r="3.5" fill="#ffffff"/><animateMotion path="M 346 40 L 764 40" keyPoints="0;0;1;1" keyTimes="0;0.1900;0.4700;1" calcMode="linear" dur="5s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.1900;0.1984;0.4616;0.4700;1" dur="5s" repeatCount="indefinite"/></g>
+  <g class="pkt" opacity="0"><circle r="11" fill="url(#pges-halo)"/><circle r="3.5" fill="#ffffff"/><animateMotion path="M 784 200 L 846 200" keyPoints="0;0;1;1" keyTimes="0;0.5200;0.6800;1" calcMode="linear" dur="5s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.5200;0.5248;0.6752;0.6800;1" dur="5s" repeatCount="indefinite"/></g>
 </svg>

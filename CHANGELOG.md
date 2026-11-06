@@ -7,6 +7,8 @@ All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://
 ### Docs
 - README in English and Spanish (`README.md`, `README.es.md`) with diagrams for each language: architecture, how a task flows, how workers wake up, the delivery gate and owner mode, and what lives in the repository versus your server. Corrected the worker tool count (31, routers included).
 - The asset test covers both READMEs and checks they show the same diagrams, each in its own language.
+- Motion identity: an animated hero (drifting aurora, the mascot's connector pulsing, the title as vector paths in Space Grotesk) and a terminal that types a task moving through Panter, both in English and Spanish, replace the static banner. Every diagram shows a work packet travelling its path. All of it is pure SVG with no scripts or external requests, works in dark and light themes and stands still for readers who ask for reduced motion (a new test checks this).
+- `scripts/brand` holds the generators, so anyone can change the text and rebuild the images (`sh build.sh`).
 
 ## 1.5.0 (2026-11-06)
 
