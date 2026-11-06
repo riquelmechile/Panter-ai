@@ -15,6 +15,8 @@ Para un despliegue de un solo dueño: todas las cuentas conectadas (Claude, GPT-
 | El portón de entrega bloqueaba por nombre de rama, etiqueta `type:*`, issue con `status:approved`, formato de commits, `Co-Authored-By`, tamaño del PR y cantidad de commits | Eso pasa a avisos. Siguen bloqueando: SHA exacto, PR abierto y no borrador, base autorizada, CI requerida en verde y la aprobación de la cuenta revisora |
 | Los permisos GitHub automáticos por fase exigían `PANTER_HARNESS_AUTO_GITHUB_GRANTS=1` | Activos |
 | Hasta 2 correcciones por corrida | Hasta 10 |
+| Un trabajador que solo sondea por horario no tomaba escritores | Los toma |
+| Las unidades paralelas debían caber en rutas listadas | Con todo el repo como alcance, cualquier conjunto de unidades disjuntas |
 
 Además, en cualquier modo:
 - `panter_workforce_status` agrega por trabajador `wakeRoutes` (cómo se le puede despertar ahora), `last24h` (completados, fallados y último resultado) y `reachable`. `presence` sigue midiendo solo los últimos 2 minutos.
@@ -25,4 +27,8 @@ Además, en cualquier modo:
 - Los trabajadores nunca mergean, aprueban, borran, hacen push forzado ni escriben ramas por defecto o protegidas, `.github/workflows`, CODEOWNERS o configuración de git.
 - Los tokens y secretos se quedan en el servidor.
 - Misiones sensibles: no se guardan ni se mandan por correo datos personales.
+- Dos escritores de la misma misión nunca corren a la vez sobre rutas que se cruzan (un escritor sin rutas, todo el repo, se cruza con cualquiera).
+- Un `writeGrantId` entregado explícitamente se valida y se aplica igual que antes.
+- Sin `PANTER_GITHUB_INDEPENDENT_REVIEWER` configurado, el portón de entrega bloquea: el revisor independiente es la compuerta que reemplaza a las convenciones.
+- El correo de Gemini nunca lleva escritores.
 - Los servidores downstream mantienen su política `writes` y sus propias aprobaciones.

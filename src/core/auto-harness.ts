@@ -21,6 +21,8 @@ const risky=/(^|\/)(auth|oauth|security|secrets|permissions?|rbac|payments?|bill
 const riskyGoal=/\b(authentication|authorization|security|secret|payment|migration|deploy|permission|credentials|autenticaci[oó]n|seguridad|contraseñas|pagos|migraci[oó]n|permisos|despliegue)\b/i;
 const codeAgent=new Set(GENTLE_AGENTS.map(x=>x.id));
 const hash=(x:unknown)=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
+/** Bounded corrections per run: 2, or 10 in owner mode (the same limit for packets and reports). */
+const correctionBudget=()=>ownerMode()?10:2;
 function ensure(c:unknown,reason:string):asserts c {if(!c)throw new Error(reason);}
 function safePath(p:string){
   ensure(p.length>0&&p.length<=256&&!p.startsWith('/')&&!p.includes('\\')&&!p.includes('\0')&&!p.split('/').some(x=>!x||x==='.'||x==='..'||/[\*?\[\]{}]/.test(x)),'Unsafe change surface');
@@ -469,7 +471,7 @@ export class AutomaticHarness {
     const corrected=await this.write(s=>{const r=s.runs.find(x=>x.id===runId);ensure(r,'Harness not found');ensure(!r.closedAt,'Harness run is closed');
       ensure(r.revision===expectedRevision,'Stale correction revision');
       ensure(r.permission==='WRITE_APPROVED'&&(ownerMode()||r.paths.length>0),'Correction is not authorized within a scoped writable run');
-      ensure((r.correctionAttempts??0)<(ownerMode()?10:2),'Correction attempt budget exhausted');
+      ensure((r.correctionAttempts??0)<correctionBudget(),'Correction attempt budget exhausted');
       ensure(r.candidateSha&&r.candidateSha!==payload.candidateSha,'Corrected candidate requires a fresh SHA');
       const review=r.steps.find(st=>st.phase==='REVIEW');const judgment=r.steps.find(st=>st.phase==='JUDGMENT');
       ensure(review||judgment,'No review requiring correction');
@@ -508,7 +510,8 @@ export class AutomaticHarness {
       ensure(r.steps.find(x=>x.phase==='DESIGN')?.status==='COMPLETE','Design phase must finish before splitting work');
       ensure(!r.units,'Implementation units already frozen');
       for(const u of derived)for(const path of u.paths)
-        ensure(r.paths.some(scope=>path===scope||path.startsWith(scope+'/')),'Unit scope exceeds authorized work surface');
+        // Owner mode with no listed surfaces: the parent scope is the whole repository (units stay disjoint).
+        ensure((ownerMode()&&!r.paths.length)||r.paths.some(scope=>path===scope||path.startsWith(scope+'/')),'Unit scope exceeds authorized work surface');
       r.units=derived;r.revision++;return r;});
   }
   async reportUnit(runId:string,unitId:string,result:{runId:string;summary:string;evidence:string[]}){
@@ -730,7 +733,7 @@ export class AutomaticHarness {
         const severe=partialSolo4R?[]:nativeStatus?.severeFindings??[];
         if(severe.length||rddRecord?.state==='NEEDS_CORRECTION'){
           const findings=severe.length?severe.map(f=>`${f.id}: ${f.location}: ${f.claim}`):['See Panter-RDD severe findings'];
-          if((record.correctionAttempts??0)>=2)return {...common,status:'CORRECTION_BUDGET_EXHAUSTED',phaseId:phase.id,next:[],findings};
+          if((record.correctionAttempts??0)>=correctionBudget())return {...common,status:'CORRECTION_BUDGET_EXHAUSTED',phaseId:phase.id,next:[],findings};
           if(record.permission!=='WRITE_APPROVED'||!(await this.activeWriteGrant(runId,record.paths)))return {...common,status:'CORRECTION_REQUIRES_WRITE_GRANT',phaseId:phase.id,next:[],findings};
           const packet=await specialistPacket({agentId:'gentle-ai-worker',objective:`Fix only the review findings within the existing authorization for ${record.objective}. ${findings.join(' | ')}`,
             skillIds:['gentle-ai','rdd-defect-workflow'],candidateSha:record.candidateSha!,

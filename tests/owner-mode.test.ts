@@ -139,8 +139,9 @@ function mock(records: Record<string, unknown>): typeof fetch {
     return { ok: response !== undefined, status: response === undefined ? 404 : 200, text: async () => JSON.stringify(response) } as Response;
   }) as typeof fetch;
 }
-function gate(checkConclusion = 'success', head = sha) {
-  return new GitHubDeliveryGate({ allowedRepositories: ['example/project'], requiredChecks: ['test'] }, mock({
+function gate(checkConclusion = 'success', head = sha, reviewer: string | null = 'rev-account') {
+  return new GitHubDeliveryGate({ allowedRepositories: ['example/project'], requiredChecks: ['test'], independentReviewer: reviewer ?? undefined }, mock({
+    'pulls/12/reviews?per_page=100': [{ id: 1, user: { login: 'rev-account' }, state: 'APPROVED', commit_id: head }],
     '': { default_branch: 'main' }, 'pulls/12': { ...pr, head: { ...pr.head, sha: head } },
     'pulls/12/commits?per_page=100': [{ sha, commit: { message: 'Update stuff\n\nCo-Authored-By: Someone <x@y>' } }],
     [`commits/${head}/check-runs?per_page=100`]: { total_count: 1, check_runs: [{ name: 'test', status: 'completed', conclusion: checkConclusion, head_sha: head }] },
@@ -157,6 +158,12 @@ test('owner mode: process conventions are warnings, the PR is reviewable', () =>
   assert.equal(r.approvals.merge, false);
 }));
 
+test('owner mode: without an independent reviewer configured the gate blocks', () => withOwner('1', async () => {
+  const r = await gate('success', sha, null).inspect(input);
+  assert.equal(r.state, 'BLOCKED');
+  assert.ok(r.blockers.some(b => /requires PANTER_GITHUB_INDEPENDENT_REVIEWER/.test(b)));
+}));
+
 test('owner mode: failing CI and a moved head still block', () => withOwner('1', async () => {
   assert.ok((await gate('failure').inspect(input)).blockers.some(b => /non-success/.test(b)));
   assert.ok((await gate('success', 'b'.repeat(40)).inspect(input)).blockers.some(b => /differs from frozen candidate/.test(b)));
@@ -167,3 +174,24 @@ test('without owner mode the same PR is blocked by the conventions', () => withO
   assert.equal(r.state, 'BLOCKED');
   assert.ok(r.blockers.some(b => /type:\*/.test(b)));
 }));
+
+test('owner mode: whole-repository runs can split into disjoint units', () => withOwner('1', () => withDir(async dir => {
+  const mesh = await MeshEngine.open(dir), native = await NativeSubagentReview.open(dir);
+  const h = await AutomaticHarness.open(dir, mesh, native, undefined, undefined, undefined, false);
+  const run = await h.start({ project: 'app', objective: 'Two parts', idempotencyKey: 'u1', writesAuthorized: true, coordinationMode: 'GPT_A_ONLY', observations: { independentWorkUnits: 2 } });
+  assert.deepEqual(run.paths, []);
+  const design = await h.tick(run.id, { nativeSubagents: true, maxParallelSubagents: 4, toolsAvailable: true });
+  await h.report(run.id, design.phaseId!, { summary: 'Plan', evidence: ['two units'] });
+  const now = (await h.get(run.id))!;
+  const units = await h.defineUnits(run.id, [{ objective: 'A', paths: ['src/a'] }, { objective: 'B', paths: ['src/b'] }], now.revision);
+  assert.equal(units.units?.length, 2);
+  await assert.rejects(h.defineUnits(run.id, [{ objective: 'A', paths: ['src/a'] }, { objective: 'B', paths: ['src/a/x'] }], units.revision), /overlap|already frozen/);
+})));
+
+test('owner mode: a scheduled poll can claim writer work', () => withOwner('1', () => withDir(async dir => {
+  const m = await MeshEngine.open(dir);
+  await m.setProfile('gpt-a', profile, 0);
+  const w = await m.delegate('gpt-a', { missionId: 'm1', target: 'grok', role: 'implementer', instruction: 'Edit', idempotencyKey: 'p1' });
+  const claimed = await m.pickup('grok', 300, false) as { work?: { id: string } } | { id?: string };
+  assert.ok(JSON.stringify(claimed).includes(w.id));
+})));

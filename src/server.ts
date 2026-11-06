@@ -716,7 +716,8 @@ const handler = createMcpHandler(reqCtx => {
     });
     if(!poll.next)return {status:'EMPTY' as const,
       delivery:'AUTHENTICATED_SCHEDULE_POLL' as const,autonomousWakeVerified:false as const};
-    const claim=await mesh.pickup(actor,x.leaseSeconds,true);
+    // Owner mode: a scheduled-only worker can take writer work too (it may be delegated one).
+    const claim=await mesh.pickup(actor,x.leaseSeconds,!owner);
     return {...claim,delivery:'AUTHENTICATED_SCHEDULE_POLL' as const,
       autonomousWakeVerified:false as const};
   }));

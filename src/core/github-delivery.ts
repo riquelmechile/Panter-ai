@@ -186,7 +186,9 @@ export class GitHubDeliveryGate {
         if(Number(checks?.total_count)>100)blocked.push('GitHub checks are paginated; full required-check proof unavailable');
       }
       if(!this.reviewer){
-        result.warnings.push('Independent reviewer identity not configured (PANTER_GITHUB_INDEPENDENT_REVIEWER); no GitHub review evidence checked');
+        // Owner mode relaxes conventions only because the independent reviewer still gates: without one it blocks.
+        if(ownerMode())blocked.push('Owner mode requires PANTER_GITHUB_INDEPENDENT_REVIEWER: the independent review is its hard gate');
+        else result.warnings.push('Independent reviewer identity not configured (PANTER_GITHUB_INDEPENDENT_REVIEWER); no GitHub review evidence checked');
       }else{
         const evidence=await this.independentReview(input.repository,input.prNumber,head,prData,prCommits);
         result.independentReview=evidence;
