@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 520" width="1200" height="520" role="img" aria-labelledby="pfen-title pfen-desc">
+  <title id="pfen-title">How a task flows through Panter-ai</title>
+  <desc id="pfen-desc">Diagram in seven steps. 1: the leader delegates a task. 2: Panter stores it durably and attaches a GitHub permission scoped to that one task. 3: Panter wakes the worker through its route. 4: the worker claims the task with a fenced lease. 5: the worker does the work in its own app, on its own branch, and opens a pull request. 6: it completes with evidence; Panter stores the result, sends the leader a receipt and revokes the permission. 7: the leader reads the result and the pull request goes through the review and merge gate.</desc>
+  <defs>
+    <marker id="pfen-arrow-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#2dd4bf"/></marker>
+    <marker id="pfen-arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#f5b301"/></marker>
+    <marker id="pfen-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#9aa3b5"/></marker>
+  </defs>
+  <rect width="1200" height="520" rx="24" fill="#0d1117"/>
+  <text x="40" y="54" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing="2" fill="#9aa3b5">FROM A REQUEST TO A MERGED PULL REQUEST</text>
+  <rect x="40" y="80" width="255" height="120" rx="12" fill="#161b26" stroke="#f5b301" stroke-width="2"/>
+  <circle cx="66" cy="106" r="13" fill="#f5b301"/>
+  <text x="66" y="111" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" text-anchor="middle" fill="#0d1117">1</text>
+  <text x="88" y="111" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Leader delegates</text>
+  <text x="56" y="136" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">the leader sends a task: a harness</text>
+  <text x="56" y="154.5" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">tick or panter_mesh_delegate</text>
+  <rect x="330" y="80" width="255" height="120" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+  <circle cx="356" cy="106" r="13" fill="#2dd4bf"/>
+  <text x="356" y="111" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" text-anchor="middle" fill="#0d1117">2</text>
+  <text x="378" y="111" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Panter queues it</text>
+  <text x="346" y="136" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">durable work item in SQLite,</text>
+  <text x="346" y="154.5" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">GitHub grant scoped to this task</text>
+  <rect x="620" y="80" width="255" height="120" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+  <circle cx="646" cy="106" r="13" fill="#2dd4bf"/>
+  <text x="646" y="111" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" text-anchor="middle" fill="#0d1117">3</text>
+  <text x="668" y="111" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Panter wakes it</text>
+  <text x="636" y="136" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">MCP event, webhook, routine or</text>
+  <text x="636" y="154.5" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">mail, depending on the host</text>
+  <rect x="910" y="80" width="255" height="120" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+  <circle cx="936" cy="106" r="13" fill="#2dd4bf"/>
+  <text x="936" y="111" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" text-anchor="middle" fill="#0d1117">4</text>
+  <text x="958" y="111" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Worker claims it</text>
+  <text x="926" y="136" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">fenced lease and heartbeats:</text>
+  <text x="926" y="154.5" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">one attempt owns the work</text>
+  <rect x="910" y="270" width="255" height="120" rx="12" fill="#161b26" stroke="#2dd4bf" stroke-width="2"/>
+  <circle cx="936" cy="296" r="13" fill="#2dd4bf"/>
+  <text x="936" y="301" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" text-anchor="middle" fill="#0d1117">5</text>
+  <text x="958" y="301" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Worker does the work</text>
+  <text x="926" y="326" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">in its own app and model, on</text>
+  <text x="926" y="344.5" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">branch panter/&lt;host&gt;-&lt;id&gt;; opens a PR</text>
+  <rect x="620" y="270" width="255" height="120" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+  <circle cx="646" cy="296" r="13" fill="#2dd4bf"/>
+  <text x="646" y="301" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" text-anchor="middle" fill="#0d1117">6</text>
+  <text x="668" y="301" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Done, with evidence</text>
+  <text x="636" y="326" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">result stored, receipt to</text>
+  <text x="636" y="344.5" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">the leader, GitHub grant revoked</text>
+  <rect x="330" y="270" width="255" height="120" rx="12" fill="#161b26" stroke="#f5b301" stroke-width="2"/>
+  <circle cx="356" cy="296" r="13" fill="#f5b301"/>
+  <text x="356" y="301" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" text-anchor="middle" fill="#0d1117">7</text>
+  <text x="378" y="301" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f5f0e6">Review and merge</text>
+  <text x="346" y="326" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">CI and an independent reviewer</text>
+  <text x="346" y="344.5" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">on the exact commit; leader merges</text>
+  <line x1="301" y1="140" x2="322" y2="140" stroke="#2dd4bf" stroke-width="3" marker-end="url(#pfen-arrow-teal)"/>
+  <line x1="591" y1="140" x2="612" y2="140" stroke="#2dd4bf" stroke-width="3" marker-end="url(#pfen-arrow-teal)"/>
+  <line x1="881" y1="140" x2="902" y2="140" stroke="#2dd4bf" stroke-width="3" marker-end="url(#pfen-arrow-teal)"/>
+  <path d="M 1037 206 L 1037 262" fill="none" stroke="#2dd4bf" stroke-width="3" marker-end="url(#pfen-arrow-teal)"/>
+  <line x1="904" y1="330" x2="883" y2="330" stroke="#2dd4bf" stroke-width="3" marker-end="url(#pfen-arrow-teal)"/>
+  <line x1="614" y1="330" x2="593" y2="330" stroke="#2dd4bf" stroke-width="3" marker-end="url(#pfen-arrow-teal)"/>
+  <rect x="40" y="270" width="255" height="120" rx="12" fill="#111722" stroke="#2a3142" stroke-width="2" stroke-dasharray="6 6"/>
+  <text x="60" y="302" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#f5f0e6">No pickup in time?</text>
+  <text x="60" y="328" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">the work falls back to the leader,</text>
+  <text x="60" y="348" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">which does it natively, so a</text>
+  <text x="60" y="368" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" fill="#9aa3b5">sleeping worker never blocks a run</text>
+  <path d="M 330 330 L 303 330" fill="none" stroke="#9aa3b5" stroke-width="3" stroke-dasharray="6 6" marker-end="url(#pfen-arrow-muted)"/>
+  <rect x="40" y="420" width="1125" height="64" rx="14" fill="#111722" stroke="#2a3142" stroke-width="2"/>
+  <text x="602" y="458" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" text-anchor="middle" fill="#9aa3b5">Panter never runs a model. Step 5 happens inside the worker&#x27;s own app; Panter records what it reports and what GitHub shows.</text>
+</svg>

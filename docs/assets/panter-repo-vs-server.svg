@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 560" width="1200" height="560" role="img" aria-labelledby="pren-title pren-desc">
+  <title id="pren-title">What lives in the repository and what lives on your server</title>
+  <desc id="pren-desc">Diagram. Left: the public repository on GitHub holds code, tests, docs and example configs with placeholders only, guarded by a CI hygiene test. Right: your server holds panter.env with your secrets, accounts and domain; downstream.json with your MCP servers; the data directory with the SQLite ledger, OAuth clients and tokens and audit; and the backups. deploy.sh installs an exact commit from the repository on the server; nothing flows back. Connecting a new MCP server means editing downstream.json, adding its token to panter.env and restarting: no repository change.</desc>
+  <defs>
+    <marker id="pren-arrow-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#2dd4bf"/></marker>
+    <marker id="pren-arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#f5b301"/></marker>
+    <marker id="pren-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#9aa3b5"/></marker>
+  </defs>
+  <rect width="1200" height="560" rx="24" fill="#0d1117"/>
+  <rect x="40" y="40" width="440" height="400" rx="18" fill="#111722" stroke="#2dd4bf" stroke-width="2"/>
+  <text x="64" y="76" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="17" font-weight="700" fill="#f5f0e6">Public repository (GitHub)</text>
+  <rect x="60" y="96" width="400" height="66" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+  <text x="76" y="121" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#f5f0e6">Code and tests</text>
+  <text x="76" y="142" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" fill="#9aa3b5">src/, tests/, CI on every PR</text>
+  <rect x="60" y="178" width="400" height="66" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+  <text x="76" y="203" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#f5f0e6">Docs</text>
+  <text x="76" y="224" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" fill="#9aa3b5">docs/, README in English and Spanish</text>
+  <rect x="60" y="260" width="400" height="66" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+  <text x="76" y="285" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#f5f0e6">Example configs</text>
+  <text x="76" y="306" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" fill="#9aa3b5">*.example with placeholders only</text>
+  <rect x="60" y="342" width="400" height="66" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+  <text x="76" y="367" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#f5f0e6">Hygiene test</text>
+  <text x="76" y="388" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" fill="#9aa3b5">fails on real credentials or values</text>
+  <rect x="720" y="40" width="440" height="400" rx="18" fill="#111722" stroke="#f5b301" stroke-width="2"/>
+  <text x="744" y="76" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="17" font-weight="700" fill="#f5f0e6">Your server</text>
+  <rect x="740" y="96" width="400" height="66" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+  <text x="756" y="121" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#f5f0e6">panter.env</text>
+  <text x="756" y="142" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" fill="#9aa3b5">secrets, accounts, domain, owner mode</text>
+  <rect x="740" y="178" width="400" height="66" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+  <text x="756" y="203" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#f5f0e6">downstream.json</text>
+  <text x="756" y="224" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" fill="#9aa3b5">the MCP servers you connect</text>
+  <rect x="740" y="260" width="400" height="66" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+  <text x="756" y="285" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#f5f0e6">Data directory</text>
+  <text x="756" y="306" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" fill="#9aa3b5">SQLite ledger, OAuth clients, audit</text>
+  <rect x="740" y="342" width="400" height="66" rx="12" fill="#161b26" stroke="#2a3142" stroke-width="2"/>
+  <text x="756" y="367" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#f5f0e6">Backups</text>
+  <text x="756" y="388" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" fill="#9aa3b5">before every deploy and every day</text>
+  <line x1="490" y1="210" x2="710" y2="210" stroke="#2dd4bf" stroke-width="3" marker-end="url(#pren-arrow-teal)"/>
+  <text x="600" y="196" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" font-weight="700" text-anchor="middle" fill="#f5f0e6">deploy.sh &lt;sha&gt;</text>
+  <text x="600" y="236" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" text-anchor="middle" fill="#9aa3b5">installs an exact commit</text>
+  <path d="M 710 300 L 490 300" fill="none" stroke="#9aa3b5" stroke-width="3" stroke-dasharray="6 6" marker-end="url(#pren-arrow-muted)"/>
+  <line x1="585" y1="285" x2="615" y2="315" stroke="#f87171" stroke-width="3"/>
+  <line x1="615" y1="285" x2="585" y2="315" stroke="#f87171" stroke-width="3"/>
+  <text x="600" y="340" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.5" text-anchor="middle" fill="#9aa3b5">nothing flows back</text>
+  <rect x="40" y="466" width="1120" height="64" rx="14" fill="#111722" stroke="#2a3142" stroke-width="2"/>
+  <text x="600" y="504" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" text-anchor="middle" fill="#9aa3b5">Connect a new MCP server: add it to downstream.json, put its token in panter.env, restart. The repository does not change.</text>
+</svg>

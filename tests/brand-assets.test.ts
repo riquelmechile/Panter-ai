@@ -50,8 +50,9 @@ test('brand SVGs are accessible, pure vector and self-contained', () => {
   }
 });
 
-test('every image the README embeds is a file in this repository', () => {
-  const readme = readFileSync(join(root, 'README.md'), 'utf8');
+for (const name of ['README.md', 'README.es.md'])
+test(`every image ${name} embeds is a file in this repository`, () => {
+  const readme = readFileSync(join(root, name), 'utf8');
   const urls = [...readme.matchAll(/<img\s[^>]*src="([^"]+)"/g)].map(m => m[1]!);
   assert.ok(urls.length >= 3);
   for (const url of urls) {
@@ -63,4 +64,16 @@ test('every image the README embeds is a file in this repository', () => {
   for (const link of readme.matchAll(/<a\s[^>]*href="([^"#:]+)"/g)) assert.ok(existsSync(join(root, link[1]!)), `README navigation link resolves: ${link[1]}`);
   for (const link of readme.matchAll(/\]\(((?:docs\/|deploy\/|src\/)?[A-Za-z0-9_./-]+\.(?:md|ts|example))\)/g))
     assert.ok(existsSync(join(root, link[1]!)), `README link resolves: ${link[1]}`);
+});
+
+test('the English and Spanish READMEs show the same diagrams, each in its own language', () => {
+  const imgs = (name: string) => [...readFileSync(join(root, name), 'utf8').matchAll(/<img\s[^>]*src="docs\/assets\/([A-Za-z0-9_.-]+)\.svg"/g)].map(m => m[1]!);
+  const en = imgs('README.md'), es = imgs('README.es.md');
+  assert.equal(es.length, en.length, 'same number of images');
+  en.forEach((file, i) => {
+    const spanish = existsSync(join(assets, `${file}.es.svg`)) ? `${file}.es` : file;
+    assert.equal(es[i], spanish, `image ${i + 1}: README.es.md shows ${spanish}.svg`);
+  });
+  assert.match(readFileSync(join(root, 'README.md'), 'utf8'), /href="README\.es\.md"/);
+  assert.match(readFileSync(join(root, 'README.es.md'), 'utf8'), /href="README\.md"/);
 });
