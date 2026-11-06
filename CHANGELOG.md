@@ -10,6 +10,9 @@ All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://
 - Motion identity: an animated hero (drifting aurora, the mascot's connector pulsing, the title as vector paths in Space Grotesk) and a terminal that types a task moving through Panter, both in English and Spanish, replace the static banner. Every diagram shows a work packet travelling its path. All of it is pure SVG with no scripts or external requests, works in dark and light themes and stands still for readers who ask for reduced motion (a new test checks this).
 - `scripts/brand` holds the generators, so anyone can change the text and rebuild the images (`sh build.sh`).
 
+### Community
+- `SECURITY.md` (private vulnerability reporting, scope), `CODE_OF_CONDUCT.md`, issue templates for bugs and feature requests (blank issues off) and a pull request template.
+
 ## 1.5.0 (2026-11-06)
 
 ### Public, generic repository
