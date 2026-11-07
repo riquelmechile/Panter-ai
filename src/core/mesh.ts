@@ -33,6 +33,13 @@ export type GrokWakeAttempt = {workId:string;state:'RESERVED'|'SIGNAL_ACCEPTED'|
  * (at most GROK_MAX_RINGS times): a lost ring must never block Grok for every other work. */
 export const GROK_RING_STALE_MS=15*60_000;
 export const GROK_MAX_RINGS=3;
+/** A worker's fenced attempt may still renew or complete its work. Read-only work whose lease ran out while its
+ * worker was still busy (a review that took longer than the lease) keeps its result: the fence (state RUNNING,
+ * same attemptId and generation) proves nobody requeued, reclaimed or abandoned it in the meantime. Writers stay
+ * strict: an expired writer is OUTCOME_UNKNOWN territory and only an operator reconciles it. */
+export function leaseLive(w: Pick<MeshWork, 'role' | 'leaseUntil'>, now = Date.now()): boolean {
+  return w.role !== 'implementer' || Date.parse(w.leaseUntil ?? '') > now;
+}
 export type ClaudeWakeAttempt = GrokWakeAttempt & {sessionId:string|null};
 type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; claudeWakeAttempts?: ClaudeWakeAttempt[]; leader?: Host; formerLeaders?: Host[]; pendingPhaseAdoption?: Host[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
 const hosts = new Set<string>(HOSTS);
@@ -597,7 +604,10 @@ export class MeshEngine {
         const pending=new Map((d.grokWakeAttempts??[]).map(a=>[a.workId,a]));
         const busy=d.works.some(o=>{
           if(o.target!=='grok'||o.id===workId)return false;
-          if(o.state==='RUNNING'||o.state==='OUTCOME_UNKNOWN')return true;
+          if(o.state==='OUTCOME_UNKNOWN')return true;
+          // Read-only work whose lease ran out long ago is not Grok being busy: its routine finished or died, and
+          // nothing else ever ends directed work, so counting it would block every later ring forever.
+          if(o.state==='RUNNING')return o.role==='implementer'||!(now-Date.parse(o.leaseUntil??'')>=GROK_RING_STALE_MS);
           const a=o.state==='QUEUED'?pending.get(o.id):undefined;
           return Boolean(a&&live(a));
         });
@@ -973,7 +983,7 @@ export class MeshEngine {
     return this.write(d => {
       const w = d.works.find(w => w.id === id && w.target === caller);
       check(w && w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
-      check(Date.parse(w.leaseUntil!) > Date.now(), 'Lease expired');
+      check(leaseLive(w), 'Lease expired');
       check(!w.transportClaim, 'Work is held by a transport');
       check(leaseSeconds >= 30 && leaseSeconds <= 3600, 'Invalid lease');
       w.leaseUntil = new Date(Date.now() + leaseSeconds * 1000).toISOString();
@@ -1048,7 +1058,7 @@ export class MeshEngine {
           resultAvailable:true,rearmPending:(d.rearmIntents??[]).some(i=>i.workId===id&&i.status==='PENDING')};
       }
       check(w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
-      check(Date.parse(w.leaseUntil!) > Date.now(), 'Lease expired');
+      check(leaseLive(w), 'Lease expired');
       this.contentGuard?.(w.missionId,[result],'This result');
       w.state = success ? 'COMPLETED' : 'FAILED'; w.result = result; w.receiptDigest = digest;
       w.completedAt = iso(); w.leaseUntil = null; delete w.transportClaim; if (via) w.via = via;

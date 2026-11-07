@@ -2,7 +2,12 @@
 
 All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://semver.org/). Releases before 1.0 are described in [docs/HISTORY.md](docs/HISTORY.md).
 
-## Unreleased
+## 1.5.1 (2026-11-07)
+
+### Fixed
+- A read-only work item (review, verification, exploration) whose lease ran out while its worker was still finishing kept its result out of Panter: completing failed with `Lease expired` even though nobody had taken the work over. The worker can now renew or complete it late, as long as its fenced attempt still holds (same `attemptId` and `leaseGeneration`). Writers stay strict.
+- Such an item stayed `RUNNING` forever and kept Grok "busy", so the doorbell never rang for later work. Read-only work whose lease expired more than 15 minutes ago no longer counts as busy. An expired writer still does.
+- `panter_workforce_status` shows `leaseExpired` per host; before, these items were invisible (`running: 0`).
 
 ### Docs
 - README in English and Spanish (`README.md`, `README.es.md`) with diagrams for each language: architecture, how a task flows, how workers wake up, the delivery gate and owner mode, and what lives in the repository versus your server. Corrected the worker tool count (31, routers included).
