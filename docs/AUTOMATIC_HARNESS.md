@@ -1,5 +1,7 @@
 # Status update (v0.15)
 
+> **Leader.** This page was written when the leader was always GPT-A. The leader is now the host set in `PANTER_LEAD_HOST` (default `gpt-a`): read "GPT-A" in a coordinating role as "the configured leader". See [LEADERSHIP.md](LEADERSHIP.md).
+
 The automatic harness now treats 4R and explicitly requested Judgment Day as **separate** phases. Bounded implementation units may be prepared for distinct worktrees, but no host agent or filesystem isolation is instantiated by the MCP. Server-exposed writes require operator-issued grants; Panter-RDD signatures and trusted Git evidence are required for approval. See [`CANONICAL_HARNESS_POLICY.md`](CANONICAL_HARNESS_POLICY.md). Statements below about official Go approval as the only authority describe v0.12 behavior.
 
 # Panter automatic ODD harness — v0.12 developer preview

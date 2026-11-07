@@ -1,5 +1,7 @@
 # Status update (v0.15)
 
+> **Leader.** This page was written when the leader was always GPT-A. The leader is now the host set in `PANTER_LEAD_HOST` (default `gpt-a`): read "GPT-A" in a coordinating role as "the configured leader". See [LEADERSHIP.md](LEADERSHIP.md).
+
 GitHub PR proof now flows automatically into the **Panter-RDD** controller, not a mandatory official Go lifecycle. An operator can persist a large-PR strategy through `panter_harness_delivery_strategy_set` (admin only), reused by automatic tick and review. No human consent is inferred from model statements. The original rules below remain applicable to branch naming, approved issue, type label, CI and PR review workload; references to official Go as mandatory are historical.
 
 # Automatic Gentle Shell GitHub policy for Panter-ai (v0.13)

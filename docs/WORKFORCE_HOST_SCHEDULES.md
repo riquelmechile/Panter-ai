@@ -1,5 +1,7 @@
 # Host-native Workforce schedules: GPT-B, Claude, Gemini
 
+> **Leader.** This page was written when the leader was always GPT-A. The leader is now the host set in `PANTER_LEAD_HOST` (default `gpt-a`): read "GPT-A" in a coordinating role as "the configured leader". See [LEADERSHIP.md](LEADERSHIP.md).
+
 GPT-A orchestrates and stores all results in the Panter Mesh ledger. A cloud
 Task or Schedule is a **worker host execution mechanism**, not a Panter model
 worker. OAuth identity, host permissions, stored task status and delivery

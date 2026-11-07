@@ -1,5 +1,7 @@
 # Status update (v0.15)
 
+> **Leader.** This page was written when the leader was always GPT-A. The leader is now the host set in `PANTER_LEAD_HOST` (default `gpt-a`): read "GPT-A" in a coordinating role as "the configured leader". See [LEADERSHIP.md](LEADERSHIP.md).
+
 This v0.11 document describes evidence collection but not current Panter-RDD approval. Panter-RDD now requires Ed25519 trusted-runner attestations plus an exact SHA GitHub or local Git proof; reported child IDs are not enough. 4R and explicitly requested Judgment Day execute in separate phases. See [`CANONICAL_HARNESS_POLICY.md`](CANONICAL_HARNESS_POLICY.md). The older official-Go requirements below are historical.
 
 # GPT-A-only native-subagent review (v0.11 developer preview)

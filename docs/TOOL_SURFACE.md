@@ -7,7 +7,7 @@ Panter registra más de 100 herramientas. Entregárselas todas a cada host hace 
 - **Nada se bloquea.** Todas las herramientas siguen registradas y se pueden llamar por su nombre, igual que antes, con su misma autorización (`requireLeader`, `requireAdmin`, permisos de GitHub, etc.).
 - **Solo cambia `tools/list`.** Cada host ve los 8 routers por dominio más las herramientas de su flujo normal:
   - **Líder:** harness, revisión, delegación y perfiles, estado del workforce, permisos de GitHub, memoria y Agent Studio (con las herramientas que su UI llama por nombre), unas 50 en total con los routers.
-  - **Worker** (GPT-A, GPT-B, Grok, Gemini cuando no son líder): pickup, claim, heartbeat, complete, wait/listen y GitHub del trabajo, unas 29. La memoria de Engram es solo del líder. Se deja amplio a propósito: un host como ChatGPT solo puede llamar herramientas que ve listadas, así que todas las rutas que usan las rutinas de los hosts siguen listadas.
+  - **Worker** (todo host que no sea el líder: GPT-A, GPT-B, Grok, Gemini o Claude): pickup, claim, heartbeat, complete, wait/listen y GitHub del trabajo, unas 31 con los routers. La memoria de Engram es solo del líder. Se deja amplio a propósito: un host como ChatGPT solo puede llamar herramientas que ve listadas, así que todas las rutas que usan las rutinas de los hosts siguen listadas.
   - **Operador** (token de operador, socket Unix): todo.
 - **Todo es alcanzable desde los routers.** Un host que necesita una herramienta que no ve la usa a través del router de su dominio.
 - El rol se calcula en cada conexión desde la identidad autenticada; si cambia el líder (`PANTER_LEAD_HOST`), cambia la lista.
@@ -39,11 +39,10 @@ Hay dos niveles: dominio → operación. A propósito no es un árbol más profu
 
 Cada servidor MCP montado detrás de Panter ([DOWNSTREAM_MCP.md](DOWNSTREAM_MCP.md)) aparece como un router propio, `panter_ds_<nombre>`, fuera de los ocho routers de dominio. Solo se lista para los hosts que su configuración permite (y para el operador). Los hosts no permitidos pueden llamarlo por nombre, pero el gateway lo rechaza y queda en el audit. `panter_downstream_status` y `panter_downstream_audit` están en la lista del líder; `panter_downstream_grant`, `panter_downstream_revoke` y `panter_downstream_unmark` son solo del operador.
 
-## Stale tool lists (1.3.0)
+## Listas de herramientas desactualizadas (1.3.0)
 
-A host keeps the tool list it read; Panter cannot force it to read again. What Panter does:
+Un host guarda la lista de herramientas que leyó y Panter no puede obligarlo a leerla de nuevo. Lo que hace Panter:
 
-- It announces `notifications/tools/list_changed` when the surface changes: a deploy (new release), a new downstream server, or a downstream server whose tools changed. The last announced fingerprint is kept in the data directory, so a restart into a new release announces once (again after one and five minutes, for hosts that reconnect late). Claude and other clients that honour the notification re-list.
-- The server instructions carry the surface fingerprint, and `panter_admin` operation `surface_status` returns the release, the fingerprint, the tools listed for the caller's role and the downstream servers it may use; with `knownFingerprint` it says whether that list is `stale`.
-- ChatGPT and Gemini keep the list read when the connector was added or last refreshed: after a deploy that adds tools, refresh or reconnect the Panter connector there. Until then every tool stays callable through its router, and downstream servers through `panter_admin` operation `downstream_call`, so nothing is blocked.
-- Sensitive missions: `PANTER_GEMINI_MAIL_RECIPIENT` (the inbox Gemini's Gmail monitor watches, usually the operator's own Gmail) and `PANTER_SENSITIVE_ALLOWED_ADDRESSES` are exempt from the personal-data check, as exact addresses. Do not list a patient's or customer's address there.
+- Avisa con `notifications/tools/list_changed` cuando cambia la superficie: un despliegue (release nueva), un servidor downstream nuevo o un downstream cuyas herramientas cambiaron. La última huella avisada se guarda en el directorio de datos, así que un reinicio en una release nueva avisa una vez (y de nuevo al minuto y a los cinco minutos, para hosts que se reconectan tarde). Claude y otros clientes que respetan el aviso vuelven a listar.
+- Las instrucciones del servidor llevan la huella de la superficie, y `panter_admin` con la operación `surface_status` devuelve la release, la huella, las herramientas listadas para el rol de quien llama y los servidores downstream que puede usar; con `knownFingerprint` indica si esa lista está `stale`.
+- ChatGPT y Gemini se quedan con la lista leída al agregar o refrescar el conector: después de un despliegue que agrega herramientas, refresca o reconecta el conector de Panter en esa app. Mientras tanto toda herramienta sigue disponible por su router, y los servidores downstream por `panter_admin` con la operación `downstream_call`, así que nada queda bloqueado.

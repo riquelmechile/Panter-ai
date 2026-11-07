@@ -2,7 +2,7 @@
 
 ## No Work, CLI, provider API or Oracle model runner
 
-GPT-A is the orchestrator. GPT-B is an independent connected ChatGPT
+The configured leader orchestrates (GPT-A by default). GPT-B is an independent connected ChatGPT
 application account, and Gemini is an independently connected Gemini
 application account. Each uses its already approved OAuth grant to
 `https://panter.example.com/mcp`. The same Panter-ai MCP HTTP endpoint

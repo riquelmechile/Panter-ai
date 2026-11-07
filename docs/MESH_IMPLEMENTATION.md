@@ -1,5 +1,7 @@
 # Panter-ai A2A mesh (v0.3 alpha)
 
+> **Leader.** This page was written when the leader was always GPT-A. The leader is now the host set in `PANTER_LEAD_HOST` (default `gpt-a`): read "GPT-A" in a coordinating role as "the configured leader". See [LEADERSHIP.md](LEADERSHIP.md).
+
 The main orchestration host is **gpt-a**. A second independently authenticated GPT host (**gpt-b**) and the Grok, Gemini and Claude host surfaces serve as configurable specialists. None is an inference API client.
 
 ## Actor credential boundary

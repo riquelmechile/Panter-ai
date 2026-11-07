@@ -1,5 +1,7 @@
 # Status update (v0.15)
 
+> **Leader.** This page was written when the leader was always GPT-A. The leader is now the host set in `PANTER_LEAD_HOST` (default `gpt-a`): read "GPT-A" in a coordinating role as "the configured leader". See [LEADERSHIP.md](LEADERSHIP.md).
+
 This v0.9 document is historical. Panter now has **its own Panter-RDD**, which requires trusted runner signatures and GitHub or configured local Git evidence before acknowledgement; Gentle AI Go is optional for comparison, not a prerequisite. See [`CANONICAL_HARNESS_POLICY.md`](CANONICAL_HARNESS_POLICY.md), [`PANTER_RDD_NATIVE.md`](PANTER_RDD_NATIVE.md) and [`GITHUB_GENTLE_WORKFLOW.md`](GITHUB_GENTLE_WORKFLOW.md). Statements below about mandatory official-Go approval describe the old v0.9 behavior.
 
 # Native RDD and no-workforce GPT-A continuity (v0.9)

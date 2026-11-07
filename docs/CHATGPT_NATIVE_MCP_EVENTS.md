@@ -2,6 +2,8 @@
 
 # Native MCP Events for compatible ChatGPT hosts (no CLI or model APIs)
 
+> **Leader.** This page was written when the leader was always GPT-A. The leader is now the host set in `PANTER_LEAD_HOST` (default `gpt-a`): read "GPT-A" in a coordinating role as "the configured leader". See [LEADERSHIP.md](LEADERSHIP.md).
+
 ## Purpose
 
 GPT-A and GPT-B remain **separate ChatGPT application accounts**. GPT-B is

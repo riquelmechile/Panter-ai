@@ -13,6 +13,10 @@ All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://
 ### Community
 - `SECURITY.md` (private vulnerability reporting, scope), `CODE_OF_CONDUCT.md`, issue templates for bugs and feature requests (blank issues off) and a pull request template.
 
+### Docs accuracy
+- Pages that still said GPT-A is the only coordinator now name the configured leader (`PANTER_LEAD_HOST`), as the code does; legacy pages carry a note. The roadmap header says which early items were superseded and that the runner is still inactive.
+- `TOOL_SURFACE.md`: the stale-list section is in Spanish like the rest of the page, the worker count is 31 with routers, and a misplaced note about sensitive-mission addresses moved to `GEMINI_MAIL_WAKE.md`.
+
 ## 1.5.0 (2026-11-06)
 
 ### Public, generic repository
