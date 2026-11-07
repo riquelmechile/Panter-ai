@@ -39,7 +39,7 @@ On every scheduled run, call:
 - Upon genuine completion, call `panter_mesh_complete` with the **exact**
   `workId`, `attemptId`, `leaseGeneration`, the full factual result and
   `success`. The authoritative result stays in Panter's SQLite ledger;
-  GPT-A reads it with `panter_workforce_result_get` and sees a compact receipt.
+  The leader reads it with `panter_workforce_result_get` and sees a compact receipt.
 - Never process more than one work item in a single hourly Task run. The next
   native Schedule run provides recovery and acknowledges any pending rearm.
 - Never claim that a saved schedule, a self-reported delivery mode, or a 2xx
@@ -52,9 +52,9 @@ by the operator. Do not try bypassing the host's safety checks. The operator
 has already chosen persistent permission preferences; do not request a second
 authorization merely because of an obsolete integration guide.
 
-### One-time GPT-A profile opt-in after PR deployment
+### One-time leader profile opt-in after deployment
 
-GPT-A calls `panter_mesh_profile_set` for the known Gemini OAuth actor with
+The leader calls `panter_mesh_profile_set` for the known Gemini OAuth actor with
 `roles` for approved specialities, `scheduledPickupEnabled=true`,
 `scheduledPollIntervalSeconds=3600`, current exact `expectedRevision` and
 its host-native model/effort preferences. This configures a queue destination,
@@ -70,7 +70,7 @@ including **two independent scheduled invocations** and one terminal receipt.
 
 - **GPT-B:** use its separate ChatGPT Work/Tasks capability if available,
   with the same scheduled pickup contract, exact OAuth identity and independently
-  observed receipt. Do not reuse GPT-A's identity or a legacy Gmail/GitHub
+  observed receipt. Do not reuse the leader's identity or a legacy Gmail/GitHub
   doorbell.
 - **Claude:** use authenticated Claude/Cowork cloud scheduling or a live MCP
   long-poll listener, whichever the actual host supports. Claude Code Channels
