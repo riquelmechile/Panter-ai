@@ -1,6 +1,8 @@
 # Roadmap status
 
-The checkboxes below are a **historical per-release backlog** and should not be interpreted as the current release inventory. Normative behavior and current known acceptance gaps are in [`CANONICAL_HARNESS_POLICY.md`](CANONICAL_HARNESS_POLICY.md). In v0.15 embedded OAuth, GitHub verification, Panter-RDD, GPT-A native packet planning and Engram MCP bridges exist in code, but real host onboarding, Oracle deployment, runner signatures, secure worktrees and multi-process persistence remain unverified/incomplete. Do not toggle these boxes simply to declare production ready.
+The checkboxes below are a **historical per-release backlog**, kept as written, not the current inventory. What the current release does is in the [README](../README.md) and [CHANGELOG](../CHANGELOG.md); normative coordination rules are in [`CANONICAL_HARNESS_POLICY.md`](CANONICAL_HARNESS_POLICY.md).
+
+Some early items were superseded later: the leader is configurable since v0.16 (`PANTER_LEAD_HOST`, see [LEADERSHIP.md](LEADERSHIP.md)), so lines that say only GPT-A leads or receives `panter:lead` describe that time. Since v1.0 Panter runs on Oracle ARM with the five hosts connected over OAuth. The isolated runner is still not active: its components are merged but disabled, and the open boxes in the runner sections remain open. Do not tick boxes just to declare something production ready.
 
 # Panter-ai roadmap
 

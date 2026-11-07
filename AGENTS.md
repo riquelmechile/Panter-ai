@@ -60,7 +60,7 @@ Write original source and documentation. Avoid embedding secrets, private accoun
 
 ## Panter MCP-hosted Gentle Shell catalog (v0.7)
 
-GPT-A is the sole coordinator. Agent Studio provides optional persistent **preferences only**. Do not request per-task host/agent/model selections; the automatic harness assigns specialists by observed capability and risk. Agent descriptions and thirteen skills are version-pinned MIT assets in `vendor/gentle-shell`; the GPT-A tool `panter_gentle_catalog` enumerates them. Do not download or silently execute unapproved skills or assume the host uses the requested model.
+The configured leader is the sole coordinator. Agent Studio provides optional persistent **preferences only**. Do not request per-task host/agent/model selections; the automatic harness assigns specialists by observed capability and risk. Agent descriptions and thirteen skills are version-pinned MIT assets in `vendor/gentle-shell`; the leader tool `panter_gentle_catalog` enumerates them. Do not download or silently execute unapproved skills or assume the host uses the requested model.
 
 For external-host work use `panter_specialist_delegate`, `panter_mesh_claim`, `panter_mesh_complete`, and the inbox. Keep `panter_agent_*` for legacy admin-only workflow planning; it must not be treated as a second authority for the same delegated work. The ODD classifier is `panter_odd_route`, 4R/Judgment Day atomic fanout is `panter_review_start`, and review results are reported (not independently attested) through `panter_review_status`. Implementers require narrow planned edit surfaces; runtime filesystem/tool enforcement remains a separate gate.
 

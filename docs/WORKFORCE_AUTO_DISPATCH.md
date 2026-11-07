@@ -1,8 +1,10 @@
-# GPT-A orchestration with standing peer wake — phase 3B
+# Leader orchestration with standing peer wake — phase 3B
+
+> **Leader.** This page was written when the leader was always GPT-A. The leader is now the host set in `PANTER_LEAD_HOST` (default `gpt-a`): read "GPT-A" in a coordinating role as "the configured leader". See [LEADERSHIP.md](LEADERSHIP.md).
 
 ## Contract
 
-GPT-A remains the only orchestrator. GPT-B, Grok, Claude and Gemini are
+The configured leader remains the only orchestrator. The other hosts are
 **host-operated workers**; the Panter MCP backend never invokes model-provider APIs
 or starts models. The durable Mesh SQLite ledger remains the single authority
 for tasks, leases, write grants, terminal results and receipts.

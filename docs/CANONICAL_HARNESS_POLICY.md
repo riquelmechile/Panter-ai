@@ -1,5 +1,7 @@
 # Canonical Panter-ai engineering policy (v0.15, developer preview)
 
+> **Leader.** This page was written when the leader was always GPT-A. The leader is now the host set in `PANTER_LEAD_HOST` (default `gpt-a`): read "GPT-A" in a coordinating role as "the configured leader". See [LEADERSHIP.md](LEADERSHIP.md).
+
 This document is the single **Panter-owned** normative coordination policy. Bundled Gentle Shell assets remain source material, not commands that can override Panter authorization, a host's capabilities, or current law. Legacy milestone documents describe historical implementations; when they conflict, follow this policy and the actual code.
 
 ## Non-negotiable host request (unchanged)

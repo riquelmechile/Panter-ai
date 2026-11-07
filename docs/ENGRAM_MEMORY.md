@@ -1,5 +1,7 @@
 # Status update (v0.15)
 
+> **Leader.** This page was written when the leader was always GPT-A. The leader is now the host set in `PANTER_LEAD_HOST` (default `gpt-a`): read "GPT-A" in a coordinating role as "the configured leader". See [LEADERSHIP.md](LEADERSHIP.md).
+
 The default `panter-ai` memory namespace is still available for internal harness facts, but engineering projects now get separate project-derived hashed namespaces and filesystem-backed Engram data directories. On harness start/report, Panter automatically mirrors a bounded ODD checkpoint and reports `ENGRAM_SAVED`, `ENGRAM_DISABLED`, `ENGRAM_UNAVAILABLE`, or `MIRROR_TOO_LARGE`. The ODD JSON store stays authoritative. The real ARM64 Engram process must still be installed and tested in Oracle; no successful live save is assumed. See [`CANONICAL_HARNESS_POLICY.md`](CANONICAL_HARNESS_POLICY.md).
 
 # Panter-ai Engram memory (v0.8 integration)

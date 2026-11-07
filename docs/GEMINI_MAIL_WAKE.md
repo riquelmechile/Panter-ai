@@ -40,4 +40,4 @@ En Gemini se crea una vez una tarea con monitor de Gmail: correos de la direcci�
 
 ## Misiones sensibles
 
-El trabajo de una misión que usó un servidor downstream `sensitive` nunca se manda por correo: la tarea saldría de Panter en un e-mail y el runtime de correo de Gemini no tiene tools de Panter. Ese trabajo espera a un chat de Gemini conectado. Las direcciones del propio sistema (`PANTER_GEMINI_MAIL_RECIPIENT` y `PANTER_SENSITIVE_ALLOWED_ADDRESSES`) no cuentan como dato personal. Si Panter rechaza un resultado, el rebote del relay dice el motivo.
+El trabajo de una misión que usó un servidor downstream `sensitive` nunca se manda por correo: la tarea saldría de Panter en un e-mail y el runtime de correo de Gemini no tiene tools de Panter. Ese trabajo espera a un chat de Gemini conectado. Las direcciones del propio sistema (`PANTER_GEMINI_MAIL_RECIPIENT` y `PANTER_SENSITIVE_ALLOWED_ADDRESSES`) no cuentan como dato personal (se comparan como direcciones exactas). No pongas ahí la dirección de un paciente o cliente. Si Panter rechaza un resultado, el rebote del relay dice el motivo.

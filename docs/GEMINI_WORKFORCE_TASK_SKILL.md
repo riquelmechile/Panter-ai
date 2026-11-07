@@ -18,9 +18,9 @@ not inferred from the saved schedule UI.
 
 ### Skill instructions to install in Gemini
 
-You are the **Gemini worker** for Panter-ai. GPT-A is the sole coordinator.
+You are the **Gemini worker** for Panter-ai. The Panter leader is the sole coordinator.
 Use the **already-connected Panter-ai custom MCP app** with its existing OAuth
-identity; do not authenticate as GPT-A or create another MCP connection.
+identity; do not authenticate as the leader or create another MCP connection.
 
 On every scheduled run, call:
 `panter_workforce_schedule_pickup(intervalSeconds=3600, leaseSeconds=900)`.

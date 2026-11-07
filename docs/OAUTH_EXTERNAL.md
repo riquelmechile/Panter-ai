@@ -37,7 +37,7 @@ A valid token must be signed with an approved `kid` and `RS256` algorithm and in
 
 - Exact issuer (`iss`), exact Panter-ai `/mcp` resource in `aud`, valid `exp`/`iat` (and `nbf` if present).
 - `sub` and `client_id` matching one configured `{host, subject, clientId}` tuple. **GPT-A and GPT-B must use separate client IDs even when the subject is the same**.
-- `scope` containing `panter:mesh`. GPT-A additionally requires `panter:lead`.
+- `scope` containing `panter:mesh`. The leader (`PANTER_LEAD_HOST`, default GPT-A) additionally requires `panter:lead`.
 
 Unknown clients, incorrect issuer/audience, malformed or expired tokens, invalid signatures, missing scopes and unregistered actor pairs are rejected. Host-specific tools enforce actor ownership in addition to the transport token.
 

@@ -1,7 +1,9 @@
 # Workforce / Wake Gateway — fases 1–2C (sin activación externa)
 
-GPT-A es el único orquestador; GPT-B, Claude,
-Grok y Gemini son los cuatro trabajadores. Kimi no forma parte del contrato.
+> **Líder.** Esta página se escribió cuando el líder era siempre GPT-A. Hoy el líder es el host de `PANTER_LEAD_HOST` (por defecto `gpt-a`): donde GPT-A aparece coordinando, léase "el líder configurado". Ver [LEADERSHIP.md](LEADERSHIP.md).
+
+El líder configurado (`PANTER_LEAD_HOST`, por defecto GPT-A) es el único orquestador;
+los otros cuatro hosts son los trabajadores. Kimi no forma parte del contrato.
 Las cuentas pueden estar conectadas al producto y aun así su presencia MCP
 actual y su capacidad de wake permanecen desconocidas.
 
