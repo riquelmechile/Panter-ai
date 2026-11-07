@@ -83,6 +83,9 @@ export function summarizeWorkforce(
       outcomesUnknown: own.filter(w => w.state === 'OUTCOME_UNKNOWN' ||
         (w.role === 'implementer' && w.state === 'RUNNING' &&
           Date.parse(w.leaseUntil ?? '') <= nowMs)).length,
+      // Read-only work still RUNNING after its lease ran out: its worker may still complete it (same attempt).
+      leaseExpired: own.filter(w => w.role !== 'implementer' && w.state === 'RUNNING' &&
+        Date.parse(w.leaseUntil ?? '') <= nowMs).length,
     };
   });
 }
