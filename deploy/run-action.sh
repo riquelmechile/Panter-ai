@@ -12,8 +12,8 @@ BASE=${PANTER_BASE:-$HOME/panter-ai}
 ACTIONS="$BASE/etc/actions"
 FENCE="$ACTIONS/$ACTION_ID.fence"
 # Phase 1 provisions etc/actions. Never create a record or invoke deploy without this fence.
-if ! ln -s run "$FENCE" 2>/dev/null; then
-  [[ -L $FENCE ]] && exit 0
+if ! ln -s -T -- run "$FENCE" 2>/dev/null; then
+  [[ -e $FENCE || -L $FENCE ]] && exit 0
   echo "run-action: cannot create fence" >&2
   exit 1
 fi

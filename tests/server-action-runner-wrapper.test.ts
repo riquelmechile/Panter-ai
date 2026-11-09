@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, readlinkSync, readdirSync, symlinkSync, lstatSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, readlinkSync, readdirSync, symlinkSync, lstatSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -73,6 +73,29 @@ test('closed and odd fences stop wrapper before records or deploy', () => {
       symlinkSync(target, join(f.actions, id + '.fence'));
       assert.equal(f.run().status, 0);
       assert.deepEqual(readdirSync(f.actions), [id + '.fence']);
+    } finally { f.cleanup(); }
+  }
+});
+
+test('every existing fence path stops wrapper before records or deploy', () => {
+  for (const kind of ['directory', 'directory-link', 'file'] as const) {
+    const f = fixture('#!/bin/sh\\ntouch "$PANTER_BASE/deployed"\\n');
+    try {
+      const fence = join(f.actions, id + '.fence');
+      if (kind === 'directory') {
+        mkdirSync(fence);
+      } else if (kind === 'directory-link') {
+        const target = join(f.base, 'fence-target');
+        mkdirSync(target);
+        symlinkSync(target, fence);
+      } else {
+        writeFileSync(fence, 'occupied');
+      }
+
+      assert.equal(f.run().status, 0, kind);
+      assert.equal(existsSync(join(f.actions, id + '.json')), false, kind);
+      assert.equal(existsSync(join(f.actions, id + '.log')), false, kind);
+      assert.equal(existsSync(join(f.base, 'deployed')), false, kind);
     } finally { f.cleanup(); }
   }
 });
