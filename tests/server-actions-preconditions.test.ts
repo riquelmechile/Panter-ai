@@ -239,6 +239,9 @@ test('worker permit action dry-run spends once, records all six checks, never in
       await assert.rejects(access(marker),'No subprocess should ever be invoked');
       const status=await server.status('gpt-a');
       assert.equal(status.actions[0]!.state,'DRY_RUN');
+      const filtered=await server.status('gpt-a',out.actionId);
+      assert.equal(filtered.actions.length,1);
+      assert.equal(filtered.permits.find(x=>x.permitId===p.permitId)?.effectiveState,'SPENT');
       assert.equal(status.permits.find(x=>x.permitId===p.permitId)!.state,'SPENT');
       assert.equal((await server.status('grok')).actions.length,1);
       await assert.rejects(server.action('grok',workerAction(p,c)),/PERMIT_INVALID/);
@@ -253,6 +256,8 @@ test('operator per-release record is bound once and stays BOUND if revoked; dire
     const p=await server.grant('gpt-a',{workId:w.id,action:'deploy.commit',args:{sha}});
     assert.equal((await server.status('gpt-a')).authorizations?.[0]!.state,'BOUND');
     assert.equal(p.authorizationId,record.id);
+    const replay=await server.grant('gpt-a',{workId:w.id,action:'deploy.commit',args:{sha}});
+    assert.equal(replay.permitId,p.permitId,'Idempotent grant must not need a new operator record');
     await server.revoke('gpt-a',p.permitId);
     assert.equal((await server.status('gpt-a')).authorizations?.[0]!.state,'BOUND');
     await assert.rejects(server.grant('gpt-a',{workId:w.id,action:'deploy.commit',args:{sha}}),
@@ -323,3 +328,29 @@ test('server-action tools preserve router operation names and worker/leader list
   assert.ok(workflowTools('leader').length+DOMAINS.length<=50);
   assert.equal(workflowTools('worker').length+DOMAINS.length,32);
 });
+
+test('release of an undelivered transport claim and OUTCOME_UNKNOWN writer both revoke permits',()=>
+  fixture(async (mesh,server)=>{
+    const readOnly=await delegate(mesh);
+    const c=await mesh.claim('grok',readOnly.id);
+    const p=await server.grant('gpt-a',{workId:readOnly.id,action:'deploy.commit',args:{sha}});
+    await mesh.releaseUnsentClaim('grok',readOnly.id,c.attemptId!,c.leaseGeneration);
+    assert.equal((await server.status('gpt-a')).permits.find(x=>x.permitId===p.permitId)?.state,
+      'REVOKED');
+
+    await mesh.setProfile('gpt-a',{...profile,roles:['implementer']},1);
+    mesh.setWriteGuard(async()=>{});
+    const writer=await mesh.delegate('gpt-a',{missionId:'writer-mission',target:'grok',
+      role:'implementer',instruction:'Carry out approved change',idempotencyKey:randomUUID()});
+    const claim=await mesh.claim('grok',writer.id,30);
+    const wp=await server.grant('gpt-a',{workId:writer.id,action:'deploy.commit',args:{sha}});
+    const original=Date.now;
+    try {
+      Date.now=()=>original()+31_000;
+      const uncertain=await mesh.claim('grok',writer.id,30);
+      assert.equal(uncertain.state,'OUTCOME_UNKNOWN');
+      assert.equal((await server.status('gpt-a')).permits.find(x=>x.permitId===wp.permitId)?.state,
+        'REVOKED');
+      await assert.rejects(server.action('grok',workerAction(wp,claim)),/PERMIT_INVALID/);
+    } finally { Date.now=original; }
+  }));

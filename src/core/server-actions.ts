@@ -57,14 +57,19 @@ export class ServerActions {
     this.guard();
     check(actor===leaderHost(),'LEADER_ONLY');
     this.validateGrant(input.args.sha,input.ttlMinutes??30);
-    check(this.ledger!.directAuthorized(input.args.sha),'NOT_AUTHORIZED');
-    // Check the work before irrevocably moving the operator record to BOUND.
-    await this.mesh.workTarget(actor as Host,input.workId);
+    // A retry of the same delegated grant must not consume a second operator
+    // record; BOUND already authorizes the exact same unspent permit.
+    const work = await this.mesh.workTarget(actor as Host,input.workId);
+    check(work.target!==actor && (work.state==='QUEUED' ||
+      (work.state==='RUNNING' && Date.parse(work.leaseUntil??'')>Date.now())),
+      'Work is not eligible for a permit');
     const issued=(await this.mesh.serverPermitsFor(actor as Host)).find(p=>
       p.workId===input.workId && p.action==='deploy.commit' &&
       p.args.sha===input.args.sha && p.state==='ISSUED' &&
       p.issuedBy===actor && Date.parse(p.expiresAt)>Date.now());
-    if(issued)return issued; // idempotent replay of the same delegated permission
+    if(issued && this.ledger!.authorized(input.args.sha,issued.permitId,issued.authorizationId))
+      return issued;
+    check(this.ledger!.directAuthorized(input.args.sha),'NOT_AUTHORIZED');
     const permitId=randomUUID();
     const authorizationId=this.ledger!.bindPermit(input.args.sha,permitId);
     const permit=await this.mesh.serverGrant(actor as Host,{
