@@ -4,6 +4,9 @@ import { join } from 'node:path';
 import { lstatSync } from 'node:fs';
 import { githubApiGet, independentReviewDecision } from './github-delivery.js';
 
+/** GitHub lists at most this many commits of a pull request. */
+export const PR_COMMITS_LISTABLE = 250;
+
 export const DEPLOY_SHA = /^[0-9a-f]{40}$/;
 export type DeployGateStep = 'ON_MAIN' | 'MERGED_PR' | 'GREEN_CHECKS' | 'INDEPENDENT_REVIEW' | 'LOCAL_STATE';
 export type DeployEvidence = { precondition: DeployGateStep; result: 'PASS' };
@@ -118,7 +121,18 @@ export class ServerDeployGate {
 
     required(/^[A-Za-z0-9-]{1,39}$/.test(this.reviewer), 'INDEPENDENT_REVIEW',
       'Independent reviewer not configured');
-    const commits = await this.pages('INDEPENDENT_REVIEW','pulls/'+pr.number+'/commits',1000, x => x);
+    // The commits listing stops at 250 entries without saying so, and the PR
+    // found through the commit carries no count: read the PR itself and
+    // refuse any history that cannot be proven complete.
+    const full = await this.api('INDEPENDENT_REVIEW', 'pulls/' + pr.number);
+    const commitCount: unknown = full?.commits;
+    required(full?.number === pr.number && full?.head?.sha === pr.head.sha &&
+      Number.isSafeInteger(commitCount) && (commitCount as number) >= 1 &&
+      (commitCount as number) <= PR_COMMITS_LISTABLE, 'INDEPENDENT_REVIEW',
+      'PR commit history cannot be read completely (limit ' + PR_COMMITS_LISTABLE + ')');
+    const commits = await this.pages('INDEPENDENT_REVIEW','pulls/'+pr.number+'/commits',
+      PR_COMMITS_LISTABLE, x => x);
+    required(commits.length === commitCount, 'INDEPENDENT_REVIEW', 'Incomplete PR commit history');
     const reviews = await this.pages('INDEPENDENT_REVIEW','pulls/'+pr.number+'/reviews',1000, x => x);
     const decision = independentReviewDecision(this.reviewer,pr.head.sha,pr,commits,reviews,true);
     required(decision.state === 'APPROVED_EXACT_SHA', 'INDEPENDENT_REVIEW',

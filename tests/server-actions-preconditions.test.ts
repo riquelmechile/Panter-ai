@@ -15,7 +15,7 @@ const repo='example-org/panter';
 type Json={ [key:string]:any };
 type Scenario={
   compare?:string; repoBranch?:string; prs?:Json[]; runs?:Json[];
-  totalRuns?:number; reviews?:Json[]; commits?:Json[]; failPath?:string;
+  totalRuns?:number; reviews?:Json[]; commits?:Json[]; prCommits?:unknown; failPath?:string;
   local?:LocalDeployState; called?:string[];
 };
 const pr=()=>({number:9,merged_at:'2026-01-01T00:00:00Z',
@@ -46,6 +46,8 @@ function githubFake(s:Scenario={}):typeof fetch {
     else if(rest==='commits/'+sha+'/pulls')payload=pageSlice(prs);
     else if(rest==='commits/'+sha+'/check-runs')
       payload={total_count:s.totalRuns??runs.length,check_runs:pageSlice(runs)};
+    else if(rest==='pulls/9')payload={...(prs.find(p=>p.number===9)??pr()),
+      commits:'prCommits' in s?s.prCommits:commits.length};
     else if(rest==='pulls/9/commits')payload=pageSlice(commits);
     else if(rest==='pulls/9/reviews')payload=pageSlice(reviews);
     else throw new Error('Unhandled GitHub API path: '+rest);
@@ -173,6 +175,22 @@ test('PR, check-run and review pagination caps reject overflow and malformation'
   await assert.rejects(gate({reviews:manyReviews}).verify(sha),/PRECONDITION_INDEPENDENT_REVIEW/);
   const commits=Array.from({length:1001},()=>({author:{login:'author-user'}}));
   await assert.rejects(gate({commits}).verify(sha),/PRECONDITION_INDEPENDENT_REVIEW/);
+  const authored=(n:number)=>Array.from({length:n},()=>({author:{login:'author-user'}}));
+  assert.equal((await gate({commits:authored(250)}).verify(sha)).length,5,
+    'a complete 250-commit history spans three pages and passes');
+  await assert.rejects(gate({commits:authored(250),prCommits:251}).verify(sha),
+    /PRECONDITION_INDEPENDENT_REVIEW/,'history beyond what GitHub lists is never trusted');
+  await assert.rejects(gate({commits:authored(3),prCommits:4}).verify(sha),
+    /PRECONDITION_INDEPENDENT_REVIEW/,'a truncated listing fails closed');
+  await assert.rejects(gate({commits:authored(4),prCommits:3}).verify(sha),
+    /PRECONDITION_INDEPENDENT_REVIEW/,'a listing longer than the PR count fails closed');
+  for(const bad of [undefined,null,0,-1,'3',1.5])
+    await assert.rejects(gate({prCommits:bad}).verify(sha),
+      /PRECONDITION_INDEPENDENT_REVIEW/,'malformed commit count: '+String(bad));
+  const hidden=[...authored(250),{author:{login:'review-account'}}];
+  await assert.rejects(gate({commits:hidden.slice(0,250),prCommits:251}).verify(sha),
+    /PRECONDITION_INDEPENDENT_REVIEW/,'a reviewer commit past the listing cannot hide');
+  await assert.rejects(gate({failPath:'/pulls/9'}).verify(sha),/PRECONDITION_INDEPENDENT_REVIEW/);
   assert.equal((await gate({runs:[
     ...Array.from({length:100},(_,i)=>run('extra',i+1)),
     run('test',200),run('arm64-image',201)

@@ -5,8 +5,9 @@ All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://
 ## Unreleased
 
 ### Server actions, Phase 1 (opt-in; dry-run only)
-- Operator standing/per-release deployment authorization, claim-fenced one-use permits in the mesh, and an independent SQLite action ledger with a unique nonterminal slot.
-- Ordered verification of main ancestry, exactly one merged pull request, latest required check runs, final-head independent approval and local health/maintenance state before marking a permit SPENT and an action RESERVED.
+- Operator standing/per-release deployment authorization, claim-fenced one-use permits in the mesh, and an action ledger in the same SQLite file as the mesh, with a unique nonterminal slot (included in backups).
+- Ordered verification of main ancestry, exactly one merged pull request, latest required check runs, final-head independent approval and local health/maintenance state before marking a permit SPENT and an action RESERVED. A pull request whose commit history cannot be read completely (GitHub lists at most 250 commits) is refused.
+- A claim whose lease lapsed loses its permits on a late renewal.
 - Five server-action tools (also available via the admin router), including a worker-only listed action. No systemd-run, wrapper, recovery, deployments or changes to deploy.sh.
 
 ## 1.5.1 (2026-11-09)
