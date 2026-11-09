@@ -4,6 +4,9 @@ All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://
 
 ## Unreleased
 
+### Design
+- `docs/SERVER_ACTIONS.md`: server actions with single-use permits. The leader hands a worker a permit for one fixed action (first: deploy an exact commit of `main` that is merged, green and approved); Panter checks it, runs it as its own systemd unit, records it and spends the permit. No agent holds SSH or runs its own code on the server. Inactive without configuration.
+
 ### Docs
 - README in English and Spanish (`README.md`, `README.es.md`) with diagrams for each language: architecture, how a task flows, how workers wake up, the delivery gate and owner mode, and what lives in the repository versus your server. Corrected the worker tool count (31, routers included).
 - The asset test covers both READMEs and checks they show the same diagrams, each in its own language.
