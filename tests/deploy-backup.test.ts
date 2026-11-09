@@ -95,3 +95,35 @@ test('a backup taken while the ledger is being written passes, copies every JSON
     assert.deepEqual((await readdir(join(base, 'backups'))).filter(x => x.startsWith('.restore-check-')), [], 'no scratch copy left behind');
   } finally { await rm(base, { recursive: true, force: true }); }
 });
+
+test('a backup holds the server-actions authority and its slot table, and the restore check covers them', async () => {
+  const { ServerActionsLedger } = await import('../src/core/server-actions-ledger.js');
+  const { randomUUID } = await import('node:crypto');
+  const base = await mkdtemp(join(tmpdir(), 'panter-backup-actions-'));
+  try {
+    await mkdir(join(base, 'data'), { recursive: true }); await mkdir(join(base, 'etc'), { recursive: true });
+    await writeFile(join(base, 'etc', 'panter.env'), 'PANTER_PORT=18080\n');
+    const sha = 'c'.repeat(40);
+    const ledger = new ServerActionsLedger(join(base, 'data'), {});
+    const authorization = ledger.authorize('admin', sha);
+    const done = ledger.reserve({ actionId: randomUUID(), action: 'deploy.commit', args: { sha }, host: 'gpt-a', workId: null,
+      attemptId: null, leaseGeneration: null, permitId: null, issuedBy: 'gpt-a', authorizationId: null, checks: [] });
+    ledger.finishDryRun(done.actionId);
+    const open = ledger.authorize('admin', 'd'.repeat(40));
+    ledger.close();
+    const out = JSON.parse((await backup(base, '--label', 'pre-actions-1')).stdout);
+    assert.equal(out.restoreCheck, 'ok');
+    assert.ok(out.ledgers.includes('server_actions'));
+    assert.deepEqual(out.serverActionSlots, { total: 1, active: 0 });
+    const copy = new DatabaseSync(join(base, 'backups', 'pre-actions-1', 'panter.sqlite'), { readOnly: true });
+    try {
+      const payload = JSON.parse((copy.prepare('SELECT payload FROM ledger WHERE name=?').get('server_actions') as any).payload);
+      assert.equal(payload.authorizations.find((a: any) => a.id === authorization.id).state, 'CONSUMED');
+      assert.equal(payload.authorizations.find((a: any) => a.id === open.id).state, 'OPEN');
+      assert.equal(payload.actions[0].actionId, done.actionId);
+      assert.equal((copy.prepare('SELECT active FROM server_action_slots WHERE action_id=?').get(done.actionId) as any).active, 0);
+    } finally { copy.close(); }
+    const manifest = JSON.parse(await readFile(join(base, 'backups', 'pre-actions-1', 'manifest.json'), 'utf8'));
+    assert.deepEqual(manifest.serverActionSlots, { total: 1, active: 0 });
+  } finally { await rm(base, { recursive: true, force: true }); }
+});

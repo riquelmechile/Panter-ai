@@ -66,6 +66,8 @@ rm ~/panter-ai/etc/maintenance
 
 `manifest.json` registra el release activo al momento del backup, la huella SHA-256 de cada ledger y los conteos de OAuth.
 
+Las acciones de servidor (`docs/SERVER_ACTIONS.md`) guardan su autoridad en ese mismo `panter.sqlite`: el ledger `server_actions` (autorizaciones del operador y acciones) y la tabla `server_action_slots` (el cupo único). Por eso un backup contiene siempre los permisos del mesh y esa autoridad en la misma instantánea, la prueba de restauración compara también la tabla de cupos (`serverActionSlots` en el manifest) y restaurar no necesita pasos extra. Los archivos de `etc/actions/` (cercas, registros y logs de cada acción) no van en el backup: quedan en su lugar y nunca se borran.
+
 ## Healthcheck
 
 `panter-healthcheck.timer` corre `deploy/healthcheck.sh` cada 5 minutos. Con dos fallos seguidos de `/health`, reinicia `panter-ai.service`. Mientras exista `etc/maintenance` no hace nada; tampoco mientras exista `etc/quiesce` (lo crean el deploy y el backup diario mientras detienen el servicio; si tiene más de 30 minutos se ignora). Si `etc/ops.env` define `PANTER_ALERT_WEBHOOK`, avisa ahí en cada fallo; el JSON incluye `text` y `content`, así que sirve para webhooks de Slack o Discord.

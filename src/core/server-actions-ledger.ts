@@ -1,7 +1,6 @@
-/** Phase 1 server-action authority. Separate SQLite authority, with a database-enforced
- * partial unique slot. No execution, launch or recovery is performed here. */
+/** Phase 1 server-action authority: its own ledger document (`server_actions`) and slot table, in the same
+ * SQLite file as the mesh, with a database-enforced partial unique slot. No execution, launch or recovery here. */
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
 import { SqliteLedger } from './sqlite-ledger.js';
 
 export type AuthorizationState = 'OPEN' | 'BOUND' | 'CONSUMED' | 'EXPIRED';
@@ -34,8 +33,10 @@ export class ServerActionsLedger {
   private readonly db: SqliteLedger;
   readonly standing: boolean;
   constructor(dir: string, env: Record<string, string | undefined> = process.env) {
-    // Keeping this store in a distinct SQLite file means it cannot join mesh's mutation.
-    this.db = SqliteLedger.open(join(dir, 'server-actions'));
+    // Same file as the mesh (data/panter.sqlite), so one backup snapshot always holds mesh permits and this
+    // authority together and a restore cannot leave them at different points in time. It is still a separate
+    // ledger document: a mesh mutation and a mutation here are two transactions (see "Reserving crosses two stores").
+    this.db = SqliteLedger.open(dir);
     this.standing = env.PANTER_SERVER_DEPLOY_STANDING_AUTHORIZATION === '1';
   }
   close() { this.db.close(); }

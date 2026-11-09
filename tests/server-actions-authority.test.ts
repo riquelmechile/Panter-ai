@@ -180,3 +180,41 @@ test('leader switch revokes every old-leader ISSUED permit at boot', () =>
       else process.env.PANTER_LEAD_HOST=prior;
     }
   }));
+
+test('a claim that lapsed loses its permit when it renews late; a renewal in time keeps it', () =>
+  fixture(async (_dir, mesh) => {
+    // In time: heartbeat before the lease runs out, the permit is still usable.
+    const live = await delegate(mesh);
+    const kept = await grant(mesh, live.id);
+    const c1 = await mesh.claim('grok', live.id, 30);
+    await mesh.heartbeat('grok', live.id, c1.attemptId!, c1.leaseGeneration, 60);
+    assert.equal((await spend(mesh, kept.permitId, live.id, c1.attemptId!, c1.leaseGeneration)).state, 'SPENT');
+
+    // Late: read-only work may renew an expired lease (same attempt and generation), but not its server authority.
+    const lapsed = await delegate(mesh);
+    const lost = await grant(mesh, lapsed.id);
+    const c2 = await mesh.claim('grok', lapsed.id, 30);
+    const clock = Date.now;
+    try {
+      Date.now = () => clock() + 31_000;
+      await assert.rejects(spend(mesh, lost.permitId, lapsed.id, c2.attemptId!, c2.leaseGeneration), /PERMIT_STALE_CLAIM/);
+      const renewed = await mesh.heartbeat('grok', lapsed.id, c2.attemptId!, c2.leaseGeneration, 600);
+      assert.equal(renewed.attemptId, c2.attemptId, 'the late renewal keeps the attempt');
+      assert.equal((await mesh.serverPermitsFor('gpt-a')).find(p => p.permitId === lost.permitId)!.state, 'REVOKED');
+      await assert.rejects(spend(mesh, lost.permitId, lapsed.id, c2.attemptId!, c2.leaseGeneration), /PERMIT_INVALID/);
+    } finally { Date.now = clock; }
+  }));
+
+test('the authority lives in the same SQLite file as the mesh, so one backup snapshot holds both', () =>
+  fixture(async (dir, mesh, db) => {
+    const { existsSync } = await import('node:fs');
+    const { DatabaseSync } = await import('node:sqlite');
+    db.authorize('admin', sha);
+    await grant(mesh, (await delegate(mesh)).id);
+    assert.equal(existsSync(join(dir, 'server-actions')), false, 'no second database directory');
+    const file = new DatabaseSync(join(dir, 'panter.sqlite'), { readOnly: true });
+    try {
+      const names = (file.prepare('SELECT name FROM ledger ORDER BY name').all() as Array<{name: string}>).map(r => r.name);
+      assert.ok(names.includes('mesh') && names.includes('server_actions'), names.join(','));
+    } finally { file.close(); }
+  }, false));
