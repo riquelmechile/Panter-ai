@@ -111,5 +111,5 @@ if (daily) {
   const dailies = fs.readdirSync(backupRoot).filter(n => /^daily-\d{8}$/.test(n)).sort().reverse();
   for (const old of dailies.slice(keepDaily)) { fs.rmSync(path.join(backupRoot, old), { recursive: true, force: true }); pruned.push(old); }
 }
-console.log(JSON.stringify({ backupPath: destination, dbIntegrity: 'ok', restoreCheck: 'ok', consistency: manifest.consistency, ledgers: fingerprint.map(x => x.name),
-  oauthCounts: manifest.oauthCounts, serverActionSlots, copied, missing, currentRelease, pruned }));
+console.log(JSON.stringify({ backupPath: destination, dbIntegrity: 'ok', restoreCheck: 'ok', consistency: manifest.consistency, ledgers: fingerprint.map(x => x.name), serverActionSlots,
+  oauthCounts: manifest.oauthCounts, copied, missing, currentRelease, pruned }));
