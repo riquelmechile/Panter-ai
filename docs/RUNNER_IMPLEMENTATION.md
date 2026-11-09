@@ -1,5 +1,7 @@
 # Runner fase 2 — núcleo de autorización (PR incremental 1/3)
 
+> **Pilot (2026-11).** The smallest executor, one pipeline that runs a repository's tests, is designed in [RUNNER_PILOT.md](RUNNER_PILOT.md) and built in phases. Everything below still holds: nothing executes until the operator installs and enables it.
+
 **Estado:** implementación parcial, solo bibliotecas. No existe todavía `panter-runner.service`, socket AF_UNIX, ejecución de procesos, sandbox de scripts, worktrees ni mecanismo de despliegue. **No activar en producción** hasta completar el ADR-001 y obtener revisión independiente de Claude sobre cada SHA.
 
 ## Qué implementa este primer PR
