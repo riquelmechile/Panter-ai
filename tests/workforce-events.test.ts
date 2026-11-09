@@ -4,7 +4,7 @@ import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {randomBytes} from 'node:crypto';
-import {WorkforceEvents,WORK_EVENT,publicIp,validCallback,webhookHeaders,pinnedAddressLookup,reconcileWorkforceEventOutbox,
+import {WorkforceEvents,WORK_EVENT,EVENT_RERING_MS,EVENT_MAX_RINGS,publicIp,validCallback,webhookHeaders,pinnedAddressLookup,reconcileWorkforceEventOutbox,
   type EventPost} from '../src/core/workforce-events.js';
 
 const callback='https://connectors.api.openai.com/mcp-events/test-callback';
@@ -324,4 +324,89 @@ test('a subscribe still verifying when the connection is revoked is never stored
   const ok=new WorkforceEvents(dir,async(_u,_h,b)=>{const x=JSON.parse(b) as {challenge?:string};return {status:200,body:JSON.stringify({challenge:x.challenge})};});
   await ok.subscribe('gpt-b',args);
   assert.equal(ok.hasActive('gpt-b'),true);
+}));
+
+/** Move an accepted delivery's acceptance time into the past, as if the host had not claimed the work since. */
+async function ageAccepted(dir:string,ms:number){
+  const {SqliteLedger}=await import('../src/core/sqlite-ledger.js');
+  const ledger=SqliteLedger.open(dir);
+  ledger.mutate('events',{version:1,subscriptions:[],deliveries:[]} as any,(d:any)=>{
+    for(const x of d.deliveries)if(x.state==='ACCEPTED')x.terminalAt=Date.now()-ms;});
+  ledger.close();
+}
+
+test('an accepted event whose work stays queued is rung again, with a new wire id, at most three times',()=>fixture(async dir=>{
+  const ids:string[]=[],headerIds:string[]=[];
+  const post:EventPost=async(_u,h,b)=>{
+    const body=JSON.parse(b) as {type?:string;challenge?:string;eventId?:string;data?:{workId:string}};
+    if(body.type==='verification')return {status:200,body:JSON.stringify({challenge:body.challenge})};
+    ids.push(body.eventId!);headerIds.push(h['webhook-id']!);
+    assert.equal(body.data!.workId,workId);
+    return {status:204,body:''};
+  };
+  const engine=new WorkforceEvents(dir,post);
+  await engine.subscribe('gpt-b',args);
+  assert.equal(engine.queue('gpt-b',[workId]),1);
+  assert.equal(await engine.flush(),1);
+  // Accepted a moment ago: still queued, but too soon to ring again.
+  assert.equal(engine.queue('gpt-b',[workId]),0);
+  await ageAccepted(dir,EVENT_RERING_MS-5_000);
+  assert.equal(engine.queue('gpt-b',[workId]),0);
+  for(let ring=2;ring<=EVENT_MAX_RINGS;ring++){
+    await ageAccepted(dir,EVENT_RERING_MS+1_000);
+    assert.equal(engine.queue('gpt-b',[workId]),1,`ring ${ring} queued`);
+    assert.equal(engine.queue('gpt-b',[workId]),0,'not queued twice');
+    assert.equal(await engine.flush(),1);
+  }
+  // The bound holds however long the work stays queued.
+  await ageAccepted(dir,EVENT_RERING_MS*10);
+  assert.equal(engine.queue('gpt-b',[workId]),0);
+  assert.equal(await engine.flush(),0);
+  assert.equal(ids.length,EVENT_MAX_RINGS);
+  assert.equal(new Set(ids).size,EVENT_MAX_RINGS,'every ring has its own id, so the receiver cannot drop it as a duplicate');
+  assert.deepEqual(headerIds,ids,'webhook-id and eventId agree');
+  assert.ok(ids.slice(1).every(id=>id.startsWith(ids[0]!+'_r')));
+  const status=engine.status('gpt-a');
+  assert.equal(status.accepted,1);assert.equal(status.rerung,1);assert.equal(status.pending,0);
+}));
+
+test('work that left the queue is never rung again',()=>fixture(async dir=>{
+  let deliveries=0;
+  const post:EventPost=async(_u,_h,b)=>{
+    const body=JSON.parse(b) as {type?:string;challenge?:string};
+    if(body.type==='verification')return {status:200,body:JSON.stringify({challenge:body.challenge})};
+    deliveries++;return {status:200,body:'{}'};
+  };
+  const engine=new WorkforceEvents(dir,post);
+  await engine.subscribe('gpt-b',args);
+  const other='00000000-0000-4000-8000-000000000002';
+  engine.queue('gpt-b',[workId,other]);
+  assert.equal(await engine.flush(),2);
+  await ageAccepted(dir,EVENT_RERING_MS+1_000);
+  // The host claimed workId (it is no longer pending); only the other one is still queued.
+  assert.equal(engine.queue('gpt-b',[other]),1);
+  assert.equal(await engine.flush(),1);
+  assert.equal(deliveries,3);
+}));
+
+test('a ring that keeps failing is retried under the same wire id, and a failed event is not re-rung',()=>fixture(async dir=>{
+  const ids:string[]=[];let fail=false;
+  const post:EventPost=async(_u,_h,b)=>{
+    const body=JSON.parse(b) as {type?:string;challenge?:string;eventId?:string};
+    if(body.type==='verification')return {status:200,body:JSON.stringify({challenge:body.challenge})};
+    ids.push(body.eventId!);return fail?{status:410,body:''}:{status:200,body:'{}'};
+  };
+  const engine=new WorkforceEvents(dir,post);
+  await engine.subscribe('gpt-b',args);
+  engine.queue('gpt-b',[workId]);
+  assert.equal(await engine.flush(),1);
+  await ageAccepted(dir,EVENT_RERING_MS+1_000);
+  fail=true;
+  assert.equal(engine.queue('gpt-b',[workId]),1);
+  assert.equal(await engine.flush(),1);
+  assert.equal(ids[1],ids[0]+'_r2');
+  // 410 Gone is terminal: the second ring failed, and a FAILED event is not an accepted one waiting to be re-rung.
+  assert.equal(engine.status('gpt-a').failed,1);
+  await ageAccepted(dir,EVENT_RERING_MS+1_000);
+  assert.equal(engine.queue('gpt-b',[workId]),0);
 }));
