@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Single-use deploy wrapper. The fence is the first filesystem mutation.
+# Needs bash, node and curl on the PATH of the unit that runs it (a transient
+# `systemd-run --user` unit does not inherit the PATH of a login shell).
 set -euo pipefail
+umask 077 # the record and the deploy log are for the operator only
 
 [[ $# -eq 3 && $1 == deploy.commit ]] || { echo "usage: run-action.sh deploy.commit <actionId> <sha>" >&2; exit 2; }
 ACTION_ID=$2
 SHA=$3
-[[ $ACTION_ID =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || exit 2
+# Lowercase only: one action must never map to two fence names.
+[[ $ACTION_ID =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || exit 2
 [[ $SHA =~ ^[0-9a-f]{40}$ ]] || exit 2
 
 BASE=${PANTER_BASE:-$HOME/panter-ai}
@@ -48,14 +52,25 @@ EXIT_CODE=$?
 set -e
 
 HEALTH=${PANTER_HEALTH_URL:-http://127.0.0.1:18080/health}
-BODY=$(curl -fsS --max-time 3 "$HEALTH" 2>/dev/null || true)
-REVISION=$(printf '%s' "$BODY" | node -e '
+revision() {
+  curl -fsS --max-time 3 --url "$HEALTH" 2>/dev/null | node -e '
 let input = ""; process.stdin.on("data", c => input += c);
 process.stdin.on("end", () => { try {
   const r = JSON.parse(input).revision;
   process.stdout.write(typeof r === "string" ? r : "");
 } catch {} });
-')
+' || true
+}
+# deploy.sh only exits 0 after /health reported this commit, so a single
+# unlucky probe must not turn a healthy deploy into FAILED: ask a few times.
+REVISION=$(revision)
+if [[ $EXIT_CODE -eq 0 ]]; then
+  for _ in 1 2 3 4; do
+    [[ $REVISION == "$SHA" ]] && break
+    sleep 1
+    REVISION=$(revision)
+  done
+fi
 STATE=FAILED
 if [[ $EXIT_CODE -eq 0 && $REVISION == "$SHA" ]]; then
   STATE=LIVE
