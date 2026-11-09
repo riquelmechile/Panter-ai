@@ -143,7 +143,7 @@ The fence is read with `readlink` on the link itself, never with `stat` or `test
 
 | Fence | Record file | Unit | Panter writes |
 |---|---|---|---|
-| any | final record, well formed | gone | the record's state |
+| `run` | final record, well formed | gone | the record's state |
 | any | any | live, and the action is younger than `RuntimeMaxSec` + 5 minutes | nothing yet; next pass |
 | any | any | live, and older than that | `STOPPING`, then `systemctl --user stop` on the unit; next pass |
 | `run` | `RUNNING`, none, malformed or unreadable | gone | `UNKNOWN` (the wrapper ran; it may have reached `deploy.sh`) |
