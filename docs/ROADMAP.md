@@ -6,6 +6,12 @@ Some early items were superseded later: the leader is configurable since v0.16 (
 
 # Panter-ai roadmap
 
+## v1.6 server actions
+
+- [x] Fase 1: autorización separada del operador, permisos ligados a claims, reserva exclusiva y verificaciones de GitHub; `deploy.commit` termina en dry-run tras RESERVED, sin efectos sobre el servidor.
+- [ ] Fase 2 (otro host): transient systemd unit, wrapper, fencing, registros y recuperación completa.
+- [ ] Fase 3: habilitación en el servidor del operador solo con su autorización explícita.
+
 ## Foundation (v0.1)
 - [x] Stateless remote MCP transport with host-managed inference.
 - [x] Explicit host request contract and evidence boundaries.
