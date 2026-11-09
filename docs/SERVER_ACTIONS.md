@@ -141,6 +141,13 @@ On start, and every 30 seconds while an action is open, Panter reconciles each n
 
 The fence is read with `readlink` on the link itself, never with `stat` or `test -e` (the targets `run` and `closed` do not exist as files, so the links dangle on purpose). Its observed value is one of: **absent** (`ENOENT`), **`run`**, **`closed`**, or **odd** (any other target, or any other error). Taking it means `symlink("closed", …)`; on `EEXIST` Panter reads it again and uses what it finds. Fences live in `<base>/etc/actions/`, outside every release directory, so they survive a deploy and a rollback; Panter never deletes them.
 
+**Order of observation.** "The unit is gone" can also mean "the unit does not exist yet", so a stale reading must never be combined with a newer one. In every pass, for each action, Panter reads in this order: (1) the fence, (2) the unit, (3) the record file. Each fact only moves forward (the fence is created once, the unit goes from not-yet to live to gone, the record from none to `RUNNING` to final), so:
+
+- a unit seen gone **after** the fence was seen as `run` means the wrapper really exited, because a wrapper that holds `run` runs inside a live unit;
+- a record read **after** the unit was seen gone is the last word, because nothing is left to write it.
+
+Whenever a step changes or contradicts what was read (taking the fence succeeds or returns `EEXIST`), the pass starts again from (1) with fresh readings before it writes anything.
+
 | Fence | Record file | Unit | Panter writes |
 |---|---|---|---|
 | `run` | final record, well formed | gone | the record's state |
@@ -151,7 +158,7 @@ The fence is read with `readlink` on the link itself, never with `stat` or `test
 | absent | none | gone, 2 minutes or more | take the fence; on success `ABANDONED`, on `EEXIST` apply this table again with what the fence now says |
 | `closed` | none | gone | `ABANDONED` (nothing ran and nothing can run; written whoever created `closed`, including an earlier process that died before recording it) |
 | `closed` | any record | gone | `UNKNOWN` (impossible by construction; fail closed and flag it) |
-| absent | `RUNNING`, final, malformed or unreadable | gone | `UNKNOWN` (a record without the fence is impossible by construction; fail closed) |
+| absent | `RUNNING`, final, malformed or unreadable | gone | take the fence: on `EEXIST` apply this table again with fresh readings (the wrapper started and finished between two readings); on success `UNKNOWN` (a record without a fence is impossible by construction; fail closed and flag it) |
 | odd | any | gone | `UNKNOWN` |
 
 "Gone" and "live" are the `ActiveState` definitions above. Every row with the unit gone ends the action, so no combination leaves the slot taken once the unit has stopped, and every row that writes `ABANDONED` has `closed` in the fence, so no wrapper can still deploy.
@@ -202,7 +209,7 @@ Each one is its own pull request with its own preconditions, authorization rule 
 |---|---|
 | 0 | This design |
 | 1 | Authority and checks: permits inside the mesh document with binding and revocation in every claim transition, the `server-actions` ledger (operator authorizations with their state table, actions with the unique slot), the reserve order across the two, the five tools, the `server` field on `panter_mesh_delegate`, the preconditions against GitHub with the truth tables above (including an older success behind a newer pending run), the `AGENTS.md` sentence. `deploy.commit` stops after `RESERVED` in **dry-run**: it answers what it would launch and frees the slot. Tests with a fake GitHub API covering every row of the tables |
-| 2 | Execution: `deploy/run-action.sh`, the `systemd-run` launch, the records, recovery with every row of its table and every `ActiveState`, `STOPPING`, the fence with every row of the table (including deterministic tests of a launcher frozen after marking, a `systemd-run` killed after sending its request, a unit that systemd starts late after `ABANDONED`, and a Panter that dies between creating `closed` and recording `ABANDONED` or `START_FAILED`, recovered by a restarted or second process), receipts; tests with a fake `systemd-run`, a fake `systemctl` and a fake `deploy.sh` |
+| 2 | Execution: `deploy/run-action.sh`, the `systemd-run` launch, the records, recovery with every row of its table and every `ActiveState`, `STOPPING`, the fence with every row of the table (including deterministic tests of a launcher frozen after marking, a `systemd-run` killed after sending its request, a unit that systemd starts late after `ABANDONED`, a Panter that dies between creating `closed` and recording `ABANDONED` or `START_FAILED`, recovered by a restarted or second process, and a wrapper that starts, or starts and finishes, between two readings of one pass: the order of observation must never produce `UNKNOWN` for a deploy that is running or that left a final record), receipts; tests with a fake `systemd-run`, a fake `systemctl` and a fake `deploy.sh` |
 | 3 | On the operator's server, with explicit authorization: enable `deploy.commit`, then the leader delegates the next release's deploy to a worker with a permit, and the result is checked against `/health` |
 
 Phases 1 and 2 share only this document and the record format in `etc/actions/`. Every phase is a pull request with CI green, Codex, an independent review on the exact head commit by the reviewer account, and a squash merge by the leader.
