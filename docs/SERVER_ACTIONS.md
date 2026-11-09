@@ -125,6 +125,8 @@ The unit name is derived from `actionId` (a UUID), so it cannot collide and reco
 
 ## Recovery
 
+**Launch and reconciliation never overlap.** Launching is fenced in time. Immediately before `systemd-run`, the launching request re-reads the action in a transaction and proceeds only if it is still `RESERVED` and unmarked, marking it with `launchStartedAt` in that same transaction. It then calls `systemd-run` with a hard timeout of 30 seconds (the process is killed if it takes longer) and writes `LAUNCHED` or, as below, `START_FAILED`. The reconciler does not judge a `RESERVED` or `LAUNCHED` action **without a unit** until 2 minutes after its `launchStartedAt` (or after its reservation, if no launch was ever marked). By then `systemd-run` has either created the unit, which is visible to `systemctl --user show`, or is dead, so "no unit" is definitive and the reconciler cannot close a launch that is still happening. This holds whether the launching request is still alive, crashed, or belongs to another Panter process.
+
 On start, and every 30 seconds while an action is open, Panter reconciles each non-terminal action from three observations: its ledger state, the record file, and `systemctl --user show panter-action-<actionId> -p LoadState,ActiveState`. The unit is **gone** when `LoadState` is `not-found`, or `ActiveState` is `inactive` or `failed` (with `--collect` a stopped unit is unloaded soon after). It is **live** when `ActiveState` is `activating`, `active`, `reloading` or `deactivating`.
 
 | Record file | Unit | Panter writes |
@@ -133,11 +135,12 @@ On start, and every 30 seconds while an action is open, Panter reconciles each n
 | final record, well formed | live | nothing yet (the wrapper is exiting); next pass |
 | `RUNNING` or none | live, and the action is younger than `RuntimeMaxSec` + 5 minutes | nothing yet; next pass |
 | `RUNNING` or none | live, and older than that | `STOPPING`, then `systemctl --user stop` on the unit; next pass |
-| `RUNNING` or none | gone | `UNKNOWN` |
+| `RUNNING` or none | gone, and the launch window (2 minutes after `launchStartedAt`) has closed | `UNKNOWN` |
+| none | gone, launch window still open | nothing yet; next pass |
 | malformed or unreadable | live | nothing yet, as for `RUNNING` |
 | malformed or unreadable | gone | `UNKNOWN` |
 
-One case is decided outside this table: when `systemd-run` itself returns an error in the request that reserved the action, that same request asks `systemctl --user show` for the unit, and if it is `not-found` it writes `START_FAILED`; otherwise the action stays `RESERVED` and the table above takes over. After a restart, absence is never read as "did not run": a `RESERVED` or `LAUNCHED` action with no record and no unit is `UNKNOWN`. A Panter crash after the unit was accepted but before the wrapper wrote anything is the "none, live" row: Panter waits for the wrapper, and the unit's own `RuntimeMaxSec` bounds the wait. A final record written after `UNKNOWN` cannot exist, because `UNKNOWN` is only written once the unit is gone.
+One case is decided outside this table: when `systemd-run` itself returns an error in the request that reserved the action, that same request asks `systemctl --user show` for the unit, and if it is `not-found` it writes `START_FAILED`; otherwise the action stays `RESERVED` and the table above takes over. After a restart, absence is never read as "did not run": a `RESERVED` or `LAUNCHED` action with no record and no unit is `UNKNOWN`. A Panter crash after the unit was accepted but before the wrapper wrote anything is the "none, live" row: Panter waits for the wrapper, and the unit's own `RuntimeMaxSec` bounds the wait. A final record written after `UNKNOWN` cannot exist, because `UNKNOWN` is only written once the unit is gone and the launch window of that action has closed.
 
 The record is written by the unit, not by Panter, so it survives Panter's own restart during the deploy and Panter's rollback to the previous release, which reads the same `etc/actions/` and closes the action the same way.
 
@@ -185,7 +188,7 @@ Each one is its own pull request with its own preconditions, authorization rule 
 |---|---|
 | 0 | This design |
 | 1 | Authority and checks: permits inside the mesh document with binding and revocation in every claim transition, the `server-actions` ledger (operator authorizations with their state table, actions with the unique slot), the reserve order across the two, the five tools, the `server` field on `panter_mesh_delegate`, the preconditions against GitHub with the truth tables above (including an older success behind a newer pending run), the `AGENTS.md` sentence. `deploy.commit` stops after `RESERVED` in **dry-run**: it answers what it would launch and frees the slot. Tests with a fake GitHub API covering every row of the tables |
-| 2 | Execution: `deploy/run-action.sh`, the `systemd-run` launch, the records, recovery with every row of its table and every `ActiveState`, `STOPPING`, receipts; tests with a fake `systemd-run`, a fake `systemctl` and a fake `deploy.sh` |
+| 2 | Execution: `deploy/run-action.sh`, the `systemd-run` launch, the records, recovery with every row of its table and every `ActiveState`, `STOPPING`, the launch fence and its 2-minute window, receipts; tests with a fake `systemd-run`, a fake `systemctl` and a fake `deploy.sh` |
 | 3 | On the operator's server, with explicit authorization: enable `deploy.commit`, then the leader delegates the next release's deploy to a worker with a permit, and the result is checked against `/health` |
 
 Phases 1 and 2 share only this document and the record format in `etc/actions/`. Every phase is a pull request with CI green, Codex, an independent review on the exact head commit by the reviewer account, and a squash merge by the leader.
