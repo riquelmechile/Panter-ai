@@ -122,3 +122,9 @@ Reference: https://developers.google.com/connected-apps/mcp/server-optimization
 `panter_oauth_client_revoke` también borra en el acto las suscripciones a eventos de los hosts de ese cliente, y los avisos pendientes quedan `FAILED` (`SUBSCRIPTION_INACTIVE`). Las suscripciones van por host, no por cliente: si el host tiene otra conexión viva, esa conexión debe volver a suscribirse. La respuesta trae esos hosts en `hostsToResubscribe`.
 
 Una suscripción que todavía estaba verificando su callback cuando se revocó la conexión no se guarda: Panter lleva un contador de revocaciones por host y lo compara antes de persistir. El borrado se hace antes y después de revocar, así que una caída a mitad de camino no deja suscripciones de una conexión ya revocada. Además, después de guardar una suscripción, Panter vuelve a validar el token de esa misma request: si la conexión se revocó mientras la request seguía en curso, la suscripción se borra.
+
+## Avisos repetidos (1.5.1)
+
+Un webhook aceptado (2xx) solo prueba que la app recibió el evento, no que el host despertó y tomó el trabajo: una ejecución puede terminar sin tomar nada. Antes Panter mandaba un solo aviso por trabajo, así que un despertar perdido dejaba el trabajo en cola hasta que alguien abriera la app.
+
+Ahora, si el trabajo sigue en cola (`QUEUED`) 10 minutos después de un aviso aceptado, Panter avisa de nuevo, como máximo 3 veces en total por trabajo y suscripción. Cada repetición lleva su propio id (`<id>_r2`, `<id>_r3`) en `eventId` y en `webhook-id`, para que el receptor no la descarte como duplicado de la primera; los reintentos por error de red de un mismo aviso conservan su id. Un trabajo que ya fue tomado no se vuelve a avisar, y un aviso que terminó en `FAILED` tampoco. `panter_workforce_event_status` muestra `rerung`: cuántos eventos se avisaron más de una vez.

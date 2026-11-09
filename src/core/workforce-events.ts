@@ -16,7 +16,9 @@ export type EventHost=LeaderHost;
 type Subscription={id:string;owner:EventHost;url:string;secret:string;expiresAt:string;verifiedAt:string};
 type Delivery={id:string;subId:string;workId:string;state:'PENDING'|'SENDING'|'ACCEPTED'|'FAILED';
   attempts:number;nextAt:number;lastStatus:number|null;terminalAt?:number;
-  failureReason?:'SUBSCRIPTION_INACTIVE'};
+  failureReason?:'SUBSCRIPTION_INACTIVE';
+  /** How many times this event was rung (absent = 1). See EVENT_RERING_MS. */
+  rings?:number};
 /** revocations: per-owner epoch bumped by dropOwners; a subscribe that started before a bump never persists. */
 type EventData={version:1;subscriptions:Subscription[];deliveries:Delivery[];revocations?:Record<string,number>};
 type PostResult={status:number;body:string};
@@ -45,6 +47,13 @@ for(const [ip,mask] of [
   ['ff00::',8],['2001:db8::',32],['2001:10::',28],
 ] as const)privateIps.addSubnet(ip,mask,'ipv6');
 
+/** An accepted webhook only proves the app received the event, not that the host woke and claimed the work (a run can
+ * end without picking anything up). While the work is still QUEUED this long after an accepted ring, ring again, at
+ * most EVENT_MAX_RINGS times in total: enough to recover a lost wake, bounded so a host that is away is not flooded. */
+export const EVENT_RERING_MS=10*60_000;
+export const EVENT_MAX_RINGS=3;
+/** The id on the wire. A later ring needs its own id, or the receiver would drop it as a duplicate of the first. */
+export const eventWireId=(d:{id:string;rings?:number})=>(d.rings??1)>1?`${d.id}_r${d.rings}`:d.id;
 const MAX_OUTSTANDING=2000;
 const MAX_TERMINAL_HISTORY=2000;
 const TERMINAL_HISTORY_TTL_MS=7*24*60*60*1000;
@@ -268,6 +277,14 @@ export class WorkforceEvents{
               existing.lastStatus=null;existing.terminalAt=undefined;
               existing.failureReason=undefined;outstanding++;added++;
             }
+            // Accepted long ago and the work is still queued: the wake was probably lost. Ring again, bounded.
+            else if(existing.state==='ACCEPTED'&&(existing.rings??1)<EVENT_MAX_RINGS&&
+              (existing.terminalAt??0)<=now()-EVENT_RERING_MS){
+              if(outstanding>=MAX_OUTSTANDING)throw Error('MCP event backlog limit reached');
+              existing.state='PENDING';existing.attempts=0;existing.nextAt=now();
+              existing.lastStatus=null;existing.terminalAt=undefined;
+              existing.rings=(existing.rings??1)+1;outstanding++;added++;
+            }
             continue;
           }
           if(outstanding>=MAX_OUTSTANDING)throw Error('MCP event backlog limit reached');
@@ -300,12 +317,13 @@ export class WorkforceEvents{
       if(!item)break;
       attempted++;
       const {delivery,sub}=item;
-      const body=JSON.stringify({eventId:delivery.id,name:WORK_EVENT,
+      const wireId=eventWireId(delivery);
+      const body=JSON.stringify({eventId:wireId,name:WORK_EVENT,
         timestamp:new Date().toISOString(),data:{workId:delivery.workId},cursor:null});
       let status:number|null=null;
       try{
         const response=await this.post(sub.url,
-          webhookHeaders(sub.secret,delivery.id,sub.id,body),body);
+          webhookHeaders(sub.secret,wireId,sub.id,body),body);
         status=response.status;
       }catch{/* Never log host URL, token, exception or body. */}
       this.db.mutate('events',seed,d=>{
@@ -327,6 +345,8 @@ export class WorkforceEvents{
       pending:data.deliveries.filter(x=>x.state==='PENDING'||x.state==='SENDING').length,
       accepted:data.deliveries.filter(x=>x.state==='ACCEPTED').length,
       failed:data.deliveries.filter(x=>x.state==='FAILED').length,
+      // Events rung more than once because their work stayed queued after an accepted ring.
+      rerung:data.deliveries.filter(x=>(x.rings??1)>1).length,
       autonomousWakeVerified:false as const};
   }
 }

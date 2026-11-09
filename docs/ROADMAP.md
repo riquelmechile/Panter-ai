@@ -241,8 +241,9 @@ La interfaz read-only no ejecuta código, no hace cambios en producción y no re
 - [x] Sin cuentas, dominios, rutas ni nombres del dueño en el repo; la configuración real vive solo en el `panter.env` del servidor ([SELF_HOSTING.md](SELF_HOSTING.md)).
 - [x] Prueba de higiene en CI contra credenciales con formato real y valores reales en los ejemplos.
 
-## v1.5.1 leases largos
+## v1.5.1 leases largos y avisos repetidos
 
 - [x] Un trabajo de solo lectura cuyo lease venció conserva su resultado mientras su intento siga vigente; un escritor vencido sigue siendo resultado incierto.
 - [x] Un trabajo de solo lectura vencido hace más de 15 minutos deja de contar como "Grok ocupado"; `leaseExpired` en el estado del workforce.
 - [x] Con eso, el barrido de cada minuto vuelve a avisar a Grok el trabajo en cola en cuanto el vencido deja de contar.
+- [x] Un evento MCP aceptado cuyo trabajo sigue en cola se repite a los 10 minutos, hasta 3 veces, con id propio.
