@@ -93,9 +93,10 @@ Actions live in the `server-actions` ledger. A partial unique index allows **at 
 ```
 RESERVED ──▶ LAUNCHED ──▶ RUNNING ──▶ LIVE | ROLLED_BACK | BUILD_FAILED | FAILED | LOCKED
     │            │            │
-    │            └──────┬─────┴──▶ STOPPING ──▶ UNKNOWN
-    ├──▶ START_FAILED   └─────────────────────▶ UNKNOWN
-    └────────────────────────────────────────▶ UNKNOWN
+    │            │            ├──▶ STOPPING ──▶ UNKNOWN
+    │            │            └──────────────▶ UNKNOWN
+    ├──▶ START_FAILED          (fence: closed)
+    └──────┴──▶ ABANDONED      (fence: closed)
 ```
 
 | State | Written when | Terminal |
@@ -104,11 +105,12 @@ RESERVED ──▶ LAUNCHED ──▶ RUNNING ──▶ LIVE | ROLLED_BACK | BUI
 | `LAUNCHED` | `systemd-run` returned success for unit `panter-action-<actionId>` | no |
 | `RUNNING` | the wrapper wrote its first record | no |
 | `LIVE`, `ROLLED_BACK`, `BUILD_FAILED`, `FAILED`, `LOCKED` | read from the wrapper's final record | yes |
-| `START_FAILED` | `systemd-run` returned an error and `systemctl --user show` confirms no unit by that name exists | yes |
+| `START_FAILED` | `systemd-run` returned an error in the reserving request, and that request created the fence as `closed` | yes |
+| `ABANDONED` | no record and no unit after the wait, and Panter created the fence as `closed`; nothing ran | yes |
 | `STOPPING` | the unit has run past its allowance without a record (see recovery); Panter asked systemd to stop it | no |
 | `UNKNOWN` | the unit is confirmed gone and the outcome cannot be read without guessing (see recovery) | yes |
 
-Terminal states free the slot. An action **never** becomes terminal while its unit is still loaded and not `inactive`/`failed`: `UNKNOWN` is written only once systemd confirms the unit is gone or stopped, so a terminal state always means nothing is still running. `UNKNOWN` is flagged for the operator but does not block later actions. Nothing is ever re-run: every transition out of `RESERVED` or later is a reading, or a stop, never a new launch.
+Terminal states free the slot. An action **never** becomes terminal while its unit is still live, and an action without a record becomes terminal only by taking the fence, so a terminal state always means nothing is running and nothing can still start. `UNKNOWN` is flagged for the operator but does not block later actions. Nothing is ever re-run: every transition out of `RESERVED` or later is a reading, or a stop, never a new launch.
 
 ## Running a deploy without cutting the branch Panter sits on
 
@@ -121,11 +123,19 @@ systemd-run --user --unit=panter-action-<actionId> --collect --property=RuntimeM
 
 The unit name is derived from `actionId` (a UUID), so it cannot collide and recovery can always find it. The argument vector is fixed and built by Panter; the only value from the request is the `sha`, already validated and checked. No shell, no other command, no environment from the request.
 
-`deploy/run-action.sh` is a small wrapper in the repository. It writes `etc/actions/<actionId>.json` with `RUNNING` (atomically: write a temporary file, `fsync`, rename), runs `deploy.sh <sha>` with its output in `etc/actions/<actionId>.log`, and writes the final record the same way: exit code, the revision `/health` reports, and one of `LIVE`, `ROLLED_BACK`, `BUILD_FAILED`, `FAILED`, or `LOCKED` when `deploy.sh` refused because another deploy or the daily backup holds its lock. **The wrapper takes no lock of its own**: `deploy.sh`'s `releases/.deploy.lock` is the only lock, and the ledger's unique slot is the only gate on the Panter side.
+`deploy/run-action.sh` is a small wrapper in the repository. Its first action is to take the fence (below): if `etc/actions/<actionId>.fence` already exists it exits with status 0 and does nothing. Then it writes `etc/actions/<actionId>.json` with `RUNNING` (atomically: write a temporary file, `fsync`, rename), runs `deploy.sh <sha>` with its output in `etc/actions/<actionId>.log`, and writes the final record the same way: exit code, the revision `/health` reports, and one of `LIVE`, `ROLLED_BACK`, `BUILD_FAILED`, `FAILED`, or `LOCKED` when `deploy.sh` refused because another deploy or the daily backup holds its lock. **The wrapper takes no lock of its own**: `deploy.sh`'s `releases/.deploy.lock` is the only lock, and the ledger's unique slot is the only gate on the Panter side.
 
 ## Recovery
 
-**Launch and reconciliation never overlap.** Launching is fenced in time. Immediately before `systemd-run`, the launching request re-reads the action in a transaction and proceeds only if it is still `RESERVED` and unmarked, marking it with `launchStartedAt` in that same transaction. It then calls `systemd-run` with a hard timeout of 30 seconds (the process is killed if it takes longer) and writes `LAUNCHED` or, as below, `START_FAILED`. The reconciler does not judge a `RESERVED` or `LAUNCHED` action **without a unit** until 2 minutes after its `launchStartedAt` (or after its reservation, if no launch was ever marked). By then `systemd-run` has either created the unit, which is visible to `systemctl --user show`, or is dead, so "no unit" is definitive and the reconciler cannot close a launch that is still happening. This holds whether the launching request is still alive, crashed, or belongs to another Panter process.
+**Launch and reconciliation never overlap: one fence, taken where the effect happens.** No timeout is treated as proof that a launch cannot still happen: a process can be frozen between any two steps, and systemd may still create a unit after the `systemd-run` client was killed. So the decision of whether an action may run is made by a single atomic file operation that both sides use:
+
+```
+etc/actions/<actionId>.fence    a symbolic link created with symlink(2), which fails if it already exists
+  -> "run"      created by the wrapper, as its first action, before writing RUNNING or touching deploy.sh
+  -> "closed"   created by Panter, before it writes START_FAILED or ABANDONED for an action with no record
+```
+
+Whoever creates the link first wins, and the link says who it was (`readlink`). The wrapper that finds the link already pointing to `closed` exits at once with status 0 and does nothing: a late, frozen or duplicated launch can therefore never deploy after Panter closed the action. Panter, finding the link pointing to `run`, never closes the action from "no unit": the wrapper ran, so the action follows the `RUNNING` rows of the table. The two-minute wait below only avoids closing launches that are merely slow; correctness comes from the fence, not from the clock. Immediately before `systemd-run`, the launching request re-reads the action in a transaction, proceeds only if it is still `RESERVED` and unmarked, and marks it with `launchStartedAt`; that only keeps two launches of one action from both calling `systemd-run` in the normal case, and starts the two-minute wait. The `systemd-run` call keeps a 30-second timeout as hygiene, so a stuck client does not hold the request forever. Neither is relied on for safety.
 
 On start, and every 30 seconds while an action is open, Panter reconciles each non-terminal action from three observations: its ledger state, the record file, and `systemctl --user show panter-action-<actionId> -p LoadState,ActiveState`. The unit is **gone** when `LoadState` is `not-found`, or `ActiveState` is `inactive` or `failed` (with `--collect` a stopped unit is unloaded soon after). It is **live** when `ActiveState` is `activating`, `active`, `reloading` or `deactivating`.
 
@@ -135,12 +145,14 @@ On start, and every 30 seconds while an action is open, Panter reconciles each n
 | final record, well formed | live | nothing yet (the wrapper is exiting); next pass |
 | `RUNNING` or none | live, and the action is younger than `RuntimeMaxSec` + 5 minutes | nothing yet; next pass |
 | `RUNNING` or none | live, and older than that | `STOPPING`, then `systemctl --user stop` on the unit; next pass |
-| `RUNNING` or none | gone, and the launch window (2 minutes after `launchStartedAt`) has closed | `UNKNOWN` |
-| none | gone, launch window still open | nothing yet; next pass |
+| `RUNNING` | gone | `UNKNOWN` (the wrapper ran and stopped without a final record) |
+| none | gone, less than 2 minutes after `launchStartedAt` (or after the reservation if never marked) | nothing yet; next pass |
+| none | gone, 2 minutes or more | take the fence: if Panter creates `closed`, write `ABANDONED` (nothing ran and nothing can run); if the fence already says `run`, write nothing and treat it as `RUNNING` on the next pass |
 | malformed or unreadable | live | nothing yet, as for `RUNNING` |
 | malformed or unreadable | gone | `UNKNOWN` |
+| none | live | as "`RUNNING` or none, live" above |
 
-One case is decided outside this table: when `systemd-run` itself returns an error in the request that reserved the action, that same request asks `systemctl --user show` for the unit, and if it is `not-found` it writes `START_FAILED`; otherwise the action stays `RESERVED` and the table above takes over. After a restart, absence is never read as "did not run": a `RESERVED` or `LAUNCHED` action with no record and no unit is `UNKNOWN`. A Panter crash after the unit was accepted but before the wrapper wrote anything is the "none, live" row: Panter waits for the wrapper, and the unit's own `RuntimeMaxSec` bounds the wait. A final record written after `UNKNOWN` cannot exist, because `UNKNOWN` is only written once the unit is gone and the launch window of that action has closed.
+One case is decided outside this table: when `systemd-run` itself returns an error in the request that reserved the action, that same request tries to take the fence; if it creates `closed`, it writes `START_FAILED` (definitive: whatever systemd does later, the wrapper will find `closed` and do nothing); if the fence already says `run`, the action stays open and the table takes over. Absence is never read as "did not run" without the fence: `ABANDONED` and `START_FAILED` are written only by whoever created `closed`, and they mean nothing ran. A Panter crash after the unit was accepted but before the wrapper did anything is the "none, live" row: Panter waits for the wrapper, and `RuntimeMaxSec` bounds the wait. No record can appear after `ABANDONED`, `START_FAILED` or `UNKNOWN`: the first two hold the fence, and `UNKNOWN` is only written once the wrapper's own unit is gone.
 
 The record is written by the unit, not by Panter, so it survives Panter's own restart during the deploy and Panter's rollback to the previous release, which reads the same `etc/actions/` and closes the action the same way.
 
@@ -188,7 +200,7 @@ Each one is its own pull request with its own preconditions, authorization rule 
 |---|---|
 | 0 | This design |
 | 1 | Authority and checks: permits inside the mesh document with binding and revocation in every claim transition, the `server-actions` ledger (operator authorizations with their state table, actions with the unique slot), the reserve order across the two, the five tools, the `server` field on `panter_mesh_delegate`, the preconditions against GitHub with the truth tables above (including an older success behind a newer pending run), the `AGENTS.md` sentence. `deploy.commit` stops after `RESERVED` in **dry-run**: it answers what it would launch and frees the slot. Tests with a fake GitHub API covering every row of the tables |
-| 2 | Execution: `deploy/run-action.sh`, the `systemd-run` launch, the records, recovery with every row of its table and every `ActiveState`, `STOPPING`, the launch fence and its 2-minute window, receipts; tests with a fake `systemd-run`, a fake `systemctl` and a fake `deploy.sh` |
+| 2 | Execution: `deploy/run-action.sh`, the `systemd-run` launch, the records, recovery with every row of its table and every `ActiveState`, `STOPPING`, the fence (including deterministic tests of a launcher frozen after marking, a `systemd-run` killed after sending its request, and a unit that systemd starts late after `ABANDONED`: the wrapper must do nothing), receipts; tests with a fake `systemd-run`, a fake `systemctl` and a fake `deploy.sh` |
 | 3 | On the operator's server, with explicit authorization: enable `deploy.commit`, then the leader delegates the next release's deploy to a worker with a permit, and the result is checked against `/health` |
 
 Phases 1 and 2 share only this document and the record format in `etc/actions/`. Every phase is a pull request with CI green, Codex, an independent review on the exact head commit by the reviewer account, and a squash merge by the leader.
