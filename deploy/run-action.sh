@@ -81,5 +81,9 @@ elif grep -Fq 'deploy: build or tests failed' "$LOG"; then
 elif grep -Eq 'deploy: rolled back to .* which is healthy' "$LOG"; then
   STATE=ROLLED_BACK
 fi
-atomic_record "$STATE" "$EXIT_CODE" "$REVISION"
+# The exit status is always deploy.sh's. If the final record cannot be written
+# the RUNNING one stays, and Panter settles the action as UNKNOWN once the
+# unit is gone: it never reads a state nobody recorded.
+atomic_record "$STATE" "$EXIT_CODE" "$REVISION" ||
+  echo "run-action: could not persist the final record ($STATE)" >&2
 exit "$EXIT_CODE"

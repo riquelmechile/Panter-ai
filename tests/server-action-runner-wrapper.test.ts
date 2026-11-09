@@ -203,6 +203,30 @@ test('wrapper maps lock, build, healthy rollback and unknown failure', () => {
   }
 });
 
+test('a final record that cannot be written never replaces the exit status of deploy.sh', () => {
+  // The actions directory goes away during the deploy: not even a temporary file can be created.
+  const gone = fixture('#!/bin/sh\nmv "$PANTER_BASE/etc/actions" "$PANTER_BASE/etc/moved"\nexit 0\n');
+  try {
+    const result = gone.run();
+    assert.equal(result.status, 0);
+    assert.match(result.stderr, /could not persist the final record/);
+    assert.equal(existsSync(gone.actions), false);
+    const last = JSON.parse(readFileSync(join(gone.base, 'etc', 'moved', id + '.json'), 'utf8')) as Record<string, unknown>;
+    assert.equal(last.state, 'RUNNING');
+  } finally { gone.cleanup(); }
+  // The record path stops being replaceable: the rename fails after the temporary file exists.
+  const blocked = fixture('#!/bin/sh\nrm "$PANTER_BASE/etc/actions/' + id + '.json"\n' +
+    'mkdir "$PANTER_BASE/etc/actions/' + id + '.json"\necho "deploy: another deploy is running"\nexit 2\n');
+  try {
+    const result = blocked.run();
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /could not persist the final record \(LOCKED\)/);
+    assert.equal(lstatSync(join(blocked.actions, id + '.json')).isDirectory(), true);
+    assert.deepEqual(readdirSync(blocked.actions).sort(), [id + '.fence', id + '.json', id + '.log'],
+      'no temporary file is left behind');
+  } finally { blocked.cleanup(); }
+});
+
 test('success exit but unexpected /health revision must fail closed', () => {
   const f = fixture('#!/bin/sh\nexit 0\n', 'b'.repeat(40));
   try {
