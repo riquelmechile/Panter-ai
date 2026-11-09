@@ -76,7 +76,7 @@ export class SqliteLedger {
     return row?.revision ?? 0;
   }
   mutate<T, R>(name: LedgerName, fallback: T, fn: (state: T) => R,
-    slot?: { actionId: string; operation: 'reserve' | 'release' }): { before: T; after: T; result: R } {
+    slot?: { actionId: string; operation: 'reserve' | 'release' } | { permitId: string; operation: 'bind' }): { before: T; after: T; result: R } {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const row = this.db.prepare('SELECT payload,revision FROM ledger WHERE name=?').get(name) as LedgerRow | undefined;
@@ -86,13 +86,20 @@ export class SqliteLedger {
       const json = JSON.stringify(after);
       if (slot) {
         if (name !== 'server_actions') throw new Error('Action slot is only valid in server-actions');
-        this.db.exec('CREATE TABLE IF NOT EXISTS server_action_slots (action_id TEXT PRIMARY KEY, active INTEGER NOT NULL CHECK(active IN (0,1)))');
-        this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS one_nonterminal_server_action ON server_action_slots ((1)) WHERE active=1');
-        if (slot.operation === 'reserve') {
-          this.db.prepare('INSERT INTO server_action_slots(action_id,active) VALUES(?,1)').run(slot.actionId);
+        if (slot.operation === 'bind') {
+          if (typeof result !== 'string' || !result) throw new Error('Missing operator authorization id');
+          this.db.exec('CREATE TABLE IF NOT EXISTS server_authorization_bindings (authorization_id TEXT PRIMARY KEY, permit_id TEXT NOT NULL UNIQUE)');
+          this.db.prepare('INSERT INTO server_authorization_bindings(authorization_id,permit_id) VALUES(?,?)')
+            .run(result, slot.permitId);
         } else {
-          const changed = this.db.prepare('UPDATE server_action_slots SET active=0 WHERE action_id=? AND active=1').run(slot.actionId);
-          if (changed.changes !== 1) throw new Error('Action slot not held');
+          this.db.exec('CREATE TABLE IF NOT EXISTS server_action_slots (action_id TEXT PRIMARY KEY, active INTEGER NOT NULL CHECK(active IN (0,1)))');
+          this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS one_nonterminal_server_action ON server_action_slots ((1)) WHERE active=1');
+          if (slot.operation === 'reserve') {
+            this.db.prepare('INSERT INTO server_action_slots(action_id,active) VALUES(?,1)').run(slot.actionId);
+          } else {
+            const changed = this.db.prepare('UPDATE server_action_slots SET active=0 WHERE action_id=? AND active=1').run(slot.actionId);
+            if (changed.changes !== 1) throw new Error('Action slot not held');
+          }
         }
       }
       if (row) {

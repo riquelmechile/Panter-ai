@@ -41,6 +41,7 @@ import { NativeReviewBridge, assessMeshReview } from './core/native-review.js';
 import { NativeSubagentReview } from './core/native-review-workflow.js';
 import { AutomaticHarness } from './core/auto-harness.js';
 import { GitHubDeliveryGate } from './core/github-delivery.js';
+import { ServerActions } from './core/server-actions.js';
 import { PanterRdd } from './core/panter-rdd.js';
 import { LocalGitVerifier } from './core/local-git-verifier.js';
 import { buildConnectionContract } from './core/connection-contract.js';
@@ -107,6 +108,7 @@ async function execute<T>(work: () => Promise<T>) {
 const store = await PanterStore.open(dataDir);
 const agents = await AgentEngine.open(dataDir, store);
 const mesh = await MeshEngine.open(dataDir);
+const serverActions = new ServerActions(mesh, dataDir);
 if (mesh.leaderSwitch) console.error(`Panter leader switch ${mesh.leaderSwitch.from} -> ${mesh.leaderSwitch.to}`);
 for (const line of await adoptPendingLeaderPhases(mesh, agents)) console.error(line);
 const workforceLongPoll = new WorkforceLongPoll(mesh);
@@ -214,7 +216,7 @@ harness.setHostHooks({
     };
     // The grant exists before any doorbell rings, so a fast worker never finds itself without access.
     try { await grantFor(); } finally {
-      // Grok is woken only by its routine webhook: ring it for harness work too (even if the grant failed).
+    // Grok is woken only by its routine webhook: ring it for harness work too (even if the grant failed).
       if (host === 'grok') await ringGrokForWork(mesh, grokRoutineWake, workId).catch(() => undefined);
     }
   },
@@ -235,7 +237,7 @@ harness.setHostHooks({
   remoteAttestation: () => rddTransportAttestation,
   pickupClockStart: (work, limitMs) => pickupClockStart(mesh, grokRoutineWake, work, limitMs),
   pickupTimeoutMs: host => (pickupPerHost.get(host) ?? (materialHosts.has(host) ? pickupMailSeconds : pickupSeconds)) * 1000,
-  abandoned: async ({ workId }) => { if (githubWorkforce.configured) await githubWorkforce.revoke(leaderHost(), workId); },
+  abandoned: async ({ workId }) => { if (githubWorkforce.configured) await githubWorkforce.revoke(leaderHost(), workId); await serverActions.revokeWork(workId); },
 });
 // Legacy/direct A2A writers cannot bypass the operator-issued harness grant (owner mode: the leader delegates writers directly).
 if (!owner) mesh.setWriteGuard((missionId,paths)=>harness.authorizeDelegatedWrite(missionId,paths));
@@ -567,11 +569,15 @@ const handler = createMcpHandler(reqCtx => {
   const githubOps = z.array(z.enum(GITHUB_WRITE_OPS)).max(4);
   const githubGrantInput = z.object({repository:bounded(201),ops:githubOps.default([]),branch:bounded(200).optional(),base:bounded(200).optional(),
     numbers:z.array(z.number().int().positive()).max(20).optional(),paths:z.array(bounded(400)).min(1).max(100).optional()}).strict();
-  server.registerTool('panter_mesh_delegate',{description:`${leaderLabel()} creates actor-bound A2A work for one configured host. Optional github attaches a work-scoped GitHub grant (see panter_github_grant).`,inputSchema:z.object({missionId:bounded(120),target:hostEnum,role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160),github:githubGrantInput.optional()})},async x=>execute(async()=>{
-    const {github,...input}=x;
-    if(github)githubWorkforce.validateGrant(github); // fail before creating the work
+  const serverGrantInput = z.object({action:z.literal('deploy.commit'),
+    args:z.object({sha:z.string().regex(/^[0-9a-f]{40}$/)}).strict(),
+    ttlMinutes:z.number().int().min(1).max(120).optional()}).strict();
+  server.registerTool('panter_mesh_delegate',{description:`${leaderLabel()} creates actor-bound A2A work for one configured host. Optional github attaches a work-scoped GitHub grant (see panter_github_grant).`,inputSchema:z.object({missionId:bounded(120),target:hostEnum,role:roleEnum,instruction:bounded(20000),idempotencyKey:bounded(160),github:githubGrantInput.optional(),server:serverGrantInput.optional()})},async x=>execute(async()=>{
+    const {github,server:serverGrant,...input}=x;
+    if(github)githubWorkforce.validateGrant(github);
+    if(serverGrant)serverActions.validateGrant(serverGrant.args.sha,serverGrant.ttlMinutes??30); // fail before creating the work
     guardSensitive(input.missionId,[input.instruction],'This instruction');
-    const replay=github?await mesh.hasDelegation(input.missionId,input.idempotencyKey):false;
+    const replay=github||serverGrant?await mesh.hasDelegation(input.missionId,input.idempotencyKey):false;
     const work=await mesh.delegate(hostPrincipal(),input);
     let granted={};
     if(github){
@@ -583,12 +589,48 @@ const handler = createMcpHandler(reqCtx => {
         throw error;
       }
     }
+    if(serverGrant){
+      try{granted={...granted,server:await serverActions.grant(hostPrincipal(),{workId:work.id,...serverGrant})};}
+      catch(error){
+        if(!replay){
+          await mesh.withdrawUnstarted(hostPrincipal(),work.id,'Server permit grant failed').catch(()=>undefined);
+          if(github && githubWorkforce.configured) await githubWorkforce.revoke(hostPrincipal(),work.id).catch(()=>undefined);
+        }
+        throw error;
+      }
+    }
     // Grok is woken only by its routine webhook: a directed delegate rings it too (after any grant), oldest queued
     // Grok work first, one outstanding ring at a time. A ring is a pointer and does not prove Grok ran.
     if(input.target!=='grok'||!grokRoutineWake.configured)return {...work,...granted};
     const ring=await ringNextGrokWork(mesh,grokRoutineWake).catch(()=>({rung:false,reason:'ERROR' as const}));
     return {...work,...granted,grokWake:{...ring,status:await mesh.grokWakeStatus(hostPrincipal(),work.id).catch(()=>null)}};
   }));
+  // Server actions, disabled unless the operator explicitly enables the fixed catalog.
+  // The authorization tool demands the actual operator principal, not owner-trusted hosts.
+  server.registerTool('panter_server_authorize',{
+    description:'Operator principal only: authorize one SHA for one deploy.commit use for 24 hours.',
+    inputSchema:z.object({action:z.literal('deploy.commit'),sha:z.string().regex(/^[a-f0-9]{40}$/)}).strict()
+  },async x=>execute(async()=>serverActions.authorize(principal(),x)));
+  server.registerTool('panter_server_grant',{
+    description:'Leader: issue one bounded, fixed-SHA server permit for a delegated work.',
+    inputSchema:z.object({workId:z.uuid()}).extend(serverGrantInput.shape).strict()
+  },async x=>execute(async()=>serverActions.grant(principal(),x)));
+  server.registerTool('panter_server_revoke',{
+    description:'Leader: revoke an unspent server permit without restoring operator authorization.',
+    inputSchema:z.object({permitId:z.uuid()}).strict()
+  },async x=>execute(async()=>serverActions.revoke(principal(),x.permitId)));
+  server.registerTool('panter_server_action',{
+    description:'Worker with a live fenced permit, or leader with operator authorization: verify deploy.commit and record RESERVED dry-run without executing anything.',
+    inputSchema:z.object({action:z.literal('deploy.commit'),
+      args:z.object({sha:z.string().regex(/^[a-f0-9]{40}$/)}).strict(),
+      permitId:z.uuid().optional(),workId:z.uuid().optional(),
+      attemptId:z.uuid().optional(),leaseGeneration:z.number().int().positive().optional()}).strict()
+  },async x=>execute(async()=>serverActions.action(principal(),x)));
+  server.registerTool('panter_server_status',{
+    description:'Leader and operator see actions and grants; worker only its own. Reports PERMIT_LOST when mesh has SPENT without action.',
+    inputSchema:z.object({actionId:z.uuid().optional()}).strict(),
+    annotations:{readOnlyHint:true}
+  },async x=>execute(async()=>serverActions.status(principal(),x.actionId)));
   // ---- GitHub for the workforce (operator token held by Panter; narrow, work-scoped, audited) ----
   server.registerTool('panter_github_grant',{description:`${leaderLabel()} lets the worker of one delegated work use GitHub in ONE repository: always read; plus the listed write operations. commit = commits to a NEW branch Panter creates for this work (under panter/, default panter/<host>-<work8>; never an existing, default or protected branch; never CI, CODEOWNERS or git config files; never forced); pr = open a pull request from that branch; comment = comment on the listed numbers and on issues/PRs this work opens (no bot/slash commands); issue = open issues. There is NO merge, approve, delete, label, release or settings operation. Note: pushing a branch runs the repository's existing CI on the worker's code. The grant dies with the work's lease.`,
     inputSchema:z.object({workId:z.uuid()}).extend(githubGrantInput.shape).strict()},async x=>execute(()=>githubWorkforce.grant(hostPrincipal(),x)));
@@ -988,7 +1030,7 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_harness_close',{
     description:`${leaderLabel()} closes an automatic ODD run that will not be finished (abandoned, superseded or stuck in an old format). The run never advances again; its queued remote work is withdrawn and its remote work's grants are revoked. It never touches GitHub branches or PRs.`,
     inputSchema:z.object({runId:z.uuid(),reason:bounded(500),expectedRevision:z.number().int().positive()}).strict()
-  },async x=>execute(async()=>{requireLeader();guardSensitive(x.runId,[x.reason],'This reason');return harness.close(x.runId,x.reason,x.expectedRevision);}));
+  },async x=>execute(async()=>{requireLeader();guardSensitive(x.runId,[x.reason],'This reason');const out=await harness.close(x.runId,x.reason,x.expectedRevision);await serverActions.revokeMission(x.runId);return out;}));
   server.registerTool('panter_harness_github_bind',{
     description:`${leaderLabel()} attaches a verified, previously authorized existing/created PR to an automatic ODD run. Metadata only: no GitHub writes, no agent selection, no approval.`,
     inputSchema:z.object({runId:z.uuid(),repository:bounded(120),prNumber:z.number().int().positive(),

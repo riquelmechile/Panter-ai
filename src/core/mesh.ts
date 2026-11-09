@@ -1155,7 +1155,7 @@ export class MeshEngine {
       check(Date.parse(p.expiresAt)>Date.now(),'PERMIT_EXPIRED');
       const w=d.works.find(x=>x.id===p.workId);
       check(w && w.missionId===p.missionId && w.target===caller && w.state==='RUNNING' &&
-        !w.transportClaim && Date.parse(w.leaseUntil??'')>Date.now() &&
+        Date.parse(w.leaseUntil??'')>Date.now() &&
         p.attemptId===input.attemptId && p.leaseGeneration===input.leaseGeneration &&
         w.attemptId===input.attemptId && w.leaseGeneration===input.leaseGeneration,'PERMIT_STALE_CLAIM');
       p.state='SPENT';p.actionId=input.actionId;return p;

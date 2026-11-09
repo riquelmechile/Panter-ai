@@ -53,6 +53,42 @@ function linkedIssue(body:string, targetRepository:string):number|null {
   }
   return null;
 }
+/** Shared safe GitHub transport for both delivery and deploy gates. */
+export async function githubApiGet(fetcher:typeof fetch,repository:string,endpoint:string,token?:string):Promise<any>{
+  check(repoPattern.test(repository)&&!repository.includes('..'),'Invalid GitHub repository');
+  const r=await fetcher('https://api.github.com/repos/'+repository+(endpoint?'/'+endpoint:''),{
+    headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28',
+      ...(token?{Authorization:'Bearer '+token}:{})},
+    signal:AbortSignal.timeout(12000),redirect:'error'
+  });
+  if(!r.ok)throw new Error('GitHub verification unavailable (HTTP '+r.status+')');
+  const raw=await r.text();
+  check(raw.length<1_000_000,'GitHub response too large');
+  return JSON.parse(raw);
+}
+/** Same latest-decisive review for delivery and deployment. */
+export function independentReviewDecision(login:string,head:string,prData:any,commits:any[]|null,reviews:any[],requireSubmissionTime=false):IndependentReviewEvidence{
+  const account=login.toLowerCase();
+  if(!commits)return {login:account,state:'UNAVAILABLE',unavailableReason:'COMMIT_HISTORY_UNREADABLE'};
+  const authors=new Set<string>();
+  const author=String(prData?.user?.login??'').toLowerCase();
+  if(author)authors.add(author);
+  for(const c of commits)for(const who of [c?.author?.login,c?.committer?.login])
+    if(typeof who==='string'&&who&&who.toLowerCase()!=='web-flow')authors.add(who.toLowerCase());
+  if(authors.has(account))return {login:account,state:'REVIEWER_IS_AUTHOR'};
+  const decisive=reviews.filter(r=>String(r?.user?.login??'').toLowerCase()===account&&
+    ['APPROVED','CHANGES_REQUESTED','DISMISSED'].includes(String(r?.state)));
+  const timesAvailable=decisive.every(r=>Number.isFinite(Date.parse(r?.submitted_at??'')));
+  if(!timesAvailable && requireSubmissionTime)
+    return {login:account,state:'UNAVAILABLE',unavailableReason:'REVIEWS_UNREADABLE_OR_OVER_LIMIT'};
+  if(timesAvailable)decisive.sort((a,b)=>Date.parse(a.submitted_at)-Date.parse(b.submitted_at)||Number(a.id)-Number(b.id));
+  const last=decisive.at(-1);
+  if(!last)return {login:account,state:'MISSING'};
+  const base={login:account,reviewId:Number(last.id),commitId:String(last.commit_id??'')};
+  if(last.state==='CHANGES_REQUESTED')return {...base,state:'CHANGES_REQUESTED'};
+  if(last.state==='DISMISSED')return {...base,state:'DISMISSED'};
+  return {...base,state:last.commit_id===head?'APPROVED_EXACT_SHA':'STALE_SHA'};
+}
 export class GitHubDeliveryGate {
   private readonly allowed:Set<string>;
   private readonly required:string[];
@@ -74,16 +110,7 @@ export class GitHubDeliveryGate {
   }
   allows(repository:string){return this.allowed.has(repository)&&repoPattern.test(repository);}
   private async api(repository:string,endpoint:string):Promise<unknown>{
-    // The repository itself is /repos/{owner}/{repo} — GitHub answers 404 to a trailing slash.
-    const r=await this.fetcher(`https://api.github.com/repos/${repository}${endpoint?`/${endpoint}`:''}`,{
-      headers:{Accept:'application/vnd.github+json', 'X-GitHub-Api-Version':'2022-11-28',
-        ...(this.cfg.token?{Authorization:`Bearer ${this.cfg.token}`}:{})},
-      signal:AbortSignal.timeout(12000),redirect:'error',
-    });
-    if(!r.ok)throw new Error(`GitHub verification unavailable (HTTP ${r.status})`);
-    const raw=await r.text();
-    check(raw.length<1_000_000,'GitHub response too large');
-    return JSON.parse(raw);
+    return githubApiGet(this.fetcher,repository,endpoint,this.cfg.token);
   }
   /** Verify *current* GitHub facts at exact commit SHA. No negative assertion of
    * approval is bypassed by a persuasive model's summary or a stale CI URL. */
@@ -223,28 +250,14 @@ export class GitHubDeliveryGate {
    * GitHub does: COMMENTED reviews never change approval state. */
   private async independentReview(repository:string,prNumber:number,head:string,prData:any,commits:any[]|null):Promise<IndependentReviewEvidence>{
     const login=this.reviewer!;
-    const authors=new Set<string>();
-    const prAuthor=String(prData?.user?.login??'').toLowerCase();
-    if(prAuthor)authors.add(prAuthor);
-    if(!commits)return {login,state:'UNAVAILABLE',unavailableReason:'COMMIT_HISTORY_UNREADABLE'};
-    for(const c of commits)for(const who of [c?.author?.login,c?.committer?.login])
-      if(typeof who==='string'&&who&&who.toLowerCase()!=='web-flow')authors.add(who.toLowerCase());
-    if(authors.has(login))return {login,state:'REVIEWER_IS_AUTHOR'};
     const reviews:any[]=[];
     for(let page=1;page<=MAX_REVIEW_PAGES;page++){
-      const pageData=await this.api(repository,`pulls/${prNumber}/reviews?per_page=100${page===1?'':`&page=${page}`}`);
+      const pageData=await this.api(repository,'pulls/'+prNumber+'/reviews?per_page=100'+(page===1?'':'&page='+page));
       if(!Array.isArray(pageData))return {login,state:'UNAVAILABLE',unavailableReason:'REVIEWS_UNREADABLE_OR_OVER_LIMIT'};
       reviews.push(...pageData);
       if(pageData.length<100)break;
       if(page===MAX_REVIEW_PAGES)return {login,state:'UNAVAILABLE',unavailableReason:'REVIEWS_UNREADABLE_OR_OVER_LIMIT'};
     }
-    const decisive=reviews.filter(r=>String(r?.user?.login??'').toLowerCase()===login&&
-      ['APPROVED','CHANGES_REQUESTED','DISMISSED'].includes(String(r?.state)));
-    const last=decisive.at(-1);
-    if(!last)return {login,state:'MISSING'};
-    const base={login,reviewId:Number(last.id),commitId:String(last.commit_id??'')};
-    if(last.state==='CHANGES_REQUESTED')return {...base,state:'CHANGES_REQUESTED'};
-    if(last.state==='DISMISSED')return {...base,state:'DISMISSED'};
-    return {...base,state:last.commit_id===head?'APPROVED_EXACT_SHA':'STALE_SHA'};
+    return independentReviewDecision(login,head,prData,commits,reviews);
   }
 }

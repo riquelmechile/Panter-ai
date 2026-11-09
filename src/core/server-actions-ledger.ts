@@ -62,7 +62,7 @@ export class ServerActionsLedger {
       assert(a, 'NOT_AUTHORIZED');
       a.state = 'BOUND'; a.permitId = permitId;
       return a.id;
-    }).result;
+    }, {operation: 'bind', permitId}).result;
   }
   /** Preliminary check. Actual consumption is repeated in the reservation transaction. */
   authorized(sha: string, permitId: string | null, recordId: string | null) {
