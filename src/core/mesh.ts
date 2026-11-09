@@ -1009,6 +1009,10 @@ export class MeshEngine {
       check(leaseLive(w), 'Lease expired');
       check(!w.transportClaim, 'Work is held by a transport');
       check(leaseSeconds >= 30 && leaseSeconds <= 3600, 'Invalid lease');
+      // Read-only work may renew a lease that already ran out (leaseLive), keeping its attempt and generation. That
+      // keeps its result, never its server authority: a permit is usable only while the claim is live, so a claim
+      // that lapsed loses its permits here, in the same mutation, and needs a new grant from the leader.
+      if (!(Date.parse(w.leaseUntil ?? '') > Date.now())) revokeIssued(d, w.id);
       w.leaseUntil = new Date(Date.now() + leaseSeconds * 1000).toISOString();
       return w;
     });
