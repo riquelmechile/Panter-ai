@@ -9,7 +9,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { enableSqliteWal, retrySqliteStartup } from './sqlite-startup.js';
 
-export const LEGACY_LEDGERS = ['state', 'agents', 'mesh', 'harness', 'oauth', 'events', 'gemini_mail', 'github_workforce', 'downstream', 'downstream_sensitive'] as const;
+export const LEGACY_LEDGERS = ['state', 'agents', 'mesh', 'harness', 'oauth', 'events', 'gemini_mail', 'github_workforce', 'downstream', 'downstream_sensitive', 'server_actions'] as const;
 export type LedgerName = typeof LEGACY_LEDGERS[number];
 type LedgerRow = { payload: string; revision: number };
 type SqliteRow = { user_version: number };
@@ -75,7 +75,8 @@ export class SqliteLedger {
     const row = this.db.prepare('SELECT revision FROM ledger WHERE name=?').get(name) as { revision: number } | undefined;
     return row?.revision ?? 0;
   }
-  mutate<T, R>(name: LedgerName, fallback: T, fn: (state: T) => R): { before: T; after: T; result: R } {
+  mutate<T, R>(name: LedgerName, fallback: T, fn: (state: T) => R,
+    slot?: { actionId: string; operation: 'reserve' | 'release' }): { before: T; after: T; result: R } {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const row = this.db.prepare('SELECT payload,revision FROM ledger WHERE name=?').get(name) as LedgerRow | undefined;
@@ -83,6 +84,17 @@ export class SqliteLedger {
       const after = structuredClone(before);
       const result = fn(after);
       const json = JSON.stringify(after);
+      if (slot) {
+        if (name !== 'server_actions') throw new Error('Action slot is only valid in server-actions');
+        this.db.exec('CREATE TABLE IF NOT EXISTS server_action_slots (action_id TEXT PRIMARY KEY, active INTEGER NOT NULL CHECK(active IN (0,1)))');
+        this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS one_nonterminal_server_action ON server_action_slots ((1)) WHERE active=1');
+        if (slot.operation === 'reserve') {
+          this.db.prepare('INSERT INTO server_action_slots(action_id,active) VALUES(?,1)').run(slot.actionId);
+        } else {
+          const changed = this.db.prepare('UPDATE server_action_slots SET active=0 WHERE action_id=? AND active=1').run(slot.actionId);
+          if (changed.changes !== 1) throw new Error('Action slot not held');
+        }
+      }
       if (row) {
         this.db.prepare('UPDATE ledger SET payload=?,revision=revision+1 WHERE name=?').run(json, name);
       } else {
