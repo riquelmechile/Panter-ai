@@ -147,7 +147,7 @@ On start, and every 30 seconds while an action is open, Panter reconciles each n
 | `RUNNING` or none | live, and older than that | `STOPPING`, then `systemctl --user stop` on the unit; next pass |
 | `RUNNING` | gone | `UNKNOWN` (the wrapper ran and stopped without a final record) |
 | none | gone, less than 2 minutes after `launchStartedAt` (or after the reservation if never marked) | nothing yet; next pass |
-| none | gone, 2 minutes or more | take the fence: if Panter creates `closed`, write `ABANDONED` (nothing ran and nothing can run); if the fence already says `run`, write nothing and treat it as `RUNNING` on the next pass |
+| none | gone, 2 minutes or more | take the fence: if Panter creates `closed`, write `ABANDONED` (nothing ran and nothing can run); if the fence already says `run`, write `UNKNOWN` (the wrapper took the fence and stopped before writing anything; it may have reached `deploy.sh`) |
 | malformed or unreadable | live | nothing yet, as for `RUNNING` |
 | malformed or unreadable | gone | `UNKNOWN` |
 | none | live | as "`RUNNING` or none, live" above |
