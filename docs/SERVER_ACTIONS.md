@@ -101,7 +101,7 @@ RESERVED ──▶ LAUNCHED ──▶ RUNNING ──▶ LIVE | ROLLED_BACK | BUI
 
 | State | Written when | Terminal |
 |---|---|---|
-| `RESERVED` | preconditions passed; same transaction spends the permit and takes the unique slot | no |
+| `RESERVED` | preconditions passed and, for a worker, the permit was already marked `SPENT` in the mesh document; one `server-actions` transaction then inserts the action (taking the unique slot) and consumes the operator record. If that insert fails, no action exists and the permit stays spent (`PERMIT_LOST`) | no |
 | `LAUNCHED` | `systemd-run` returned success for unit `panter-action-<actionId>` | no |
 | `RUNNING` | the wrapper wrote its first record | no |
 | `LIVE`, `ROLLED_BACK`, `BUILD_FAILED`, `FAILED`, `LOCKED` | read from the wrapper's final record | yes |
