@@ -21,7 +21,17 @@ It follows the pattern Panter already uses for GitHub: the leader attaches a wor
 Enabling an action is **not** an authorization to use it, and eligibility is not either. `AGENTS.md` requires its own authorization for every deployment; this design gives that authorization a durable, checkable form instead of a chat message:
 
 - **Standing authorization.** `PANTER_SERVER_DEPLOY_STANDING_AUTHORIZATION=1`, set by the operator in `panter.env`, authorizes deploying any commit that passes every precondition. It is the deployment counterpart of the standing merge authorization `AGENTS.md` already describes. Phase 1 adds that sentence to `AGENTS.md`.
-- **Per release.** Without the standing authorization, each commit needs an operator record: `panter_server_authorize { action: "deploy.commit", sha }`, a tool listed only for the operator principal (never for the leader or a worker), valid 24 hours, single use.
+- **Per release.** Without the standing authorization, each commit needs an operator record: `panter_server_authorize { action: "deploy.commit", sha }`, a tool that refuses every caller but the operator principal (never the leader or a worker), valid 24 hours. A record backs **one** use and is consumed atomically, never returned:
+
+  | Record state | Becomes | When |
+  |---|---|---|
+  | `OPEN` | `BOUND` (to one permit, recorded on both) | the leader issues a permit for that `sha`; a unique index allows one permit per record |
+  | `OPEN` | `CONSUMED` (to one action) | the leader runs the action itself, in the `RESERVED` transaction |
+  | `BOUND` | `CONSUMED` | that permit's action is reserved |
+  | `OPEN` or `BOUND` | `EXPIRED` | 24 hours pass |
+  | `BOUND` | stays `BOUND` | its permit is revoked or expires: the operator authorized one attempt, so a retry needs a new record |
+
+  A failed or rolled-back deploy therefore needs a new operator decision. The standing authorization has no such count: it covers every eligible commit until the operator removes it.
 
 Both the leader's own runs and every permit need one of the two. With neither, `panter_server_grant` refuses to issue a permit and `panter_server_action` refuses to start (`NOT_AUTHORIZED`).
 
@@ -49,7 +59,7 @@ Checked by Panter, in this order, before anything is reserved. The first that fa
    | anything else, an error, or `sha` unknown | | **no** |
 
 3. **One merged pull request.** `GET repos/{repo}/commits/{sha}/pulls`, every page up to 100 entries (more fails). Keep only pull requests with `merged_at` set, `base.ref` equal to the default branch and `merge_commit_sha == sha`. **Exactly one** must remain; zero or several fail. Every later check uses that pull request only, never evidence mixed from another.
-4. **Green on itself.** `GET repos/{repo}/commits/{sha}/check-runs`, every page up to 1000 runs (more fails). For each name in `PANTER_SERVER_DEPLOY_CHECKS` (default `test,arm64-image`), take the run with that name and the latest `completed_at` (ties: highest `id`); it must exist, be `completed` and have conclusion `success`. Legacy commit statuses are deliberately not consulted: the configured checks must be check runs.
+4. **Green on itself.** `GET repos/{repo}/commits/{sha}/check-runs`, every page up to 1000 runs (more fails). For each name in `PANTER_SERVER_DEPLOY_CHECKS` (default `test,arm64-image`), take the run with that name and the highest `id`, **whatever its status** (ids grow monotonically, so a queued or in-progress rerun is newer than an older success); it must exist, be `completed` and have conclusion `success`. An older success behind a newer pending or failed run does not count. Legacy commit statuses are deliberately not consulted: the configured checks must be check runs.
 5. **Independently approved on the final head.** `GET repos/{repo}/pulls/{n}/reviews`, every page up to 1000 reviews (more fails). Among reviews by `PANTER_GITHUB_INDEPENDENT_REVIEWER` whose state is `APPROVED`, `CHANGES_REQUESTED` or `DISMISSED`, the latest by submission time must be `APPROVED` and its `commit_id` must equal the pull request's `head.sha`. This is the same latest-decisive-review rule `github-delivery.ts` applies, and phase 1 reuses that code.
 6. **Local state.** `/health` does not already report this `sha`; `etc/maintenance` does not exist.
 
@@ -57,7 +67,9 @@ The checks repeat on the server what the merge already required, so neither a mi
 
 ## Permits
 
-A permit is a row in Panter's own SQLite ledger, not a signed token: Panter issues it, checks it and spends it in the same process, so there is no boundary for a signature to cross.
+A permit is a record in Panter's own state, not a signed token: Panter issues it, checks it and spends it in the same process, so there is no boundary for a signature to cross.
+
+**Where it lives.** Claims are mutations of the single `mesh` document in `SqliteLedger`, and a separate ledger cannot join that transaction. So permits live **inside the mesh document**, next to the works they belong to (`d.serverPermits`), and every binding or revocation that depends on a claim happens inside the same `MeshEngine` mutation as the claim transition. Operator authorizations and actions live in their own `server-actions` ledger; the step that crosses the two, reserving an action, uses the order in "Action state machine".
 
 ```
 { permitId, missionId, workId, host, attemptId|null, leaseGeneration|null,
@@ -66,21 +78,24 @@ A permit is a row in Panter's own SQLite ledger, not a signed token: Panter issu
 ```
 
 - **Issued by the leader only,** and only with the operator's authorization in place. It can be attached when the leader delegates (a new optional `server` field on `panter_mesh_delegate`, next to `github`) or later with `panter_server_grant`. In owner mode the leader issues it on its own, as it already does for GitHub grants.
-- **Fenced to one claim.** If the work is already claimed, the permit records that claim's `attemptId` and `leaseGeneration`. If it is still queued, they stay null and are filled **atomically by the first claim**, in the same transaction as the claim. From then on the permit is usable only by the same host with exactly that `attemptId` and `leaseGeneration`, and only while the claim is live (the `liveWork` check). Any later claim transition of that work (requeue, a new claim, a new generation, `OUTCOME_UNKNOWN`) revokes the permit in the same transaction. A worker whose claim expired cannot get the permit back by claiming again: the leader has to issue a new one.
+- **Fenced to one claim.** If the work is already claimed, the permit records that claim's `attemptId` and `leaseGeneration`. If it is still queued, they stay null and `MeshEngine.claim` fills them in the same mutation that creates the claim. From then on the permit is usable only by the same host with exactly that `attemptId` and `leaseGeneration`, and only while the claim is live (the `liveWork` check). Every `MeshEngine` path that changes the claim of that work (requeue, a new claim, a new generation, `OUTCOME_UNKNOWN`, completion, withdraw, abandon, leader switch) revokes its `ISSUED` permits in that same mutation. As a second fence, using a permit also requires its recorded `attemptId` and `leaseGeneration` to match the caller's live claim, so a missed revocation still fails closed. A worker whose claim expired cannot get the permit back by claiming again: the leader has to issue a new one.
 - **One action, fixed arguments:** a permit for `deploy.commit` on `abc…` cannot deploy anything else.
 - **Expiry:** `expiresAt` (default 30 minutes, at most 2 hours), or when the work ends, is withdrawn or abandoned, or its run is closed: the hooks that revoke GitHub grants today revoke permits too.
 - **Leader changes:** at start, and whenever `PANTER_LEAD_HOST` resolves to a different host than the one recorded in `issuedBy`, every `ISSUED` permit of the old leader is revoked.
-- **Single use:** the permit is spent in the same transaction that reserves the action (below), whatever the outcome. A failed precondition does not spend it; a started action always does.
+- **Single use:** the permit is spent when the action is reserved (below), whatever the outcome. A failed precondition does not spend it; a reserved action always does.
 
 ## Action state machine
 
-Actions live in the same ledger. A partial unique index allows **at most one action in a non-terminal state** across the server, so two callers cannot both pass the preconditions and launch: the second gets `BUSY` from the insert, before anything runs.
+Actions live in the `server-actions` ledger. A partial unique index allows **at most one action in a non-terminal state** across the server, so two callers cannot both pass the preconditions and launch: the second gets `BUSY` from the insert, before anything runs.
+
+**Reserving crosses two stores, in a fixed order.** (1) In the mesh mutation, check the permit against the live claim and mark it `SPENT` with a fresh `actionId`. (2) In one `server-actions` transaction, insert the action as `RESERVED` with that `actionId` (taking the unique slot) and consume the operator record if there is one. If (2) fails, for example `BUSY`, the permit stays spent and the answer says so: the safe failure is a lost permit, never a permit usable twice. If Panter dies between (1) and (2), the permit is spent and no action exists, which is the same safe failure; recovery reports a `SPENT` permit without an action as `PERMIT_LOST`. A direct leader run skips (1).
 
 ```
 RESERVED ──▶ LAUNCHED ──▶ RUNNING ──▶ LIVE | ROLLED_BACK | BUILD_FAILED | FAILED | LOCKED
     │            │            │
-    └──▶ START_FAILED          └──────────────▶ UNKNOWN
-                 └─────────────────────────────▶ UNKNOWN
+    │            └──────┬─────┴──▶ STOPPING ──▶ UNKNOWN
+    ├──▶ START_FAILED   └─────────────────────▶ UNKNOWN
+    └────────────────────────────────────────▶ UNKNOWN
 ```
 
 | State | Written when | Terminal |
@@ -90,9 +105,10 @@ RESERVED ──▶ LAUNCHED ──▶ RUNNING ──▶ LIVE | ROLLED_BACK | BUI
 | `RUNNING` | the wrapper wrote its first record | no |
 | `LIVE`, `ROLLED_BACK`, `BUILD_FAILED`, `FAILED`, `LOCKED` | read from the wrapper's final record | yes |
 | `START_FAILED` | `systemd-run` returned an error and `systemctl --user show` confirms no unit by that name exists | yes |
-| `UNKNOWN` | the outcome cannot be read without guessing (see recovery) | yes |
+| `STOPPING` | the unit has run past its allowance without a record (see recovery); Panter asked systemd to stop it | no |
+| `UNKNOWN` | the unit is confirmed gone and the outcome cannot be read without guessing (see recovery) | yes |
 
-Terminal states free the slot. `UNKNOWN` is terminal for the ledger but flagged for the operator; it never blocks later actions, because it is only written once the unit is confirmed gone, and `deploy.sh`'s own lock protects the release directory regardless. Nothing is ever re-run: every transition out of `RESERVED` or later is a reading, never a new launch.
+Terminal states free the slot. An action **never** becomes terminal while its unit is still loaded and not `inactive`/`failed`: `UNKNOWN` is written only once systemd confirms the unit is gone or stopped, so a terminal state always means nothing is still running. `UNKNOWN` is flagged for the operator but does not block later actions. Nothing is ever re-run: every transition out of `RESERVED` or later is a reading, or a stop, never a new launch.
 
 ## Running a deploy without cutting the branch Panter sits on
 
@@ -109,20 +125,19 @@ The unit name is derived from `actionId` (a UUID), so it cannot collide and reco
 
 ## Recovery
 
-On start, and every 30 seconds while an action is open, Panter reconciles each non-terminal action from three observations: its ledger state, the record file, and `systemctl --user show panter-action-<actionId> -p LoadState,ActiveState`.
+On start, and every 30 seconds while an action is open, Panter reconciles each non-terminal action from three observations: its ledger state, the record file, and `systemctl --user show panter-action-<actionId> -p LoadState,ActiveState`. The unit is **gone** when `LoadState` is `not-found`, or `ActiveState` is `inactive` or `failed` (with `--collect` a stopped unit is unloaded soon after). It is **live** when `ActiveState` is `activating`, `active`, `reloading` or `deactivating`.
 
-| Ledger | Record file | Unit | Panter writes |
-|---|---|---|---|
-| any | final record | any | the record's state |
-| any | `RUNNING` | loaded and active | nothing yet (check again later) |
-| any | `RUNNING` | not found | `UNKNOWN` |
-| `RESERVED` or `LAUNCHED` | none | loaded and active | nothing yet, up to 2 minutes; then `UNKNOWN` if still no record |
-| `RESERVED` | none | not found | `UNKNOWN` (Panter may have died after `systemd-run` started the unit; nothing proves it did not run) |
-| `LAUNCHED` | none | not found | `UNKNOWN` |
-| `RESERVED` | none | not found, **and** this same process saw `systemd-run` fail | `START_FAILED` |
-| unreadable or malformed record | | any | `UNKNOWN` |
+| Record file | Unit | Panter writes |
+|---|---|---|
+| final record, well formed | gone | the record's state |
+| final record, well formed | live | nothing yet (the wrapper is exiting); next pass |
+| `RUNNING` or none | live, and the action is younger than `RuntimeMaxSec` + 5 minutes | nothing yet; next pass |
+| `RUNNING` or none | live, and older than that | `STOPPING`, then `systemctl --user stop` on the unit; next pass |
+| `RUNNING` or none | gone | `UNKNOWN` |
+| malformed or unreadable | live | nothing yet, as for `RUNNING` |
+| malformed or unreadable | gone | `UNKNOWN` |
 
-`START_FAILED` is only written by the process that saw the refusal, in the same request. After a crash, absence is never read as "did not run". A Panter crash after the unit was accepted but before the wrapper wrote anything is the `RESERVED`/`LAUNCHED`, no record, unit active row: Panter waits for the wrapper. If the unit then disappears without a record, the action is `UNKNOWN`.
+One case is decided outside this table: when `systemd-run` itself returns an error in the request that reserved the action, that same request asks `systemctl --user show` for the unit, and if it is `not-found` it writes `START_FAILED`; otherwise the action stays `RESERVED` and the table above takes over. After a restart, absence is never read as "did not run": a `RESERVED` or `LAUNCHED` action with no record and no unit is `UNKNOWN`. A Panter crash after the unit was accepted but before the wrapper wrote anything is the "none, live" row: Panter waits for the wrapper, and the unit's own `RuntimeMaxSec` bounds the wait. A final record written after `UNKNOWN` cannot exist, because `UNKNOWN` is only written once the unit is gone.
 
 The record is written by the unit, not by Panter, so it survives Panter's own restart during the deploy and Panter's rollback to the previous release, which reads the same `etc/actions/` and closes the action the same way.
 
@@ -169,8 +184,8 @@ Each one is its own pull request with its own preconditions, authorization rule 
 | Phase | Deliverable |
 |---|---|
 | 0 | This design |
-| 1 | Authority and checks: the ledger (permits, authorizations, actions with the unique slot), the five tools, the `server` field on `panter_mesh_delegate`, claim fencing and revocation hooks, the operator authorization, the preconditions against GitHub with the truth tables above, the `AGENTS.md` sentence. `deploy.commit` stops after `RESERVED` in **dry-run**: it answers what it would launch and frees the slot. Tests with a fake GitHub API covering every row of the tables |
-| 2 | Execution: `deploy/run-action.sh`, the `systemd-run` launch, the records, recovery with every row of its table, receipts; tests with a fake `systemd-run`, a fake `systemctl` and a fake `deploy.sh` |
+| 1 | Authority and checks: permits inside the mesh document with binding and revocation in every claim transition, the `server-actions` ledger (operator authorizations with their state table, actions with the unique slot), the reserve order across the two, the five tools, the `server` field on `panter_mesh_delegate`, the preconditions against GitHub with the truth tables above (including an older success behind a newer pending run), the `AGENTS.md` sentence. `deploy.commit` stops after `RESERVED` in **dry-run**: it answers what it would launch and frees the slot. Tests with a fake GitHub API covering every row of the tables |
+| 2 | Execution: `deploy/run-action.sh`, the `systemd-run` launch, the records, recovery with every row of its table and every `ActiveState`, `STOPPING`, receipts; tests with a fake `systemd-run`, a fake `systemctl` and a fake `deploy.sh` |
 | 3 | On the operator's server, with explicit authorization: enable `deploy.commit`, then the leader delegates the next release's deploy to a worker with a permit, and the result is checked against `/health` |
 
 Phases 1 and 2 share only this document and the record format in `etc/actions/`. Every phase is a pull request with CI green, Codex, an independent review on the exact head commit by the reviewer account, and a squash merge by the leader.
