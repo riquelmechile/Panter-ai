@@ -55,13 +55,18 @@ function fixture(ageMinutes = 3) {
     'else exit 9; fi',
   ].join('\n') + '\n');
   const systemd = join(bin, 'systemd-run');
+  // Like systemd, the fake starts the command with nothing but the variables
+  // given through --setenv: the caller's environment is not inherited.
   writeFileSync(systemd, [
-    '#!/bin/sh',
+    '#!/usr/bin/env bash',
     'printf "%s\\n" "$@" >> "$FAKE_RUN_LOG"',
     'case "$FAKE_RUN_MODE" in',
     '  fail) exit 1 ;;',
     '  hang) sleep 2 ;;',
-    '  wrapper) "$6" "$7" "$8" "$9" ;;',
+    '  wrapper)',
+    '    vars=()',
+    '    while [[ ${1-} == --* ]]; do [[ $1 == --setenv=* ]] && vars+=("${1#--setenv=}"); shift; done',
+    '    exec env -i "${vars[@]}" "$@" ;;',
     '  *) exit 0 ;;',
     'esac',
   ].join('\n') + '\n');
@@ -182,13 +187,22 @@ test('launched unit uses fixed argv, SHA from transaction, one normal launch', a
     assert.equal((await f.store.read(id))?.launchStartedAt, new Date(stamp).toISOString());
     assert.equal(await f.state(), 'LAUNCHED');
     const args = readFileSync(f.paths.runLog, 'utf8').split('\n');
-    assert.deepEqual(args.slice(0, 5), [
+    assert.deepEqual(args.slice(0, 6), [
       '--user', '--unit=panter-action-' + id, '--collect',
       '--property=RuntimeMaxSec=45min', '--setenv=PANTER_SOURCE_REPO=' + f.opts.sourceRepo,
+      '--setenv=PANTER_BASE=' + f.baseDir,
     ]);
-    assert.equal(args[6], 'deploy.commit');
-    assert.equal(args[7], id);
-    assert.equal(args[8], sha);
+    const pathArg = args[6] ?? '';
+    const unitPath = pathArg.replace(/^--setenv=PATH=/, '').split(':');
+    assert.match(pathArg, /^--setenv=PATH=\//);
+    assert.equal(unitPath[0], join(f.baseDir, 'bin'), 'the unit searches the same PATH as Panter');
+    assert.ok(unitPath.includes(join(process.execPath, '..')), 'and always finds the node Panter runs on');
+    assert.ok(unitPath.every((entry) => entry.startsWith('/')));
+    assert.equal(args[7], join(f.baseDir, 'current', 'deploy', 'run-action.sh'));
+    assert.equal(args[8], 'deploy.commit');
+    assert.equal(args[9], id);
+    assert.equal(args[10], sha);
+    assert.equal(args.length, 12, 'nothing else reaches systemd-run');
     assert.equal(await launchServerAction(f.opts, id), 'SKIPPED');
     assert.equal(readFileSync(f.paths.runLog, 'utf8').match(/--unit=/g)?.length, 1);
   } finally { f.cleanup(); }
@@ -400,6 +414,67 @@ test('receipts retry failures and are sent once after success', async () => {
   } finally { f.cleanup(); }
 });
 
+test('a receipt that cannot be delivered does not keep other actions from being settled', async () => {
+  const f = fixture();
+  const other = '00000000-0000-4000-8000-000000000002';
+  try {
+    f.fence('run'); f.record('final');
+    await f.store.transact(other, () => ({ next: {
+      actionId: other, sha, state: 'RESERVED', reservedAt: earlier(3) }, result: true }));
+    symlinkSync('closed', join(f.baseDir, 'etc', 'actions', other + '.fence'));
+    const delivered: string[] = [];
+    f.opts.notify = (receipt) => {
+      if (receipt.actionId === id) throw new Error('inbox rejects this receipt');
+      delivered.push(receipt.actionId + ':' + receipt.state);
+    };
+    for (let pass = 0; pass < 2; pass++) {
+      await assert.rejects(reconcileServerActions(f.opts), /inbox rejects this receipt/);
+      assert.equal(await f.state(), 'LIVE');
+      assert.equal((await f.store.read(other))?.state, 'ABANDONED', 'the later action is settled anyway');
+      assert.equal((await f.store.read(id))?.receiptSentAt, undefined, 'the failed receipt stays pending');
+    }
+    assert.deepEqual(delivered, [other + ':ABANDONED'], 'and its own receipt is sent exactly once');
+  } finally { f.cleanup(); }
+});
+
+test('a wake during a pass that already listed the actions triggers another pass', async () => {
+  const f = fixture();
+  let lists = 0;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let reached!: () => void;
+  const waiting = new Promise<void>((resolve) => { reached = resolve; });
+  const store = new (class extends MemoryServerActionStore {
+    override async list(): Promise<ServerAction[]> {
+      const snapshot = await super.list();
+      if (++lists === 3) { reached(); await held; } // the pass's last look, taken before the insert
+      return snapshot;
+    }
+  })();
+  const worker = startServerActionReconciler({ ...f.opts, store });
+  try {
+    const first = worker.start();
+    await waiting;
+    await store.transact(id, () => ({ next: {
+      actionId: id, sha, state: 'RESERVED', reservedAt: earlier(3) }, result: true }));
+    const woken = worker.wake();
+    release();
+    await Promise.all([first, woken]);
+    assert.equal((await store.read(id))?.state, 'ABANDONED');
+    assert.equal(f.receipts.length, 1);
+  } finally { worker.stop(); f.cleanup(); }
+});
+
+test('action ids are lowercase only, as in the wrapper', async () => {
+  const f = fixture();
+  try {
+    const upper = id.replace('0000-4000', 'ABCD-4000');
+    await assert.rejects(launchServerAction(f.opts, upper), /INVALID_RUNNER_CONFIGURATION/);
+    await assert.rejects(reconcileServerAction(f.opts, upper), /INVALID_ACTION_ID/);
+    await assert.rejects(serverActionLogTail(f.baseDir, upper), /INVALID_ACTION_ID/);
+  } finally { f.cleanup(); }
+});
+
 test('last 50 log lines redact bearer, token keys and provider signatures', async () => {
   const f = fixture();
   try {
@@ -412,6 +487,15 @@ test('last 50 log lines redact bearer, token keys and provider signatures', asyn
     assert.doesNotMatch(output, /top-secret|hidden123|github_pat|base64-secret|very-hidden/);
     assert.match(output, /\[REDACTED\]/);
     await assert.rejects(serverActionLogTail(f.baseDir, '../other'), /INVALID_ACTION_ID/);
+    writeFileSync(f.paths.log, [
+      '{"access_token":"private-value-123","password":"private-password-456","note":"kept"}',
+      "{'client_secret': 'quoted-secret-789', \"GITHUB_TOKEN\": \"env-style-012\"}",
+      'refreshToken="camel-345" api-key: "dashed-678" tokens: 5',
+    ].join('\n'));
+    const json = await serverActionLogTail(f.baseDir, id);
+    assert.doesNotMatch(json, /private-value|private-password|quoted-secret|env-style|camel-345|dashed-678/);
+    assert.match(json, /"access_token":"\[REDACTED\]","password":"\[REDACTED\]","note":"kept"/);
+    assert.match(json, /tokens: 5/, 'ordinary words are left alone');
   } finally { f.cleanup(); }
 });
 

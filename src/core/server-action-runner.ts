@@ -2,7 +2,7 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat, readFile, readlink, symlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFile = promisify(execFileCallback);
@@ -11,7 +11,8 @@ const TERMINAL = new Set<ServerActionState>([
   'START_FAILED', 'ABANDONED', 'UNKNOWN',
 ]);
 const FINAL_RECORD = new Set(['LIVE', 'ROLLED_BACK', 'BUILD_FAILED', 'FAILED', 'LOCKED']);
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Lowercase only, like the wrapper: one action must never map to two fence names.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SHA = /^[0-9a-f]{40}$/;
 export const SERVER_ACTION_LAUNCH_TIMEOUT_MS = 30_000;
 export const SERVER_ACTION_MAX_AGE_MS = 50 * 60_000;
@@ -112,6 +113,10 @@ const filePath = (o: RunnerOptions, id: string, suffix: string): string =>
 const unitName = (id: string): string => 'panter-action-' + id;
 const isMissing = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === 'ENOENT';
 const validId = (id: string): boolean => UUID.test(id);
+const unitPath = (o: RunnerOptions): string => [...new Set([
+  ...((o.env ?? process.env).PATH ?? '').split(':'), dirname(process.execPath),
+  '/usr/local/bin', '/usr/bin', '/bin',
+].filter((entry) => entry.startsWith('/')))].join(':');
 
 async function fence(o: RunnerOptions, id: string): Promise<Fence> {
   const path = fencePath(o, id);
@@ -254,6 +259,11 @@ export async function launchServerAction(o: RunnerOptions, id: string): Promise<
       '--user', '--unit=' + unitName(id), '--collect',
       '--property=RuntimeMaxSec=45min',
       '--setenv=PANTER_SOURCE_REPO=' + o.sourceRepo,
+      // A transient unit inherits neither Panter's environment nor a login
+      // shell's: the wrapper must watch the same etc/actions as the reconciler
+      // and find the same node Panter runs on.
+      '--setenv=PANTER_BASE=' + o.baseDir,
+      '--setenv=PATH=' + unitPath(o),
       join(o.baseDir, 'current', 'deploy', 'run-action.sh'),
       'deploy.commit', id, marked,
     ], { env: o.env ?? process.env, timeout: o.launchTimeoutMs ?? SERVER_ACTION_LAUNCH_TIMEOUT_MS,
@@ -322,33 +332,51 @@ export async function reconcileServerAction(o: RunnerOptions, id: string): Promi
 
 export async function reconcileServerActions(o: RunnerOptions): Promise<number> {
   const actions = await o.store.list();
+  // One action that cannot be settled or notified must not keep the others
+  // from being observed: every action gets its turn, then the first failure
+  // is reported so the caller schedules another pass.
+  const failures: unknown[] = [];
   for (const action of actions) {
-    if (!TERMINAL.has(action.state)) await reconcileServerAction(o, action.actionId);
-    else if (!action.receiptSentAt) await deliver(o, action.actionId);
+    try {
+      if (!TERMINAL.has(action.state)) await reconcileServerAction(o, action.actionId);
+      else if (!action.receiptSentAt) await deliver(o, action.actionId);
+    } catch (error) { failures.push(error); }
   }
+  if (failures.length) throw failures[0];
   return (await o.store.list()).filter((a) => !TERMINAL.has(a.state)).length;
 }
 
 export function startServerActionReconciler(o: RunnerOptions): { start: () => Promise<void>; wake: () => Promise<void>; stop: () => void } {
   let timer: NodeJS.Timeout | undefined;
   let stopped = false;
+  let again = false;
   let inFlight: Promise<void> | undefined;
+  const schedule = (): void => {
+    if (stopped || timer) return;
+    timer = setTimeout(() => {
+      timer = undefined;
+      void pass().catch(() => { /* A later pass retries transient errors. */ });
+    }, 30_000);
+    timer.unref();
+  };
   const pass = async (): Promise<void> => {
-    if (inFlight) return inFlight;
+    // A request that arrives while a pass is reading may concern an action the
+    // pass listed too early to see: remember it and run once more afterwards.
+    if (inFlight) { again = true; return inFlight; }
     inFlight = (async () => {
-      let pending = true; // A transient read failure must not permanently stop recovery.
-      try {
-        await reconcileServerActions(o);
-        pending = (await o.store.list()).some((a) =>
-          !TERMINAL.has(a.state) || !a.receiptSentAt);
-      } finally {
-        if (!stopped && pending && !timer) {
-          timer = setTimeout(() => {
-            timer = undefined;
-            void pass().catch(() => { /* A later pass retries transient errors. */ });
-          }, 30_000);
-          timer.unref();
-        }
+      for (;;) {
+        again = false;
+        let pending = true; // A transient read failure must not permanently stop recovery.
+        let failure: { error: unknown } | undefined;
+        try {
+          await reconcileServerActions(o);
+          pending = (await o.store.list()).some((a) =>
+            !TERMINAL.has(a.state) || !a.receiptSentAt);
+        } catch (error) { failure = { error }; }
+        if (pending) schedule();
+        if (again && !stopped) continue;
+        if (failure) throw failure.error;
+        return;
       }
     })();
     try { await inFlight; } finally { inFlight = undefined; }
@@ -374,7 +402,8 @@ export async function serverActionLogTail(baseDir: string, actionId: string): Pr
   return lines.join('\n')
     .replace(/\b(Authorization\s*:\s*(?:Bearer|Basic)\s+)[^\s]+/gi, '$1[REDACTED]')
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/-]+/gi, '$1[REDACTED]')
-    .replace(/\b((?:authorization|access_token|refresh_token|client_secret|api[_-]?key|password|secret|token)\s*[:=]\s*["']?)[^\s"',;&]+/gi, '$1[REDACTED]')
-    .replace(/\b([A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PRIVATE_KEY)\s*=\s*)[^\s]+/g, '$1[REDACTED]')
+    // The key may be quoted, as in JSON: {"access_token":"..."}.
+    .replace(/\b((?:authorization|access_token|refresh_token|client_secret|api[_-]?key|password|secret|token)["']?\s*[:=]\s*["']?)[^\s"',;&]+/gi, '$1[REDACTED]')
+    .replace(/\b([A-Za-z][A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PRIVATE_KEY)["']?\s*[:=]\s*["']?)[^\s"',;&]+/gi, '$1[REDACTED]')
     .replace(/\b(?:github_pat_|gh[pousr]_|sk-)[A-Za-z0-9_-]{12,}\b/g, '[REDACTED]');
 }
