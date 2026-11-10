@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   launchServerAction, MemoryServerActionStore, startServerActionReconciler, reconcileServerAction,
-  reconcileServerActions, serverActionLogTail, SERVER_ACTION_LAUNCH_TIMEOUT_MS,
+  reconcileServerActions, redactServerActionLog, serverActionLogTail, SERVER_ACTION_LAUNCH_TIMEOUT_MS,
   type RunnerOptions, type ServerAction, type ServerActionReceipt,
 } from '../src/core/server-action-runner.js';
 
@@ -473,6 +473,72 @@ test('action ids are lowercase only, as in the wrapper', async () => {
     await assert.rejects(reconcileServerAction(f.opts, upper), /INVALID_ACTION_ID/);
     await assert.rejects(serverActionLogTail(f.baseDir, upper), /INVALID_ACTION_ID/);
   } finally { f.cleanup(); }
+});
+
+test('a log that cannot be hashed never keeps an action from ending and freeing the slot', async () => {
+  for (const kind of ['directory', 'link', 'dangling-link', 'fifo', 'absent'] as const) {
+    const f = fixture();
+    try {
+      f.fence('run'); f.record('final');
+      const elsewhere = join(f.baseDir, 'elsewhere.txt');
+      writeFileSync(elsewhere, 'not this action\n');
+      if (kind === 'directory') mkdirSync(f.paths.log);
+      else if (kind === 'link') symlinkSync(elsewhere, f.paths.log);
+      else if (kind === 'dangling-link') symlinkSync(join(f.baseDir, 'nowhere'), f.paths.log);
+      else if (kind === 'fifo') assert.equal(spawnSync('mkfifo', [f.paths.log]).status, 0);
+      assert.equal(await reconcileServerActions(f.opts), 0, kind + ': no action stays open');
+      const action = await f.store.read(id);
+      assert.equal(action?.state, 'LIVE', kind);
+      assert.equal(action?.logSha256, null, kind);
+      assert.equal(typeof action?.receiptSentAt, 'string', kind);
+      assert.deepEqual(f.receipts.map((r) => [r.state, r.logSha256]), [['LIVE', null]], kind);
+      await assert.rejects(serverActionLogTail(f.baseDir, id), /LOG_UNAVAILABLE/, kind);
+    } finally { f.cleanup(); }
+  }
+  const f = fixture();
+  try {
+    f.fence('run'); f.record('final');
+    writeFileSync(f.paths.log, 'built\n');
+    await reconcileServerActions(f.opts);
+    assert.match(String((await f.store.read(id))?.logSha256), /^[0-9a-f]{64}$/, 'a regular log is still hashed');
+  } finally { f.cleanup(); }
+});
+
+test('the log tail reads a bounded part of a large log and never a partial first line', async () => {
+  const f = fixture();
+  try {
+    const lines = Array.from({ length: 9000 }, (_, i) => 'line ' + String(i).padStart(5, '0') + ' ' + 'x'.repeat(60));
+    writeFileSync(f.paths.log, lines.join('\n') + '\n');
+    const tail = (await serverActionLogTail(f.baseDir, id)).split('\n');
+    assert.deepEqual(tail, lines.slice(-50));
+    writeFileSync(f.paths.log, 'y'.repeat(300 * 1024));
+    assert.equal(await serverActionLogTail(f.baseDir, id), '', 'one endless line is not shown in part');
+    writeFileSync(f.paths.log, '');
+    assert.equal(await serverActionLogTail(f.baseDir, id), '');
+  } finally { f.cleanup(); }
+});
+
+test('redaction covers quoted values with spaces, escaped JSON and private key blocks', () => {
+  const key = Array.from({ length: 4 }, (_, i) => String.fromCharCode(65 + i).repeat(64));
+  const cases: Array<[string, RegExp]> = [
+    ['password="correct horse battery staple" next=kept', /correct|horse|battery|staple/],
+    ["db_password = 'single quoted pass phrase' ; ok", /single|quoted pass|phrase/],
+    ['{"password":"with \\"escaped\\" quote and spaces","user":"kept"}', /escaped|quote and spaces/],
+    ['payload={\\"client_secret\\":\\"inner secret value\\",\\"id\\":\\"kept\\"}', /inner secret value/],
+    ['PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n' + key.join('\n') + '\n-----END PRIVATE KEY-----"\nafter=kept', /AAAA|BBBB|CCCC|DDDD|BEGIN|END/],
+    ['-----BEGIN OPENSSH PRIVATE KEY-----\n' + key.join('\n'), /AAAA|DDDD/],
+    [key.slice(1).join('\n') + '\n-----END RSA PRIVATE KEY-----\nafter=kept', /BBBB|DDDD|END RSA/],
+    [key.join('\n') + '\nafter=kept', /AAAA|DDDD/],
+    ['token: "unterminated secret value\nstill secret', /unterminated|still secret/],
+  ];
+  for (const [input, leak] of cases) {
+    const output = redactServerActionLog(input);
+    assert.doesNotMatch(output, leak, input.slice(0, 40));
+    assert.match(output, /REDACTED/, input.slice(0, 40));
+    if (input.includes('kept')) assert.match(output, /kept/, 'what follows the secret stays: ' + input.slice(0, 40));
+  }
+  const plain = 'deploy: building abc1234\ntokens: 5\nsha256 ' + 'f'.repeat(64) + ' release.tar\n';
+  assert.equal(redactServerActionLog(plain), plain, 'ordinary build output is left alone');
 });
 
 test('last 50 log lines redact bearer, token keys and provider signatures', async () => {

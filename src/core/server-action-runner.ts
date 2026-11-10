@@ -1,7 +1,7 @@
 import { execFile as execFileCallback } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { lstat, readFile, readlink, symlink } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, open, readFile, readlink, symlink, type FileHandle } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -183,15 +183,32 @@ async function record(o: RunnerOptions, action: ServerAction): Promise<RecordObs
   return { kind: 'bad' };
 }
 
+/** The log is evidence, never a condition: only a regular file is read, a
+ * link is not followed, and nothing here can block or throw. */
+async function openLog(o: Pick<RunnerOptions, 'baseDir'>, id: string): Promise<{ handle: FileHandle; size: number } | null> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(join(o.baseDir, 'etc', 'actions', id + '.log'),
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const info = await handle.stat();
+    if (info.isFile()) return { handle, size: info.size };
+  } catch { /* absent, a link, unreadable: there is no log to show */ }
+  await handle?.close().catch(() => undefined);
+  return null;
+}
+
+/** null when there is no readable regular log. An action must reach its
+ * terminal state and free the slot whether or not its log can be hashed. */
 async function logDigest(o: RunnerOptions, id: string): Promise<string | null> {
+  const log = await openLog(o, id);
+  if (!log) return null;
   const hash = createHash('sha256');
   try {
-    for await (const chunk of createReadStream(filePath(o, id, '.log'))) hash.update(chunk);
+    for await (const chunk of log.handle.createReadStream({ autoClose: false })) hash.update(chunk);
     return hash.digest('hex');
-  } catch (error) {
-    if (isMissing(error)) return null;
-    throw error;
-  }
+  } catch {
+    return null;
+  } finally { await log.handle.close().catch(() => undefined); }
 }
 
 function transition(
@@ -391,19 +408,47 @@ export function startServerActionReconciler(o: RunnerOptions): { start: () => Pr
   };
 }
 
-/** Only the final 50 lines are revealed to agents. Other logs stay on the server. */
-export async function serverActionLogTail(baseDir: string, actionId: string): Promise<string> {
-  if (!validId(actionId)) throw new Error('INVALID_ACTION_ID');
-  // Fixed argv, no shell. Avoid reading multi-gigabyte build logs into Panter's heap.
-  const { stdout: raw } = await execFile('tail', [
-    '-n', '50', '--', join(baseDir, 'etc', 'actions', actionId + '.log'),
-  ], { timeout: 5_000, maxBuffer: 2 * 1024 * 1024 });
-  const lines = raw.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n');
-  return lines.join('\n')
+const LOG_TAIL_BYTES = 256 * 1024;
+const SECRET_KEY = String.raw`\b(?:[A-Za-z][A-Za-z0-9_-]*)?(?:authorization|token|secret|password|passwd|api[_-]?key|private[_-]?key)`;
+const PEM_END = /-----END [A-Z0-9 ]*PRIVATE KEY-----/;
+
+/** Removes what looks like a credential from text meant for an agent. When in
+ * doubt it removes more: an unterminated quote or key block is cut to the end. */
+export function redactServerActionLog(text: string): string {
+  let out = text.replace(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g,
+    '[REDACTED PRIVATE KEY]');
+  // The beginning of a key block may have scrolled out of the lines read.
+  const end = PEM_END.exec(out);
+  if (end) out = '[REDACTED PRIVATE KEY]' + out.slice(end.index + end[0].length);
+  return out
+    // A key block with both markers out of view is still 64-column base64.
+    .replace(/^[A-Za-z0-9+/]{64}$/gm, '[REDACTED]')
     .replace(/\b(Authorization\s*:\s*(?:Bearer|Basic)\s+)[^\s]+/gi, '$1[REDACTED]')
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/-]+/gi, '$1[REDACTED]')
-    // The key may be quoted, as in JSON: {"access_token":"..."}.
-    .replace(/\b((?:authorization|access_token|refresh_token|client_secret|api[_-]?key|password|secret|token)["']?\s*[:=]\s*["']?)[^\s"',;&]+/gi, '$1[REDACTED]')
-    .replace(/\b([A-Za-z][A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PRIVATE_KEY)["']?\s*[:=]\s*["']?)[^\s"',;&]+/gi, '$1[REDACTED]')
+    // Whole quoted values first (they may contain spaces), plain and JSON-escaped; then bare ones.
+    .replace(new RegExp(SECRET_KEY + String.raw`\\"\s*:\s*\\"(?:[^\\]|\\[^"])*?(?:\\"|$)`, 'gi'),
+      (match) => match.slice(0, match.indexOf(':') + 1) + '\\"[REDACTED]\\"')
+    .replace(new RegExp('(' + SECRET_KEY + String.raw`["']?\s*[:=]\s*)(?:"(?:[^"\\]|\\[\s\S])*(?:"|$)|'(?:[^'\\]|\\[\s\S])*(?:'|$))`, 'gi'),
+      '$1"[REDACTED]"')
+    .replace(new RegExp('(' + SECRET_KEY + String.raw`["']?\s*[:=]\s*)(?!"\[REDACTED\]")[^\s"',;&]+`, 'gi'), '$1[REDACTED]')
     .replace(/\b(?:github_pat_|gh[pousr]_|sk-)[A-Za-z0-9_-]{12,}\b/g, '[REDACTED]');
+}
+
+/** Only the final 50 lines are revealed to agents, and only of the action's own
+ * regular log file: a link is not followed. Other logs stay on the server. */
+export async function serverActionLogTail(baseDir: string, actionId: string): Promise<string> {
+  if (!validId(actionId)) throw new Error('INVALID_ACTION_ID');
+  const log = await openLog({ baseDir }, actionId);
+  if (!log) throw new Error('LOG_UNAVAILABLE');
+  try {
+    // Bounded read from the descriptor already checked: a multi-gigabyte build
+    // log never enters Panter's heap and the path is not resolved a second time.
+    const length = Math.min(log.size, LOG_TAIL_BYTES);
+    const start = log.size - length;
+    const { bytesRead, buffer } = await log.handle.read(Buffer.alloc(length), 0, length, start);
+    let lines = buffer.subarray(0, bytesRead).toString('utf8')
+      .replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n');
+    if (start > 0) lines = lines.slice(1); // the first line read is probably cut
+    return redactServerActionLog(lines.slice(-50).join('\n'));
+  } finally { await log.handle.close().catch(() => undefined); }
 }
