@@ -1033,7 +1033,7 @@ export class MeshEngine {
     return this.read(d => {
       const w = d.works.find(w => w.id === id);
       check(w, 'Work not found');
-      return { id: w.id, target: w.target, role: w.role, state: w.state, createdAt: w.createdAt, leaseUntil: w.leaseUntil, transportHeld: Boolean(w.transportClaim && w.state === 'RUNNING') };
+      return { id: w.id, target: w.target, role: w.role, state: w.state, createdAt: w.createdAt, leaseUntil: w.leaseUntil, attemptId: w.attemptId, leaseGeneration: w.leaseGeneration, transportHeld: Boolean(w.transportClaim && w.state === 'RUNNING') };
     });
   }
   /** Leader withdraws remote read-only work nobody really started: still QUEUED, or only held by a transport
@@ -1159,7 +1159,7 @@ export class MeshEngine {
       check(Date.parse(p.expiresAt)>Date.now(),'PERMIT_EXPIRED');
       const w=d.works.find(x=>x.id===p.workId);
       check(w && w.missionId===p.missionId && w.target===caller && w.state==='RUNNING' &&
-        !w.transportClaim && Date.parse(w.leaseUntil??'')>Date.now() &&
+        Date.parse(w.leaseUntil??'')>Date.now() &&
         p.attemptId===input.attemptId && p.leaseGeneration===input.leaseGeneration &&
         w.attemptId===input.attemptId && w.leaseGeneration===input.leaseGeneration,'PERMIT_STALE_CLAIM');
       p.state='SPENT';p.actionId=input.actionId;return p;

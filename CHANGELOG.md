@@ -4,10 +4,16 @@ All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://
 
 ## Unreleased
 
+### Server actions, Phase 1 (opt-in; dry-run only)
+- Operator standing/per-release deployment authorization, claim-fenced one-use permits in the mesh, and an action ledger in the same SQLite file as the mesh, with a unique nonterminal slot (included in backups).
+- Ordered verification of main ancestry, exactly one merged pull request, latest required check runs, final-head independent approval and local health/maintenance state before marking a permit SPENT and an action RESERVED. A pull request whose commit history cannot be read completely (GitHub lists at most 250 commits) is refused.
+- A claim whose lease lapsed loses its permits on a late renewal.
+- Five server-action tools (also available via the admin router), including a worker-only listed action. No systemd-run, wrapper, recovery, deployments or changes to deploy.sh.
+
 ### Server actions: Phase 2 (not enabled)
 - A single-use `deploy.commit` wrapper fences before any deploy effect, durably records RUNNING and final outcomes, and keeps logs under `etc/actions/`.
 - A transient systemd user-unit launcher and 30-second reconciler implement every recovery row, a 50-minute stop threshold, terminal receipts and redacted log tails.
-- Phase 1 provides the `server-actions` transactional store, its authority, authorization, checks and MCP tools. This implementation is not wired to `src/server.ts` or enabled on a server.
+- The runner is not wired to `src/server.ts` yet: `deploy.commit` still ends in a dry run after `RESERVED`. Wiring it to the Phase 1 ledger and tools is the next step.
 
 ## 1.5.1 (2026-11-09)
 
