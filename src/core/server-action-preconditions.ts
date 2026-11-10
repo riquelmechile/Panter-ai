@@ -136,7 +136,8 @@ export class ServerDeployGate {
     const reviews = await this.pages('INDEPENDENT_REVIEW','pulls/'+pr.number+'/reviews',1000, x => x);
     const decision = independentReviewDecision(this.reviewer,pr.head.sha,pr,commits,reviews,true);
     required(decision.state === 'APPROVED_EXACT_SHA', 'INDEPENDENT_REVIEW',
-      'Latest decisive reviewer state: '+decision.state);
+      'Latest decisive reviewer state: '+decision.state+
+      (decision.unavailableReason ? ' ('+decision.unavailableReason+')' : ''));
     evidence.push({ precondition:'INDEPENDENT_REVIEW', result:'PASS' });
 
     let local: LocalDeployState;

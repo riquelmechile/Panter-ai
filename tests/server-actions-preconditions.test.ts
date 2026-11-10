@@ -154,7 +154,8 @@ test('latest decisive review by submission time only, on final PR head, independ
       review('CHANGES_REQUESTED',head,40,'2026-01-04T00:00:00Z'),
       review('APPROVED',head,20,'2026-01-01T00:00:00Z')]},false],
     ['COMMENTED later does not revoke',{reviews:[review('APPROVED'),review('COMMENTED',head,50,'2026-01-05T00:00:00Z')]},true],
-    ['reviewer authored commit',{commits:[{author:{login:'review-account'}}]},false],
+    ['reviewer authored commit',{commits:[{author:{login:'review-account'},committer:{login:'web-flow'}}]},false],
+    ['reviewer committed commit',{commits:[{author:{login:'author-user'},committer:{login:'Review-Account'}}]},false],
     ['reviewer authored PR',{prs:[{...pr(),user:{login:'review-account'}}]},false],
     ['missing submitted_at',{reviews:[{...review('APPROVED'),submitted_at:null}]},false],
     ['new approval on old head over revoked current approval',{reviews:[
@@ -167,15 +168,31 @@ test('latest decisive review by submission time only, on final PR head, independ
   }
 });
 
+test('authorship that GitHub cannot name proves no independence: fail closed',async()=>{
+  const ok={author:{login:'author-user'},committer:{login:'web-flow'}};
+  const rows:[string,Scenario][]=[
+    ['commit without author account',{commits:[ok,{author:null,committer:{login:'web-flow'}}]}],
+    ['commit without committer account',{commits:[{author:{login:'author-user'},committer:null},ok]}],
+    ['commit with empty author login',{commits:[{author:{login:''},committer:{login:'web-flow'}}]}],
+    ['commit without either field',{commits:[{}]}],
+    ['PR without author',{prs:[{...pr(),user:null}]}],
+    ['PR with empty author login',{prs:[{...pr(),user:{login:''}}]}]
+  ];
+  for(const [label,s] of rows)
+    await assert.rejects(gate(s).verify(sha),
+      /PRECONDITION_INDEPENDENT_REVIEW.*UNAVAILABLE \(COMMIT_AUTHORSHIP_UNREADABLE\)/,label);
+  assert.equal((await gate({commits:[ok,ok]}).verify(sha)).length,5);
+});
+
 test('PR, check-run and review pagination caps reject overflow and malformation',async()=>{
   await assert.rejects(gate({prs:Array.from({length:101},(_,i)=>({...pr(),number:i+1}))})
     .verify(sha),/PRECONDITION_MERGED_PR/);
   await assert.rejects(gate({totalRuns:1001}).verify(sha),/PRECONDITION_GREEN_CHECKS/);
   const manyReviews=Array.from({length:1001},(_,i)=>review('COMMENTED',head,i+1));
   await assert.rejects(gate({reviews:manyReviews}).verify(sha),/PRECONDITION_INDEPENDENT_REVIEW/);
-  const commits=Array.from({length:1001},()=>({author:{login:'author-user'}}));
+  const commits=Array.from({length:1001},()=>({author:{login:'author-user'},committer:{login:'web-flow'}}));
   await assert.rejects(gate({commits}).verify(sha),/PRECONDITION_INDEPENDENT_REVIEW/);
-  const authored=(n:number)=>Array.from({length:n},()=>({author:{login:'author-user'}}));
+  const authored=(n:number)=>Array.from({length:n},()=>({author:{login:'author-user'},committer:{login:'web-flow'}}));
   assert.equal((await gate({commits:authored(250)}).verify(sha)).length,5,
     'a complete 250-commit history spans three pages and passes');
   await assert.rejects(gate({commits:authored(250),prCommits:251}).verify(sha),
@@ -187,7 +204,7 @@ test('PR, check-run and review pagination caps reject overflow and malformation'
   for(const bad of [undefined,null,0,-1,'3',1.5])
     await assert.rejects(gate({prCommits:bad}).verify(sha),
       /PRECONDITION_INDEPENDENT_REVIEW/,'malformed commit count: '+String(bad));
-  const hidden=[...authored(250),{author:{login:'review-account'}}];
+  const hidden=[...authored(250),{author:{login:'review-account'},committer:{login:'review-account'}}];
   await assert.rejects(gate({commits:hidden.slice(0,250),prCommits:251}).verify(sha),
     /PRECONDITION_INDEPENDENT_REVIEW/,'a reviewer commit past the listing cannot hide');
   await assert.rejects(gate({failPath:'/pulls/9'}).verify(sha),/PRECONDITION_INDEPENDENT_REVIEW/);
@@ -264,6 +281,22 @@ test('worker permit action dry-run spends once, records all six checks, never in
       assert.equal((await server.status('grok')).actions.length,1);
       await assert.rejects(server.action('grok',workerAction(p,c)),/PERMIT_INVALID/);
     } finally { process.env.PATH=original; }
+  }));
+
+test('a repeated grant returns the permit only while it is fenced to the present claim',()=>
+  fixture(async (mesh,server)=>{
+    const w=await delegate(mesh);
+    const queued=await server.grant('gpt-a',{workId:w.id,action:'deploy.commit',args:{sha}});
+    assert.equal(queued.attemptId,null);
+    assert.equal((await server.grant('gpt-a',{workId:w.id,action:'deploy.commit',args:{sha}})).permitId,
+      queued.permitId,'still queued: the same permit');
+    const c=await mesh.claim('grok',w.id);
+    const bound=await server.grant('gpt-a',{workId:w.id,action:'deploy.commit',args:{sha}});
+    assert.equal(bound.permitId,queued.permitId,'claimed: the same permit, now fenced to that claim');
+    assert.equal(bound.attemptId,c.attemptId);
+    assert.equal(bound.leaseGeneration,c.leaseGeneration);
+    const permits=(await server.status('gpt-a')).permits.filter(x=>x.workId===w.id);
+    assert.equal(permits.length,1,'a retry never mints a second permit');
   }));
 
 test('operator per-release record is bound once and stays BOUND if revoked; direct consumes OPEN',()=>

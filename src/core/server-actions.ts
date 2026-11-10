@@ -67,7 +67,14 @@ export class ServerActions {
       p.workId===input.workId && p.action==='deploy.commit' &&
       p.args.sha===input.args.sha && p.state==='ISSUED' &&
       p.issuedBy===actor && Date.parse(p.expiresAt)>Date.now());
-    if(issued && this.ledger!.authorized(input.args.sha,issued.permitId,issued.authorizationId))
+    // Only a permit still fenced to the work's present claim is handed back.
+    // Claim transitions already revoke issued permits; one found on another
+    // claim is revoked here and the grant starts over.
+    const sameClaim = issued && (work.state==='RUNNING'
+      ? issued.attemptId===work.attemptId && issued.leaseGeneration===work.leaseGeneration
+      : issued.attemptId===null && issued.leaseGeneration===null);
+    if(issued && !sameClaim) await this.mesh.serverRevoke(actor as Host,issued.permitId);
+    else if(issued && this.ledger!.authorized(input.args.sha,issued.permitId,issued.authorizationId))
       return issued;
     check(this.ledger!.directAuthorized(input.args.sha),'NOT_AUTHORIZED');
     const permitId=randomUUID();

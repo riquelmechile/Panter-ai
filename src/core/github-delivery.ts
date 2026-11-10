@@ -20,7 +20,7 @@ export type IndependentReviewEvidence = {
   login: string;
   state: 'APPROVED_EXACT_SHA' | 'MISSING' | 'STALE_SHA' | 'CHANGES_REQUESTED' | 'DISMISSED' | 'REVIEWER_IS_AUTHOR' | 'UNAVAILABLE';
   reviewId?: number; commitId?: string;
-  unavailableReason?: 'COMMIT_HISTORY_UNREADABLE' | 'REVIEWS_UNREADABLE_OR_OVER_LIMIT';
+  unavailableReason?: 'COMMIT_HISTORY_UNREADABLE' | 'COMMIT_AUTHORSHIP_UNREADABLE' | 'REVIEWS_UNREADABLE_OR_OVER_LIMIT';
 };
 export type GitHubDecision = {
   state: 'BLOCKED' | 'PENDING' | 'REVIEWABLE';
@@ -67,9 +67,17 @@ export async function githubApiGet(fetcher:typeof fetch,repository:string,endpoi
   return JSON.parse(raw);
 }
 /** Same latest-decisive review for delivery and deployment. */
-export function independentReviewDecision(login:string,head:string,prData:any,commits:any[]|null,reviews:any[],requireSubmissionTime=false):IndependentReviewEvidence{
+/** `strict` (deployment): besides submission times, every author must be
+ * identifiable. A PR without an author login, or a commit whose author or
+ * committer GitHub cannot name, proves nothing about independence. */
+export function independentReviewDecision(login:string,head:string,prData:any,commits:any[]|null,reviews:any[],strict=false):IndependentReviewEvidence{
+  const requireSubmissionTime=strict;
   const account=login.toLowerCase();
   if(!commits)return {login:account,state:'UNAVAILABLE',unavailableReason:'COMMIT_HISTORY_UNREADABLE'};
+  const named=(who:unknown)=>typeof who==='string'&&who.length>0;
+  if(strict&&(!named(prData?.user?.login)||commits.length<1||
+    !commits.every(c=>named(c?.author?.login)&&named(c?.committer?.login))))
+    return {login:account,state:'UNAVAILABLE',unavailableReason:'COMMIT_AUTHORSHIP_UNREADABLE'};
   const authors=new Set<string>();
   const author=String(prData?.user?.login??'').toLowerCase();
   if(author)authors.add(author);
@@ -232,6 +240,8 @@ export class GitHubDeliveryGate {
           REVIEWER_IS_AUTHOR:`Independent reviewer ${evidence.login} authored this PR or one of its commits; review is not independent`,
           UNAVAILABLE:evidence.unavailableReason==='COMMIT_HISTORY_UNREADABLE'
             ? 'Independent reviewer evidence unavailable: commit history unreadable; authorship cannot be verified'
+            : evidence.unavailableReason==='COMMIT_AUTHORSHIP_UNREADABLE'
+              ? 'Independent reviewer evidence unavailable: a commit has no identifiable author'
             : evidence.unavailableReason==='REVIEWS_UNREADABLE_OR_OVER_LIMIT'
               ? `Independent reviewer evidence unavailable: review list unreadable or reached the ${MAX_REVIEW_PAGES}-page safety limit`
               : 'Independent reviewer evidence unavailable',
