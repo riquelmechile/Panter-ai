@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, readlinkSync, readdirSync, symlinkSync, lstatSync, rmSync } from 'node:fs';
+import { closeSync, existsSync, mkdtempSync, openSync, mkdirSync, writeFileSync, chmodSync, readFileSync, readlinkSync, readdirSync, symlinkSync, lstatSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -14,7 +14,7 @@ const answer = (revision: string) =>
   '#!/bin/sh\nprintf \'%s\\n\' \'{"status":"ok","revision":"' + revision + '"}\'\n';
 const marker = '#!/bin/sh\ntouch "$PANTER_BASE/deployed"\n';
 
-function fixture(body = '#!/bin/sh\necho deployed\n', health = sha, o: { curl?: string; dir?: string; actions?: boolean } = {}) {
+function fixture(body = '#!/bin/sh\necho deployed\n', health = sha, o: { curl?: string; dir?: string; actions?: boolean; sleep?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'panter-action-wrapper-'));
   const base = o.dir ? join(root, o.dir) : root;
   const actions = join(base, 'etc', 'actions');
@@ -31,12 +31,13 @@ function fixture(body = '#!/bin/sh\necho deployed\n', health = sha, o: { curl?: 
   chmodSync(curl, 0o700);
   // The wrapper waits between health probes; tests do not.
   const sleep = join(bin, 'sleep');
-  writeFileSync(sleep, '#!/bin/sh\necho x >> "$PANTER_BASE/slept"\n');
+  writeFileSync(sleep, o.sleep ?? '#!/bin/sh\necho x >> "$PANTER_BASE/slept"\n');
   chmodSync(sleep, 0o700);
   return {
     base, actions,
-    run: (args: string[] = ['deploy.commit', id, sha]) => spawnSync('bash', [wrapper, ...args], {
+    run: (args: string[] = ['deploy.commit', id, sha], stderr: 'pipe' | number = 'pipe') => spawnSync('bash', [wrapper, ...args], {
       encoding: 'utf8', env: { ...process.env, PANTER_BASE: base, PATH: bin + ':' + process.env.PATH },
+      stdio: ['ignore', 'pipe', stderr],
     }),
     record: () => JSON.parse(readFileSync(join(actions, id + '.json'), 'utf8')) as Record<string, unknown>,
     deployed: () => existsSync(join(base, 'deployed')),
@@ -225,6 +226,34 @@ test('a final record that cannot be written never replaces the exit status of de
     assert.deepEqual(readdirSync(blocked.actions).sort(), [id + '.fence', id + '.json', id + '.log'],
       'no temporary file is left behind');
   } finally { blocked.cleanup(); }
+});
+
+test('nothing after the deploy can replace its exit status: not a full stderr, not a broken sleep', () => {
+  // The final record cannot be written and neither can the diagnostic about it.
+  const mute = fixture('#!/bin/sh\nmv "$PANTER_BASE/etc/actions" "$PANTER_BASE/etc/moved"\n' +
+    'echo "deploy: another deploy is running"\nexit 2\n');
+  const full = openSync('/dev/full', 'w');
+  try {
+    assert.equal(mute.run(undefined, full).status, 2);
+    const last = JSON.parse(readFileSync(join(mute.base, 'etc', 'moved', id + '.json'), 'utf8')) as Record<string, unknown>;
+    assert.equal(last.state, 'RUNNING');
+  } finally { closeSync(full); mute.cleanup(); }
+  // Waiting between probes fails: the probes still happen and the record is still written.
+  const flaky = '#!/bin/sh\nn=$(cat "$PANTER_BASE/probes" 2>/dev/null || echo 0)\nn=$((n+1))\n' +
+    'echo "$n" > "$PANTER_BASE/probes"\n[ "$n" -le 2 ] && exit 7\n' + answer(sha).split('\n').slice(1).join('\n');
+  const restless = fixture(undefined, sha, { curl: flaky, sleep: '#!/bin/sh\nexit 1\n' });
+  try {
+    assert.equal(restless.run().status, 0);
+    assert.equal(restless.record().state, 'LIVE');
+    assert.equal(restless.record().exitCode, 0);
+  } finally { restless.cleanup(); }
+  // A deploy that failed keeps its own status even when everything afterwards works.
+  const failed = fixture('#!/bin/sh\nexit 37\n', 'b'.repeat(40));
+  try {
+    assert.equal(failed.run().status, 37);
+    assert.equal(failed.record().exitCode, 37);
+    assert.equal(failed.record().state, 'FAILED');
+  } finally { failed.cleanup(); }
 });
 
 test('success exit but unexpected /health revision must fail closed', () => {
