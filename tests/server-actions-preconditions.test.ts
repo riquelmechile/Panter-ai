@@ -64,6 +64,7 @@ const config=(extra:Record<string,string|undefined>={})=>({
   PANTER_GITHUB_INDEPENDENT_REVIEWER:'review-account',
   PANTER_SERVER_DEPLOY_SOURCE:'<test-clone>',
   PANTER_SERVER_DEPLOY_STANDING_AUTHORIZATION:'1',
+  PANTER_SERVER_DEPLOY_DRY_RUN:'1', // this file covers authority and gates; launching is tests/server-actions-integration.test.ts
   ...extra
 });
 const profile={host:'grok' as const,actorId:'fake-grok',
@@ -341,7 +342,7 @@ test('two overlapping reservations: one RESERVED, one BUSY and its SPENT permit 
   let waitCount=0;
   const opts=config();
   const server=new ServerActions(mesh,dir,opts,githubFake(),async()=>({revision:earlier,maintenance:false}),
-    async()=>{if(waitCount++===0){entered();await suspended;}});
+    {afterReserved:async()=>{if(waitCount++===0){entered();await suspended;}}});
   try {
     const w1=await delegate(mesh),w2=await delegate(mesh);
     const p1=await server.grant('gpt-a',{workId:w1.id,action:'deploy.commit',args:{sha}});

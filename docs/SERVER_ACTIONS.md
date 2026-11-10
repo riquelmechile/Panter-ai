@@ -190,6 +190,21 @@ In `panter.env`, all optional:
 - `PANTER_SERVER_DEPLOY_REPOSITORY=<owner>/<repo>`: the repository whose default branch is deployed.
 - `PANTER_SERVER_DEPLOY_SOURCE=<path to the clone>`: what `deploy.sh` needs as `PANTER_SOURCE_REPO`.
 - `PANTER_SERVER_DEPLOY_CHECKS=test,arm64-image`.
+- `PANTER_SERVER_DEPLOY_DRY_RUN=1`: every precondition is checked, the permit is spent and the action is reserved, and then nothing is launched (the action ends as `DRY_RUN` and the slot is freed). For checking a server's configuration before its first real action. Unset: actions are launched.
+
+`deploy.sh` reads `PANTER_UNIT`, `PANTER_HEALTH_URL` and `PANTER_KEEP_RELEASES` from its environment. A transient unit does not inherit Panter's, so Panter passes exactly those three when they are set in `panter.env`, together with `PANTER_SOURCE_REPO`, `PANTER_BASE` and a `PATH`. Nothing else of Panter's environment reaches the unit.
+
+## What is implemented
+
+Everything in this document except Phase 3, which is not code: enabling it on a server.
+
+- **Disabled by default.** Without `PANTER_SERVER_ACTIONS` the five tools answer `SERVER_ACTIONS_DISABLED` and Panter creates no directory, table or timer.
+- **Launch.** After `RESERVED`, `panter_server_action` launches the unit and answers `LAUNCHED`, `START_FAILED` or `DEFERRED` (the launch could not be confirmed; the reconciler decides) with the `actionId`. Before spending anything it checks that `etc/actions` exists as a private directory (it creates it, mode 0700) and that the live release has `deploy/run-action.sh`; if not, it refuses with `SERVER_ACTIONS_UNAVAILABLE` and the permit stays `ISSUED`.
+- **Reconciler.** Started when Panter starts and woken after every launch; one pass every 30 seconds while an action is open or a receipt is unsent. A deployment restarts Panter while its unit is still running, so it is the new process that reads the wrapper's record, writes the final state and frees the slot.
+- **`RUNNING`** is recorded when a pass sees the fence at `run` inside a live unit. A deployment that finishes between two passes goes from `LAUNCHED` straight to its final state.
+- **Receipts.** One inbox message for the leader and one for the worker that used the permit (a direct leader action only tells the leader), with the action, the commit, the final state, the exit code, the revision `/health` reported and the SHA-256 of the log. Each message's id derives from the action and the recipient, so a retry after a crash adds nothing.
+- **Status.** `panter_server_status` shows each action's state, transitions, exit code, revision and log digest, and the redacted last 50 lines of the log for the action asked for (or the latest), to the leader, the operator and the worker that ran it.
+- **Storage.** Actions live in the `server_actions` ledger of `panter.sqlite`; the runner advances them through one `BEGIN IMMEDIATE` transaction per step, and the final state and the release of the slot are the same transaction. Records written by a dry run are kept and are invisible to the runner.
 
 ## What this does not do
 
@@ -210,6 +225,7 @@ Each one is its own pull request with its own preconditions, authorization rule 
 | 0 | This design |
 | 1 | Authority and checks: permits inside the mesh document with binding and revocation in every claim transition, the `server-actions` ledger (operator authorizations with their state table, actions with the unique slot), the reserve order across the two, the five tools, the `server` field on `panter_mesh_delegate`, the preconditions against GitHub with the truth tables above (including an older success behind a newer pending run), the `AGENTS.md` sentence. `deploy.commit` stops after `RESERVED` in **dry-run**: it answers what it would launch and frees the slot. Tests with a fake GitHub API covering every row of the tables |
 | 2 | Execution: `deploy/run-action.sh`, the `systemd-run` launch, the records, recovery with every row of its table and every `ActiveState`, `STOPPING`, the fence with every row of the table (including deterministic tests of a launcher frozen after marking, a `systemd-run` killed after sending its request, a unit that systemd starts late after `ABANDONED`, a Panter that dies between creating `closed` and recording `ABANDONED` or `START_FAILED`, recovered by a restarted or second process, and a wrapper that starts, or starts and finishes, between two readings of one pass: the order of observation must never produce `UNKNOWN` for a deploy that is running or that left a final record), receipts; tests with a fake `systemd-run`, a fake `systemctl` and a fake `deploy.sh` |
+| Integration | The SQLite store for the runner, the launch from `panter_server_action`, the reconciler at startup, receipts, status with the log tail, provisioning of `etc/actions` and the explicit dry run. Still disabled by default |
 | 3 | On the operator's server, with explicit authorization: enable `deploy.commit`, then the leader delegates the next release's deploy to a worker with a permit, and the result is checked against `/health` |
 
 Phases 1 and 2 share only this document and the record format in `etc/actions/`. Every phase is a pull request with CI green, Codex, an independent review on the exact head commit by the reviewer account, and a squash merge by the leader.

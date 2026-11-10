@@ -109,6 +109,9 @@ const store = await PanterStore.open(dataDir);
 const agents = await AgentEngine.open(dataDir, store);
 const mesh = await MeshEngine.open(dataDir);
 const serverActions = new ServerActions(mesh, dataDir);
+// A deployment restarts this process while its unit is still running: on the way back up, settle whatever a
+// previous process left open and send its receipts. Does nothing unless the operator enabled server actions.
+void serverActions.start();
 if (mesh.leaderSwitch) console.error(`Panter leader switch ${mesh.leaderSwitch.from} -> ${mesh.leaderSwitch.to}`);
 for (const line of await adoptPendingLeaderPhases(mesh, agents)) console.error(line);
 const workforceLongPoll = new WorkforceLongPoll(mesh);
@@ -620,14 +623,14 @@ const handler = createMcpHandler(reqCtx => {
     inputSchema:z.object({permitId:z.uuid()}).strict()
   },async x=>execute(async()=>serverActions.revoke(principal(),x.permitId)));
   server.registerTool('panter_server_action',{
-    description:'Worker with a live fenced permit, or leader with operator authorization: verify deploy.commit and record RESERVED dry-run without executing anything.',
+    description:'Worker with a live fenced permit, or leader with operator authorization: verify every precondition of deploy.commit, reserve the single action slot and launch the fixed deploy unit for that commit. The deployment restarts Panter, so this connection drops: read the outcome with panter_server_status and the returned actionId. With the operator\'s dry-run setting it stops after RESERVED and launches nothing.',
     inputSchema:z.object({action:z.literal('deploy.commit'),
       args:z.object({sha:z.string().regex(/^[a-f0-9]{40}$/)}).strict(),
       permitId:z.uuid().optional(),workId:z.uuid().optional(),
       attemptId:z.uuid().optional(),leaseGeneration:z.number().int().positive().optional()}).strict()
   },async x=>execute(async()=>serverActions.action(principal(),x)));
   server.registerTool('panter_server_status',{
-    description:'Leader and operator see actions and grants; worker only its own. Reports PERMIT_LOST when mesh has SPENT without action.',
+    description:'Leader and operator see actions and grants; worker only its own. Per action: state, transitions, exit code, the revision /health reported and the log digest; the redacted last lines of the log for the action asked for (or the latest). Reports PERMIT_LOST when mesh has SPENT without action.',
     inputSchema:z.object({actionId:z.uuid().optional()}).strict(),
     annotations:{readOnlyHint:true}
   },async x=>execute(async()=>serverActions.status(principal(),x.actionId)));

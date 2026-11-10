@@ -68,6 +68,22 @@ rm ~/panter-ai/etc/maintenance
 
 Las acciones de servidor (`docs/SERVER_ACTIONS.md`) guardan su autoridad en ese mismo `panter.sqlite`: el ledger `server_actions` (autorizaciones del operador y acciones) y la tabla `server_action_slots` (el cupo único). Por eso un backup contiene siempre los permisos del mesh y esa autoridad en la misma instantánea, la prueba de restauración compara también la tabla de cupos (`serverActionSlots` en el manifest) y restaurar no necesita pasos extra. Los archivos de `etc/actions/` (cercas, registros y logs de cada acción) no van en el backup: quedan en su lugar y nunca se borran.
 
+### Habilitar acciones de servidor (apagado por defecto)
+
+Con esto un trabajador, con un permiso de un solo uso que le entrega el líder, puede pedirle a Panter que ejecute `deploy/deploy.sh <sha>` por él. Panter no le da una shell ni otro comando: verifica el commit y lanza ese script, sin cambios, en una unidad transitoria de systemd. El diseño completo está en `docs/SERVER_ACTIONS.md`. Nada de esto ocurre mientras `PANTER_SERVER_ACTIONS` no esté definido.
+
+1. **La release activa tiene que traer `deploy/run-action.sh`.** La unidad ejecuta el wrapper desde `current`, así que la primera release que lo contiene se despliega a mano, como siempre (`deploy/deploy.sh <sha>`). Si falta, Panter rechaza la acción con `SERVER_ACTIONS_UNAVAILABLE` antes de gastar el permiso.
+2. **Variables en `panter.env`** (ver `deploy/panter.env.example`): `PANTER_SERVER_ACTIONS=deploy.commit`, `PANTER_SERVER_DEPLOY_REPOSITORY`, `PANTER_SERVER_DEPLOY_SOURCE` (el clon que usa `deploy.sh`), `PANTER_SERVER_DEPLOY_CHECKS` y `PANTER_GITHUB_INDEPENDENT_REVIEWER`. Si `deploy.sh` necesita `PANTER_UNIT`, `PANTER_HEALTH_URL` o `PANTER_KEEP_RELEASES`, defínalas ahí también: Panter le pasa a la unidad solo esas tres, además de `PANTER_SOURCE_REPO`, `PANTER_BASE` y el `PATH`.
+3. **Autorización del operador.** Por release, con `panter_server_authorize` desde el principal operador, o permanente con `PANTER_SERVER_DEPLOY_STANDING_AUTHORIZATION=1`. Habilitar las acciones no autoriza ningún despliegue por sí solo.
+4. **Probar primero en seco.** Con `PANTER_SERVER_DEPLOY_DRY_RUN=1` Panter recorre todas las verificaciones, gasta el permiso, reserva la acción y termina en `DRY_RUN` sin lanzar nada. Sirve para confirmar la configuración (repositorio, checks, cuenta revisora) con un commit real. Quite la variable para que las acciones se ejecuten.
+5. Reinicie Panter. Al arrancar crea `etc/actions` (modo 0700) si no existe.
+
+Cada acción deja en `etc/actions/` tres archivos con su id: la cerca (`.fence`), el registro que escribe el wrapper (`.json`) y la salida de `deploy.sh` (`.log`). El estado, quién la pidió y con qué permiso, cada verificación y el resultado se ven con `panter_server_status`; al terminar, el líder y el trabajador reciben un mensaje en su inbox.
+
+Como el despliegue reinicia Panter, quien pidió la acción pierde la conexión a mitad de camino. Es lo esperado: la unidad sigue corriendo, y el Panter que vuelve a arrancar lee el registro del wrapper, cierra la acción y envía los avisos.
+
+**Si una acción termina en `UNKNOWN`** Panter no pudo explicar lo que encontró (por ejemplo, la unidad terminó sin dejar un registro final, o el registro no calza con la acción). No reintenta nada. Mire `/health` para saber qué commit está activo, lea `etc/actions/<id>.log` y `journalctl --user -u panter-action-<id>`, y decida a mano. El cupo queda libre: la siguiente acción no está bloqueada. `ABANDONED` y `START_FAILED` significan que el despliegue nunca empezó (la cerca quedó en `closed`).
+
 ## Healthcheck
 
 `panter-healthcheck.timer` corre `deploy/healthcheck.sh` cada 5 minutos. Con dos fallos seguidos de `/health`, reinicia `panter-ai.service`. Mientras exista `etc/maintenance` no hace nada; tampoco mientras exista `etc/quiesce` (lo crean el deploy y el backup diario mientras detienen el servicio; si tiene más de 30 minutos se ignora). Si `etc/ops.env` define `PANTER_ALERT_WEBHOOK`, avisa ahí en cada fallo; el JSON incluye `text` y `content`, así que sirve para webhooks de Slack o Discord.

@@ -1,5 +1,6 @@
-/** Phase 1 server-action authority: its own ledger document (`server_actions`) and slot table, in the same
- * SQLite file as the mesh, with a database-enforced partial unique slot. No execution, launch or recovery here. */
+/** Server-action authority and the durable record of every action: its own ledger document (`server_actions`)
+ * and slot table, in the same SQLite file as the mesh, with a database-enforced partial unique slot. The runner
+ * (server-action-runner.ts) reads and advances actions only through `runnerStore()`. */
 import { randomUUID } from 'node:crypto';
 import { SqliteLedger } from './sqlite-ledger.js';
 import type { ServerAction, ServerActionStore, ServerActionState } from './server-action-runner.js';
@@ -122,28 +123,36 @@ export class ServerActionsLedger {
       return row;
     }, {actionId, operation: 'release'}).result;
   }
-  /** Runner adapter: one SQLite IMMEDIATE transaction for state and terminal slot. */
+  /** Runner adapter: one SQLite IMMEDIATE transaction for state and terminal slot.
+   * A dry run never had a unit, a wrapper or a fence: the runner does not see it. */
   runnerStore(): ServerActionStore {
-    const terminal = new Set(['LIVE','ROLLED_BACK','BUILD_FAILED','FAILED','LOCKED','START_FAILED','ABANDONED','UNKNOWN','DRY_RUN']);
+    const terminal = new Set(['LIVE','ROLLED_BACK','BUILD_FAILED','FAILED','LOCKED','START_FAILED','ABANDONED','UNKNOWN']);
+    const view = (a: ActionRecord): ServerAction =>
+      ({ ...structuredClone(a), sha: a.sha ?? a.args.sha, reservedAt: a.reservedAt ?? a.createdAt }) as ServerAction;
+    const mine = (a: ActionRecord | undefined): a is ActionRecord => Boolean(a) && a!.state !== 'DRY_RUN';
     return {
       read: async id => {
         const a = this.db.read('server_actions', seed).actions.find(x => x.actionId === id);
-        return a ? { ...structuredClone(a), sha: a.sha ?? a.args.sha, reservedAt: a.reservedAt ?? a.createdAt } as ServerAction : undefined;
+        return mine(a) ? view(a) : undefined;
       },
-      list: async () => this.db.read('server_actions', seed).actions.map(a =>
-        ({ ...structuredClone(a), sha: a.sha ?? a.args.sha, reservedAt: a.reservedAt ?? a.createdAt }) as ServerAction),
+      list: async () => this.db.read('server_actions', seed).actions.filter(mine).map(view),
       transact: async <T>(id: string, update: (current: ServerAction | undefined) =>
         { next: ServerAction; result: T } | undefined): Promise<T | undefined> => {
         const result = this.db.mutate('server_actions', seed, d => {
           const index = d.actions.findIndex(a => a.actionId === id);
           const row = index < 0 ? undefined : d.actions[index];
-          const current = row ? { ...structuredClone(row), sha: row.sha ?? row.args.sha, reservedAt: row.reservedAt ?? row.createdAt } as ServerAction : undefined;
+          const current = mine(row) ? view(row) : undefined;
           const changed = update(current);
           if (!changed) return { changed: false as const, releaseSlot: false };
-          assert(index >= 0, 'ACTION_NOT_FOUND');
-          assert(changed.next.actionId === id && changed.next.sha === current?.sha, 'ACTION_IDENTITY_CHANGED');
-          const releaseSlot = !terminal.has(current!.state) && terminal.has(changed.next.state);
-          d.actions[index] = { ...changed.next, completedAt: releaseSlot ? new Date().toISOString() : row!.completedAt } as ActionRecord;
+          assert(current && row, 'ACTION_NOT_FOUND');
+          assert(changed.next.actionId === id && changed.next.sha === current.sha, 'ACTION_IDENTITY_CHANGED');
+          // The authority record is not the runner's to rewrite.
+          for (const key of ['action','args','host','workId','attemptId','leaseGeneration','permitId','issuedBy',
+            'authorizationId','authorization','createdAt','checks'] as const)
+            assert(JSON.stringify((changed.next as Record<string, unknown>)[key]) === JSON.stringify(row[key]), 'ACTION_IDENTITY_CHANGED');
+          assert(!terminal.has(current.state) || changed.next.state === current.state, 'ACTION_ALREADY_TERMINAL');
+          const releaseSlot = !terminal.has(current.state) && terminal.has(changed.next.state);
+          d.actions[index] = { ...changed.next, completedAt: releaseSlot ? now() : row.completedAt } as ActionRecord;
           return { changed: true as const, releaseSlot, value: changed.result };
         }, { actionId: id, operation: 'release_if_terminal' });
         return result.result.changed ? result.result.value : undefined;
