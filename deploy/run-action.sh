@@ -49,7 +49,10 @@ atomic_record RUNNING '' ''
 set +e
 "$BASE/current/deploy/deploy.sh" "$SHA" >"$LOG" 2>&1
 EXIT_CODE=$?
-set -e
+# From here on the exit status is always deploy.sh's, whatever else fails
+# (a probe, the final record, even writing a diagnostic): errexit stays off
+# and every way out goes through this trap.
+trap 'exit "$EXIT_CODE"' EXIT
 
 HEALTH=${PANTER_HEALTH_URL:-http://127.0.0.1:18080/health}
 revision() {
@@ -81,9 +84,9 @@ elif grep -Fq 'deploy: build or tests failed' "$LOG"; then
 elif grep -Eq 'deploy: rolled back to .* which is healthy' "$LOG"; then
   STATE=ROLLED_BACK
 fi
-# The exit status is always deploy.sh's. If the final record cannot be written
-# the RUNNING one stays, and Panter settles the action as UNKNOWN once the
-# unit is gone: it never reads a state nobody recorded.
+# If the final record cannot be written the RUNNING one stays, and Panter
+# settles the action as UNKNOWN once the unit is gone: it never reads a state
+# nobody recorded.
 atomic_record "$STATE" "$EXIT_CODE" "$REVISION" ||
   echo "run-action: could not persist the final record ($STATE)" >&2
 exit "$EXIT_CODE"
