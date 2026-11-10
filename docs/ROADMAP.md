@@ -6,6 +6,13 @@ Some early items were superseded later: the leader is configurable since v0.16 (
 
 # Panter-ai roadmap
 
+## v1.6 server actions
+
+- [x] Phase 2 implementation in code only: atomic deploy fence and records, transient systemd launch, recovery table, STOPPING, log redaction and terminal receipt adapter; fake-systemd tests.
+- [ ] Integrate Phase 1's SQLite `server-actions` transaction store and inbox `notify` with this Phase 2 runner; keep all tools disabled until operator opt-in.
+- [ ] Phase 3: operator-authorized server validation after CI and independent review; no production deployment in Phase 2.
+
+
 ## Foundation (v0.1)
 - [x] Stateless remote MCP transport with host-managed inference.
 - [x] Explicit host request contract and evidence boundaries.

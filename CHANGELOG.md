@@ -2,6 +2,13 @@
 
 All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://semver.org/). Releases before 1.0 are described in [docs/HISTORY.md](docs/HISTORY.md).
 
+## Unreleased
+
+### Server actions: Phase 2 (not enabled)
+- A single-use `deploy.commit` wrapper fences before any deploy effect, durably records RUNNING and final outcomes, and keeps logs under `etc/actions/`.
+- A transient systemd user-unit launcher and 30-second reconciler implement every recovery row, a 50-minute stop threshold, terminal receipts and redacted log tails.
+- Phase 1 provides the `server-actions` transactional store, its authority, authorization, checks and MCP tools. This implementation is not wired to `src/server.ts` or enabled on a server.
+
 ## 1.5.1 (2026-11-09)
 
 ### Fixed
