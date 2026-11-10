@@ -10,7 +10,7 @@ Some early items were superseded later: the leader is configurable since v0.16 (
 
 - [x] Phase 1: separate operator authorization, permits fenced to claims, exclusive reservation and GitHub checks; `deploy.commit` ends in a dry run after RESERVED, with no effect on the server.
 - [x] Phase 2 implementation in code only: atomic deploy fence and records, transient systemd launch, recovery table, STOPPING, log redaction and terminal receipt adapter; fake-systemd tests.
-- [ ] Integrate Phase 1's SQLite `server-actions` transaction store and inbox `notify` with the Phase 2 runner; keep all tools disabled until operator opt-in.
+- [x] Integration: SQLite store for the runner, launch from `panter_server_action`, reconciler at startup, deduplicated inbox receipts, status with the redacted log tail, explicit dry run; all of it disabled until the operator opts in.
 - [ ] Phase 3: operator-authorized server validation after CI and independent review; no production deployment before that.
 
 

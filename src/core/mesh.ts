@@ -1240,6 +1240,29 @@ export class MeshEngine {
       return msg;
     });
   }
+  /** The terminal receipt of a server action, written by the server itself: once to the leader and once to the
+   * worker that ran it (a direct leader action only reaches the leader). The message id derives from the receipt
+   * and the recipient, so repeating the call after a crash adds nothing. Returns how many messages were new. */
+  async serverReceipt(input: { receiptId: string; host: Host; workId: string | null; text: string }) {
+    check(/^[0-9a-f-]{36}$/.test(input.receiptId) && isHost(input.host), 'Invalid server receipt');
+    check(input.text.length > 0 && input.text.length <= 10000, 'Invalid server receipt');
+    return this.write(d => {
+      const lead = leaderHost();
+      const w = input.workId ? d.works.find(x => x.id === input.workId) : undefined;
+      const missionId = w?.missionId ?? 'server-actions';
+      const recipients: Host[] = input.host === lead ? [lead] : [lead, input.host];
+      let added = 0;
+      for (const to of recipients) {
+        const id = 'server-action:' + input.receiptId + ':' + to;
+        if (d.messages.some(m => m.id === id)) continue;
+        const revision = this.notify(d, to);
+        d.messages.push({ id, missionId, from: to === lead ? input.host : lead, to, workId: w?.id ?? null,
+          kind: 'UPDATE', text: input.text, createdAt: iso(), inboxRevision: revision });
+        added++;
+      }
+      return added;
+    });
+  }
   inbox(caller: Host, sinceRevision = 0) {
     check(Number.isSafeInteger(sinceRevision) && sinceRevision >= 0, 'Invalid revision cursor');
     return this.read(d => ({

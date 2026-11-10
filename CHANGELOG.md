@@ -4,16 +4,14 @@ All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://
 
 ## Unreleased
 
-### Server actions, Phase 1 (opt-in; dry-run only)
-- Operator standing/per-release deployment authorization, claim-fenced one-use permits in the mesh, and an action ledger in the same SQLite file as the mesh, with a unique nonterminal slot (included in backups).
-- Ordered verification of main ancestry, exactly one merged pull request, latest required check runs, final-head independent approval and local health/maintenance state before marking a permit SPENT and an action RESERVED. A pull request whose commit history cannot be read completely (GitHub lists at most 250 commits) is refused.
-- A claim whose lease lapsed loses its permits on a late renewal.
-- Five server-action tools (also available via the admin router), including a worker-only listed action. No systemd-run, wrapper, recovery, deployments or changes to deploy.sh.
-
-### Server actions: Phase 2 (not enabled)
-- A single-use `deploy.commit` wrapper fences before any deploy effect, durably records RUNNING and final outcomes, and keeps logs under `etc/actions/`.
-- A transient systemd user-unit launcher and 30-second reconciler implement every recovery row, a 50-minute stop threshold, terminal receipts and redacted log tails.
-- The runner is not wired to `src/server.ts` yet: `deploy.commit` still ends in a dry run after `RESERVED`. Wiring it to the Phase 1 ledger and tools is the next step.
+### Added
+- **Server actions** (disabled unless `PANTER_SERVER_ACTIONS` is set; see `docs/SERVER_ACTIONS.md` and `docs/OPERATIONS.md`). The leader can hand a worker a single-use permit to deploy one exact commit. Panter gives no shell: it checks that the commit is on `main`, merged through one pull request, green on the required checks and approved on its final head by the independent reviewer, and then runs the unchanged `deploy/deploy.sh` for it in a transient systemd unit.
+  - The operator authorizes deployments separately, per release (`panter_server_authorize`) or with a standing setting. Enabling the feature authorizes nothing.
+  - A permit is fenced to one claim of one work: it is revoked when that claim ends, is released, lapses or is taken over, and it is spent before anything runs. Only one action can be open on the server.
+  - `deploy/run-action.sh` takes a fence before any effect, records the start and the outcome, and always exits with `deploy.sh`'s status. A reconciler settles every action from the fence, the unit and that record, also after the restart the deployment itself causes, and never leaves the slot taken once the unit is gone.
+  - When an action ends, the leader and the worker each get one inbox message. `panter_server_status` shows the state, every precondition, the exit code, the revision `/health` reported and the redacted last lines of the log.
+  - `PANTER_SERVER_DEPLOY_DRY_RUN=1` checks everything and launches nothing, to validate a server's configuration first.
+  - Five tools, reached through the `panter_admin` router; workers get `panter_server_action` listed.
 
 ## 1.5.1 (2026-11-09)
 

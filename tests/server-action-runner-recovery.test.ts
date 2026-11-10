@@ -165,7 +165,8 @@ for (const active of ['activating', 'active', 'reloading', 'deactivating', 'inac
       f.record('final');
       f.unit('LoadState=loaded\nActiveState=' + active + '\n');
       await reconcileServerAction(f.opts, id);
-      assert.equal(await f.state(), ['inactive', 'failed'].includes(active) ? 'LIVE' : 'RESERVED');
+      assert.equal(await f.state(), ['inactive', 'failed'].includes(active) ? 'LIVE' : 'RUNNING',
+        'a live unit that holds the fence is running, never terminal');
     } finally { f.cleanup(); }
   });
 }
@@ -312,7 +313,7 @@ test('crash before launch, after systemd acceptance and during deploy have disti
       }
       if (stage === 'during-deploy') { f.fence('run'); f.record('running'); }
       await reconcileServerAction(f.opts, id);
-      assert.equal(await f.state(), stage === 'before-run' ? 'ABANDONED' : 'LAUNCHED');
+      assert.equal(await f.state(), stage === 'before-run' ? 'ABANDONED' : stage === 'accepted' ? 'LAUNCHED' : 'RUNNING');
       if (stage !== 'before-run') {
         f.unit(gone);
         if (stage === 'accepted') f.fence('run');
@@ -372,8 +373,9 @@ test('wrapper starts between two readings and remains live: no UNKNOWN or ABANDO
       'printf "LoadState=loaded\\nActiveState=active\\n" > "' + f.paths.unitFile + '"',
     ].join('\n') + '\n');
     await reconcileServerAction(f.opts, id);
-    assert.equal(await f.state(), 'RESERVED');
+    assert.equal(await f.state(), 'RUNNING');
     assert.equal(readlinkSync(f.paths.fence), 'run');
+    assert.equal(f.receipts.length, 0);
     writeFileSync(done, 'go');
     for (let i = 0; i < 100 && !readFileSync(f.paths.record, 'utf8').includes('LIVE'); i++) {
       await new Promise((resolve) => setTimeout(resolve, 20));

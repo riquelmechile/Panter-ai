@@ -99,6 +99,9 @@ export interface RunnerOptions {
   notify: (receipt: ServerActionReceipt) => Promise<void> | void;
   now?: () => Date;
   env?: NodeJS.ProcessEnv; // Test harness PATH, never supplied by an action request.
+  /** Operator settings deploy.sh reads (unit name, health URL, releases kept): the only
+   * other variables the unit receives. Built from server configuration, never from a request. */
+  unitEnv?: Readonly<Record<string, string>>;
   launchTimeoutMs?: number; // Default is exactly 30 s.
 }
 type Fence = 'absent' | 'run' | 'closed' | 'odd';
@@ -113,6 +116,14 @@ const filePath = (o: RunnerOptions, id: string, suffix: string): string =>
 const unitName = (id: string): string => 'panter-action-' + id;
 const isMissing = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === 'ENOENT';
 const validId = (id: string): boolean => UUID.test(id);
+/** deploy.sh's optional settings and nothing else: Panter's own environment holds
+ * tokens that a deployment must never inherit. */
+export const SERVER_ACTION_UNIT_SETTINGS = ['PANTER_UNIT', 'PANTER_HEALTH_URL', 'PANTER_KEEP_RELEASES'] as const;
+export const validUnitSetting = (value: string): boolean => /^[\x21-\x7e]{1,300}$/.test(value);
+const unitSettings = (o: RunnerOptions): string[] => SERVER_ACTION_UNIT_SETTINGS.flatMap((name) => {
+  const value = o.unitEnv?.[name];
+  return value === undefined || value === '' ? [] : ['--setenv=' + name + '=' + value];
+});
 const unitPath = (o: RunnerOptions): string => [...new Set([
   ...((o.env ?? process.env).PATH ?? '').split(':'), dirname(process.execPath),
   '/usr/local/bin', '/usr/bin', '/bin',
@@ -265,7 +276,8 @@ async function finish(
 
 /** The only accepted input is an action already RESERVED by Phase 1. No authority checks here. */
 export async function launchServerAction(o: RunnerOptions, id: string): Promise<'SKIPPED' | 'LAUNCHED' | 'DEFERRED' | 'START_FAILED'> {
-  if (!validId(id) || !o.sourceRepo || !o.baseDir) throw new Error('INVALID_RUNNER_CONFIGURATION');
+  if (!validId(id) || !o.sourceRepo || !o.baseDir ||
+      !Object.values(o.unitEnv ?? {}).every(validUnitSetting)) throw new Error('INVALID_RUNNER_CONFIGURATION');
   const marked = await o.store.transact(id, (a) => {
     if (!a || a.state !== 'RESERVED' || a.launchStartedAt || !SHA.test(a.sha)) return undefined;
     return { next: { ...a, launchStartedAt: when(o) }, result: a.sha };
@@ -281,6 +293,7 @@ export async function launchServerAction(o: RunnerOptions, id: string): Promise<
       // and find the same node Panter runs on.
       '--setenv=PANTER_BASE=' + o.baseDir,
       '--setenv=PATH=' + unitPath(o),
+      ...unitSettings(o),
       join(o.baseDir, 'current', 'deploy', 'run-action.sh'),
       'deploy.commit', id, marked,
     ], { env: o.env ?? process.env, timeout: o.launchTimeoutMs ?? SERVER_ACTION_LAUNCH_TIMEOUT_MS,
@@ -320,6 +333,10 @@ export async function reconcileServerAction(o: RunnerOptions, id: string): Promi
           ? { next: transition(a, 'STOPPING', when(o)), result: true } : undefined);
         await execFile('systemctl', ['--user', 'stop', unitName(id)],
           { env: o.env ?? process.env, timeout: 10_000, maxBuffer: 4096 });
+      } else if (f === 'run') {
+        // The wrapper holds the fence inside a live unit: the deployment is under way.
+        await o.store.transact(id, (a) => a && (a.state === 'RESERVED' || a.state === 'LAUNCHED')
+          ? { next: transition(a, 'RUNNING', when(o)), result: true } : undefined);
       }
       return; // A terminal state is never written while the unit is live.
     }
