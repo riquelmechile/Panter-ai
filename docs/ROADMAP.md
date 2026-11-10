@@ -8,9 +8,11 @@ Some early items were superseded later: the leader is configurable since v0.16 (
 
 ## v1.6 server actions
 
-- [x] Fase 1: autorización separada del operador, permisos ligados a claims, reserva exclusiva y verificaciones de GitHub; `deploy.commit` termina en dry-run tras RESERVED, sin efectos sobre el servidor.
-- [ ] Fase 2 (otro host): transient systemd unit, wrapper, fencing, registros y recuperación completa.
-- [ ] Fase 3: habilitación en el servidor del operador solo con su autorización explícita.
+- [x] Phase 1: separate operator authorization, permits fenced to claims, exclusive reservation and GitHub checks; `deploy.commit` ends in a dry run after RESERVED, with no effect on the server.
+- [x] Phase 2 implementation in code only: atomic deploy fence and records, transient systemd launch, recovery table, STOPPING, log redaction and terminal receipt adapter; fake-systemd tests.
+- [ ] Integrate Phase 1's SQLite `server-actions` transaction store and inbox `notify` with the Phase 2 runner; keep all tools disabled until operator opt-in.
+- [ ] Phase 3: operator-authorized server validation after CI and independent review; no production deployment before that.
+
 
 ## Foundation (v0.1)
 - [x] Stateless remote MCP transport with host-managed inference.

@@ -10,6 +10,11 @@ All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://
 - A claim whose lease lapsed loses its permits on a late renewal.
 - Five server-action tools (also available via the admin router), including a worker-only listed action. No systemd-run, wrapper, recovery, deployments or changes to deploy.sh.
 
+### Server actions: Phase 2 (not enabled)
+- A single-use `deploy.commit` wrapper fences before any deploy effect, durably records RUNNING and final outcomes, and keeps logs under `etc/actions/`.
+- A transient systemd user-unit launcher and 30-second reconciler implement every recovery row, a 50-minute stop threshold, terminal receipts and redacted log tails.
+- The runner is not wired to `src/server.ts` yet: `deploy.commit` still ends in a dry run after `RESERVED`. Wiring it to the Phase 1 ledger and tools is the next step.
+
 ## 1.5.1 (2026-11-09)
 
 ### Fixed
