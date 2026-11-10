@@ -28,6 +28,18 @@ export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;ef
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
 export type WorkforceTaskBridge = {taskId:string;host:WorkerHost;protocolEra:'2025-11-25'|'2026-07-28';status:'ARMED'|'DELIVERED'|'CANCELLED'|'EXPIRED';createdAt:string;expiresAt:string;workId:string|null};
 export type WorkforceRearmIntent = {workId:string;host:WorkerHost;status:'PENDING'|'ACKED';createdAt:string;acknowledgedAt?:string};
+export type ServerPermit = {
+  permitId: string; missionId: string; workId: string; host: Host; attemptId: string | null;
+  leaseGeneration: number | null; action: 'deploy.commit'; args: { sha: string };
+  issuedBy: Host; issuedAt: string; expiresAt: string;
+  state: 'ISSUED' | 'SPENT' | 'REVOKED' | 'EXPIRED'; actionId: string | null;
+  authorizationId: string | null;
+};
+function revokeIssued(d: { serverPermits?: ServerPermit[] }, workId?: string, issuer?: Host) {
+  for (const p of d.serverPermits ?? [])
+    if (p.state === 'ISSUED' && (!workId || p.workId === workId) && (!issuer || p.issuedBy === issuer))
+      p.state = 'REVOKED';
+}
 export type GrokWakeAttempt = {workId:string;state:'RESERVED'|'SIGNAL_ACCEPTED'|'SIGNAL_FAILED';reservedAt:string;statusCode:number|null;claimedAt?:string;rings?:number};
 /** A ring that failed, or that Grok did not pick up within this long, no longer makes Grok busy and may be rung again
  * (at most GROK_MAX_RINGS times): a lost ring must never block Grok for every other work. */
@@ -41,7 +53,7 @@ export function leaseLive(w: Pick<MeshWork, 'role' | 'leaseUntil'>, now = Date.n
   return w.role !== 'implementer' || Date.parse(w.leaseUntil ?? '') > now;
 }
 export type ClaudeWakeAttempt = GrokWakeAttempt & {sessionId:string|null};
-type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; claudeWakeAttempts?: ClaudeWakeAttempt[]; leader?: Host; formerLeaders?: Host[]; pendingPhaseAdoption?: Host[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
+type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; claudeWakeAttempts?: ClaudeWakeAttempt[]; serverPermits?: ServerPermit[]; leader?: Host; formerLeaders?: Host[]; pendingPhaseAdoption?: Host[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
 const hosts = new Set<string>(HOSTS);
 const roles = new Set<MeshRole>(['orchestrator', 'explorer', 'architect', 'implementer', 'verifier', 'reviewer']);
 export function isHost(x: string): x is Host { return hosts.has(x); }
@@ -95,6 +107,7 @@ export class MeshEngine {
       const from = storedLeader(data);
       if (from !== lead) {
         const stamp = iso();
+        revokeIssued(data, undefined, from);
         // Work addressed to the new leader can never be claimed now: close it explicitly.
         for (const w of data.works) {
           if (w.target !== lead) continue;
@@ -161,6 +174,7 @@ export class MeshEngine {
       data.rearmIntents ??= [];
       data.grokWakeAttempts ??= [];
       data.claudeWakeAttempts ??= [];
+      data.serverPermits ??= [];
       // The leader profile is orchestrator-only with leader settings; workers keep worker settings only.
       for (const p of data.profiles) {
         if (p.host === lead) {
@@ -206,6 +220,7 @@ export class MeshEngine {
       check(reviewInterrupted(works), 'Review is not interrupted');
       let aborted = 0;
       for (const w of works) if (w.state === 'QUEUED') {
+        revokeIssued(d, w.id);
         w.state = 'ABORTED_NO_EFFECTS'; w.completedAt = iso(); w.result = 'Review interrupted by leader switch: sibling lens aborted without effects';
         this.notify(d, w.target); aborted++;
       }
@@ -892,10 +907,17 @@ export class MeshEngine {
       // A lost ACK after an uncertain write cannot authorize an automatic replay.
       if (expired && w.role === 'implementer') {
         w.state = 'OUTCOME_UNKNOWN';
+        revokeIssued(d, w.id);
         this.notify(d, leaderHost());
         return { ...w, instruction: '', result: null };
       }
       w.state = 'RUNNING'; w.leaseGeneration++; w.attemptId = randomUUID();
+      // Bind an unclaimed permit once. Earlier bound attempts never revive.
+      for (const p of d.serverPermits ?? []) if (p.workId === w.id && p.state === 'ISSUED') {
+        if (p.attemptId === null && p.leaseGeneration === null && Date.parse(p.expiresAt) > Date.now()) {
+          p.attemptId = w.attemptId; p.leaseGeneration = w.leaseGeneration;
+        } else p.state = p.attemptId === null ? 'EXPIRED' : 'REVOKED';
+      }
       if (transport) w.transportClaim = true; else delete w.transportClaim;
       // A transport claim (e.g. Panter mailing the task) is not evidence that the worker itself showed up.
       if (caller !== leaderHost() && !transport) {
@@ -960,7 +982,7 @@ export class MeshEngine {
     if ((await this.read(d => due(d).length)) === 0) return [];
     return this.write(d => {
       const ids: string[] = [];
-      for (const w of due(d)) { w.state = 'QUEUED'; w.attemptId = null; w.leaseUntil = null; delete w.transportClaim; ids.push(w.id); }
+      for (const w of due(d)) { w.state = 'QUEUED'; w.attemptId = null; w.leaseUntil = null; delete w.transportClaim; revokeIssued(d, w.id); ids.push(w.id); }
       if (ids.length) { this.notify(d, host); this.notify(d, leaderHost()); }
       return ids;
     });
@@ -974,6 +996,7 @@ export class MeshEngine {
       check(w && w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
       check(w.role !== 'implementer', 'Writer claims are never released automatically');
       w.state = 'QUEUED'; w.attemptId = null; w.leaseUntil = null; delete w.transportClaim;
+      revokeIssued(d, w.id);
       this.notify(d, caller);
       return {workId:w.id,state:w.state};
     });
@@ -986,6 +1009,10 @@ export class MeshEngine {
       check(leaseLive(w), 'Lease expired');
       check(!w.transportClaim, 'Work is held by a transport');
       check(leaseSeconds >= 30 && leaseSeconds <= 3600, 'Invalid lease');
+      // Read-only work may renew a lease that already ran out (leaseLive), keeping its attempt and generation. That
+      // keeps its result, never its server authority: a permit is usable only while the claim is live, so a claim
+      // that lapsed loses its permits here, in the same mutation, and needs a new grant from the leader.
+      if (!(Date.parse(w.leaseUntil ?? '') > Date.now())) revokeIssued(d, w.id);
       w.leaseUntil = new Date(Date.now() + leaseSeconds * 1000).toISOString();
       return w;
     });
@@ -1020,7 +1047,7 @@ export class MeshEngine {
       check(w.role !== 'implementer' || w.state === 'QUEUED', 'A started writer is never withdrawn automatically');
       check(w.state === 'QUEUED' || (w.state === 'RUNNING' && w.transportClaim === true), 'Work already started by its worker');
       w.state = 'ABORTED_NO_EFFECTS'; w.attemptId = null; w.leaseUntil = null; w.completedAt = iso();
-      w.result = `Withdrawn by ${leaderLabel()} before any worker started it: ${reason.slice(0, 300)}`; delete w.transportClaim; w.withdrawn = true;
+      w.result = `Withdrawn by ${leaderLabel()} before any worker started it: ${reason.slice(0, 300)}`; delete w.transportClaim; w.withdrawn = true; revokeIssued(d, w.id);
       this.notify(d, w.target); this.notify(d, leaderHost());
       return { workId: w.id, state: w.state, withdrawn: true };
     });
@@ -1041,6 +1068,7 @@ export class MeshEngine {
       // Withdrawn by the leader: the harness never sends this phase back to that host, even after a crash between
       // this write and its own.
       w.withdrawn = true;
+      revokeIssued(d, w.id);
       this.notify(d, w.target); this.notify(d, leaderHost());
       return { workId: w.id, state: w.state, abandoned: true };
     });
@@ -1061,7 +1089,7 @@ export class MeshEngine {
       check(leaseLive(w), 'Lease expired');
       this.contentGuard?.(w.missionId,[result],'This result');
       w.state = success ? 'COMPLETED' : 'FAILED'; w.result = result; w.receiptDigest = digest;
-      w.completedAt = iso(); w.leaseUntil = null; delete w.transportClaim; if (via) w.via = via;
+      w.completedAt = iso(); w.leaseUntil = null; delete w.transportClaim; revokeIssued(d, w.id); if (via) w.via = via;
       // A transport closing work it could not deliver is not a receipt from the worker.
       if (caller !== leaderHost() && !transport) {
         const presence = (d.workforce ??= {})[caller as WorkerHost] ??= {};
@@ -1077,6 +1105,67 @@ export class MeshEngine {
         resultAvailable:true,rearmPending:(d.rearmIntents??[]).some(i=>i.workId===id&&i.status==='PENDING')};
     });
   }
+  /** A server permit shares the claim's atomic mesh transaction and fencing generation. */
+  async serverGrant(caller: Host, input: { permitId: string; workId: string; action: 'deploy.commit';
+    args: {sha: string}; ttlMinutes: number; authorizationId: string | null }) {
+    check(caller === leaderHost(), 'Only the leader grants server permits');
+    check(/^[a-f0-9]{40}$/.test(input.args.sha), 'Invalid deploy SHA');
+    check(Number.isInteger(input.ttlMinutes) && input.ttlMinutes >= 1 && input.ttlMinutes <= 120, 'Invalid permit TTL');
+    return this.write(d => {
+      const w = d.works.find(x => x.id === input.workId);
+      check(w && w.target !== leaderHost() && (w.state === 'QUEUED' ||
+        (w.state === 'RUNNING' && Date.parse(w.leaseUntil ?? '') > Date.now())), 'Work is not eligible for a permit');
+      check(!(d.serverPermits ?? []).some(p => p.permitId === input.permitId), 'Duplicate permit');
+      const p: ServerPermit = {permitId:input.permitId, missionId:w.missionId, workId:w.id,
+        host:w.target,attemptId:w.state==='RUNNING'?w.attemptId:null,
+        leaseGeneration:w.state==='RUNNING'?w.leaseGeneration:null,action:input.action,
+        args:{sha:input.args.sha}, issuedBy:caller,issuedAt:iso(),
+        expiresAt:new Date(Date.now()+input.ttlMinutes*60000).toISOString(),
+        state:'ISSUED',actionId:null,authorizationId:input.authorizationId};
+      (d.serverPermits ??= []).push(p);return p;
+    });
+  }
+  async serverRevoke(caller: Host, permitId: string) {
+    check(caller===leaderHost(),'Only the leader revokes server permits');
+    return this.write(d => {
+      const p=(d.serverPermits??[]).find(x=>x.permitId===permitId);
+      check(p,'Permit not found');
+      if(p.state==='ISSUED')p.state='REVOKED';
+      return p;
+    });
+  }
+  async serverRevokeWork(caller: Host, workId: string) {
+    check(caller===leaderHost(),'Only the leader revokes server permits');
+    return this.write(d=>{revokeIssued(d,workId);return true;});
+  }
+  async serverRevokeMission(caller: Host, missionId: string) {
+    check(caller===leaderHost(),'Only the leader revokes server permits');
+    return this.write(d=>{for(const p of d.serverPermits??[])
+      if(p.missionId===missionId && p.state==='ISSUED')p.state='REVOKED';return true;});
+  }
+  async serverPermitsFor(caller: Host | 'admin') {
+    return this.read(d=>(d.serverPermits??[]).filter(p=>caller==='admin'||caller===leaderHost()||p.host===caller)
+      .map(p=>({...p,state:p.state==='ISSUED'&&Date.parse(p.expiresAt)<=Date.now()?'EXPIRED' as const:p.state})));
+  }
+  /** Second fence: caller and stored permit must match the same live claim. */
+  async serverSpend(caller: Host, input: {permitId:string;workId:string;attemptId:string;
+    leaseGeneration:number;action:'deploy.commit';args:{sha:string};actionId:string}) {
+    check(caller!==leaderHost(),'Workers must use their own permits');
+    return this.write(d=>{
+      const p=(d.serverPermits??[]).find(x=>x.permitId===input.permitId);
+      check(p && p.state==='ISSUED','PERMIT_INVALID');
+      check(p.issuedBy===leaderHost() && p.host===caller && p.workId===input.workId &&
+        p.action===input.action && p.args.sha===input.args.sha,'PERMIT_INVALID');
+      check(Date.parse(p.expiresAt)>Date.now(),'PERMIT_EXPIRED');
+      const w=d.works.find(x=>x.id===p.workId);
+      check(w && w.missionId===p.missionId && w.target===caller && w.state==='RUNNING' &&
+        !w.transportClaim && Date.parse(w.leaseUntil??'')>Date.now() &&
+        p.attemptId===input.attemptId && p.leaseGeneration===input.leaseGeneration &&
+        w.attemptId===input.attemptId && w.leaseGeneration===input.leaseGeneration,'PERMIT_STALE_CLAIM');
+      p.state='SPENT';p.actionId=input.actionId;return p;
+    });
+  }
+
   /** Hosts that may have written code through Panter: any started writer work in any mission (a candidate is not
    * tied to the mission that wrote it), and every former leader (native implementation is not mesh work). Their
    * review receipts never count as independent of a candidate's authors. */
@@ -1121,7 +1210,7 @@ export class MeshEngine {
       check((w.state==='OUTCOME_UNKNOWN'||(w.state==='RUNNING'&&
         Date.parse(w.leaseUntil??'')<=Date.now())), 'Writer is not in an expired uncertain state');
       w.reconciliation={resolution:input.resolution,evidence:input.evidence+(input.isolationEvidence?'\nIsolation: '+input.isolationEvidence:''),at:iso()};
-      w.completedAt=iso();w.leaseUntil=null;
+      w.completedAt=iso();w.leaseUntil=null;revokeIssued(d,w.id);
       if(input.resolution==='CONFIRMED_COMPLETE'){
         const result=JSON.stringify(input.result);
         w.state='COMPLETED';w.result=result;
