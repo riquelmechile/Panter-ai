@@ -2,6 +2,7 @@
  * SQLite file as the mesh, with a database-enforced partial unique slot. No execution, launch or recovery here. */
 import { randomUUID } from 'node:crypto';
 import { SqliteLedger } from './sqlite-ledger.js';
+import type { ServerAction, ServerActionStore, ServerActionState } from './server-action-runner.js';
 
 export type AuthorizationState = 'OPEN' | 'BOUND' | 'CONSUMED' | 'EXPIRED';
 export type OperatorAuthorization = {
@@ -10,13 +11,15 @@ export type OperatorAuthorization = {
 };
 export type ActionRecord = {
   actionId: string; action: 'deploy.commit'; args: { sha: string };
-  state: 'RESERVED' | 'DRY_RUN';
+  state: ServerActionState | 'DRY_RUN';
   host: string; workId: string | null; attemptId: string | null;
   leaseGeneration: number | null; permitId: string | null;
   issuedBy: string; authorizationId: string | null; authorization: 'standing' | 'per-release';
   createdAt: string; completedAt: string | null;
   checks: Array<{ precondition: string; result: 'PASS' }>;
-  transitions: Array<{ state: 'RESERVED' | 'DRY_RUN'; at: string }>;
+  transitions: Array<{ state: ServerActionState | 'DRY_RUN'; at: string; exitCode?: number | null; revision?: string | null; logSha256?: string | null }>;
+  sha?: string; reservedAt?: string; launchStartedAt?: string; exitCode?: number | null;
+  revision?: string | null; logSha256?: string | null; receiptClaimedAt?: string; receiptSentAt?: string;
 };
 type Data = { version: 1; authorizations: OperatorAuthorization[]; actions: ActionRecord[] };
 const seed: Data = { version: 1, authorizations: [], actions: [] };
@@ -97,6 +100,7 @@ export class ServerActionsLedger {
         const row: ActionRecord = {
           ...input, authorizationId: a?.id ?? null, authorization: a ? 'per-release' : 'standing',
           state: 'RESERVED', createdAt: at, completedAt: null,
+          sha: input.args.sha, reservedAt: at,
           transitions: [{ state: 'RESERVED', at }]
         };
         d.actions.push(row);
@@ -117,6 +121,34 @@ export class ServerActionsLedger {
       row.transitions.push({state: 'DRY_RUN', at: row.completedAt});
       return row;
     }, {actionId, operation: 'release'}).result;
+  }
+  /** Runner adapter: one SQLite IMMEDIATE transaction for state and terminal slot. */
+  runnerStore(): ServerActionStore {
+    const terminal = new Set(['LIVE','ROLLED_BACK','BUILD_FAILED','FAILED','LOCKED','START_FAILED','ABANDONED','UNKNOWN','DRY_RUN']);
+    return {
+      read: async id => {
+        const a = this.db.read('server_actions', seed).actions.find(x => x.actionId === id);
+        return a ? { ...structuredClone(a), sha: a.sha ?? a.args.sha, reservedAt: a.reservedAt ?? a.createdAt } as ServerAction : undefined;
+      },
+      list: async () => this.db.read('server_actions', seed).actions.map(a =>
+        ({ ...structuredClone(a), sha: a.sha ?? a.args.sha, reservedAt: a.reservedAt ?? a.createdAt }) as ServerAction),
+      transact: async <T>(id: string, update: (current: ServerAction | undefined) =>
+        { next: ServerAction; result: T } | undefined): Promise<T | undefined> => {
+        const result = this.db.mutate('server_actions', seed, d => {
+          const index = d.actions.findIndex(a => a.actionId === id);
+          const row = index < 0 ? undefined : d.actions[index];
+          const current = row ? { ...structuredClone(row), sha: row.sha ?? row.args.sha, reservedAt: row.reservedAt ?? row.createdAt } as ServerAction : undefined;
+          const changed = update(current);
+          if (!changed) return { changed: false as const, releaseSlot: false };
+          assert(index >= 0, 'ACTION_NOT_FOUND');
+          assert(changed.next.actionId === id && changed.next.sha === current?.sha, 'ACTION_IDENTITY_CHANGED');
+          const releaseSlot = !terminal.has(current!.state) && terminal.has(changed.next.state);
+          d.actions[index] = { ...changed.next, completedAt: releaseSlot ? new Date().toISOString() : row!.completedAt } as ActionRecord;
+          return { changed: true as const, releaseSlot, value: changed.result };
+        }, { actionId: id, operation: 'release_if_terminal' });
+        return result.result.changed ? result.result.value : undefined;
+      },
+    };
   }
   status(actionId?: string) {
     // The view reports expiry without rewriting history on a read.

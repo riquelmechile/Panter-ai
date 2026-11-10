@@ -76,7 +76,7 @@ export class SqliteLedger {
     return row?.revision ?? 0;
   }
   mutate<T, R>(name: LedgerName, fallback: T, fn: (state: T) => R,
-    slot?: { actionId: string; operation: 'reserve' | 'release' } | { permitId: string; operation: 'bind' }): { before: T; after: T; result: R } {
+    slot?: { actionId: string; operation: 'reserve' | 'release' | 'release_if_terminal' } | { permitId: string; operation: 'bind' }): { before: T; after: T; result: R } {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const row = this.db.prepare('SELECT payload,revision FROM ledger WHERE name=?').get(name) as LedgerRow | undefined;
@@ -96,7 +96,7 @@ export class SqliteLedger {
           this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS one_nonterminal_server_action ON server_action_slots ((1)) WHERE active=1');
           if (slot.operation === 'reserve') {
             this.db.prepare('INSERT INTO server_action_slots(action_id,active) VALUES(?,1)').run(slot.actionId);
-          } else {
+          } else if (slot.operation === 'release' || (slot.operation === 'release_if_terminal' && typeof result === 'object' && result !== null && 'releaseSlot' in result && result.releaseSlot === true)) {
             const changed = this.db.prepare('UPDATE server_action_slots SET active=0 WHERE action_id=? AND active=1').run(slot.actionId);
             if (changed.changes !== 1) throw new Error('Action slot not held');
           }
