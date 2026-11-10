@@ -1,6 +1,6 @@
 # Server actions with single-use permits
 
-**Status:** design. Nothing here is active until the operator sets `PANTER_SERVER_ACTIONS` on the server. With the variable unset every tool below answers `SERVER_ACTIONS_DISABLED` and Panter behaves exactly as before.
+**Status:** implemented since 1.6.0, disabled by default. Nothing here is active until the operator sets `PANTER_SERVER_ACTIONS` on the server. With the variable unset every tool below answers `SERVER_ACTIONS_DISABLED` and Panter behaves exactly as before.
 
 ## Why
 

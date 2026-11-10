@@ -129,9 +129,10 @@ Para conectar un servidor MCP nuevo: agrégalo a `downstream.json`, pon su token
 | **Mesh y fuerza de trabajo** | Delegación durable, claims con lease exclusivo, latidos, resultados, rutas de despertar, plazos con vuelta al líder y `panter_mesh_withdraw` para retirar trabajo en cola que nadie empezó. |
 | **Fuerza de trabajo en GitHub** | Acceso de escritura acotado a un trabajo y un repositorio: leer, hacer commits en su propia rama nueva, abrir un PR, comentar, abrir un issue. Se revoca al terminar y queda auditado. |
 | **Memoria** | Memoria de proyecto Engram opcional, espejada desde el ledger del harness. |
-| **Herramientas por rol** | Cada rol ve una lista corta: el líder 50 herramientas y un trabajador 31, contando los 8 routers de dominio. Todas se pueden llamar por nombre o por su router. Ver [TOOL_SURFACE.md](docs/TOOL_SURFACE.md). |
+| **Herramientas por rol** | Cada rol ve una lista corta: el líder 50 herramientas y un trabajador 32, contando los 8 routers de dominio. Todas se pueden llamar por nombre o por su router. Ver [TOOL_SURFACE.md](docs/TOOL_SURFACE.md). |
 | **Gateway downstream** | Registras un servidor MCP una vez y aparece como un router, `panter_ds_<nombre>`, con timeouts, circuit breaker, permisos de escritura, identidad firmada del actor en cada llamada, credenciales OAuth de cliente, servidores `sensitive` que no guardan contenido y auditoría. Ver [DOWNSTREAM_MCP.md](docs/DOWNSTREAM_MCP.md). |
 | **Operación** | Deploy de un commit exacto con un comando y vuelta atrás automática, respaldo con prueba de restauración antes de cada deploy y cada día, y un healthcheck cada 5 minutos que reinicia el servicio. Ver [OPERATIONS.md](docs/OPERATIONS.md). |
+| **Acciones de servidor** (apagadas por defecto) | El líder le entrega a un trabajador un permiso de un solo uso para desplegar un commit exacto. El trabajador no recibe una shell: Panter verifica que el commit esté mergeado, en verde y aprobado por la cuenta revisora, ejecuta el mismo script de deploy y avisa el resultado. Ver [SERVER_ACTIONS.md](docs/SERVER_ACTIONS.md). |
 
 ## Reglas básicas
 
@@ -177,6 +178,17 @@ El script compila y prueba ese commit, detiene el servicio para un respaldo cons
 
 Panter guarda su estado en un ledger SQLite y unos pocos archivos JSON. Corre **un solo proceso** por directorio de datos.
 
+### Dejar que un trabajador despliegue (opcional)
+
+Por defecto ese script lo ejecutas solo tú. Si activas las acciones de servidor, el líder puede delegar un deploy a un trabajador sin entregarle tu servidor:
+
+1. Tú lo autorizas, una vez por versión o con un ajuste permanente.
+2. El líder le da al trabajador un permiso: un solo uso, un commit exacto, válido solo mientras ese trabajador tenga la tarea.
+3. El trabajador le pide a Panter que despliegue. Panter verifica por su cuenta que el commit esté en `main`, que haya entrado por un pull request mergeado, que pasó los checks requeridos y que la cuenta revisora independiente aprobó su commit final.
+4. Panter ejecuta el mismo `deploy.sh`, sin cambios. El líder y el trabajador reciben un mensaje con el resultado.
+
+El trabajador nunca recibe una terminal, SSH ni otro comando. Nada se activa hasta que definas `PANTER_SERVER_ACTIONS`, y un modo en seco te deja revisar tu configuración primero, sin desplegar. Ver [SERVER_ACTIONS.md](docs/SERVER_ACTIONS.md) y [OPERATIONS.md](docs/OPERATIONS.md).
+
 ## Documentación
 
 | Tema | Leer |
@@ -192,6 +204,7 @@ Panter guarda su estado en un ledger SQLite y unos pocos archivos JSON. Corre **
 | Servidores MCP downstream | [DOWNSTREAM_MCP.md](docs/DOWNSTREAM_MCP.md) |
 | Login y consentimiento | [OAUTH_EMBEDDED.md](docs/OAUTH_EMBEDDED.md) |
 | Operación | [OPERATIONS.md](docs/OPERATIONS.md), [ORACLE_ARM.md](docs/ORACLE_ARM.md) |
+| Deploys delegados | [SERVER_ACTIONS.md](docs/SERVER_ACTIONS.md) |
 | Historia (v0.1 a v0.15) | [HISTORY.md](docs/HISTORY.md) |
 
 La mayoría de las guías de `docs/` está en inglés o en español; este README está en los dos idiomas.

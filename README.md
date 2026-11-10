@@ -129,9 +129,10 @@ To connect a new MCP server, add it to `downstream.json`, put its token in `pant
 | **Mesh and workforce** | Durable delegation, fenced claims with leases, heartbeats, results, wake routes, pickup timeouts with native fallback, and `panter_mesh_withdraw` for queued work nobody started. |
 | **GitHub workforce** | Write access scoped to one work item and one repository: read, commit to its own new branch, open a PR, comment, open an issue. Revoked when the work ends, with an audit trail. |
 | **Memory** | Optional Engram project memory, mirrored from the harness ledger. |
-| **Tool surface** | Each role sees a short list: the leader 50 tools and a worker 31, the 8 domain routers included. Every tool stays callable by name or through its router. See [TOOL_SURFACE.md](docs/TOOL_SURFACE.md). |
+| **Tool surface** | Each role sees a short list: the leader 50 tools and a worker 32, the 8 domain routers included. Every tool stays callable by name or through its router. See [TOOL_SURFACE.md](docs/TOOL_SURFACE.md). |
 | **Downstream gateway** | Register an MCP server once; it appears as one router, `panter_ds_<name>`, with timeouts, a circuit breaker, write grants, a signed actor identity on every call, OAuth client credentials, `sensitive` servers that keep no content, and an audit log. See [DOWNSTREAM_MCP.md](docs/DOWNSTREAM_MCP.md). |
 | **Operations** | One-command deploy of an exact commit with automatic rollback, a backup with a restore check before every deploy and every day, and a health check every 5 minutes that restarts the service. See [OPERATIONS.md](docs/OPERATIONS.md). |
+| **Server actions** (off by default) | The leader hands a worker a single-use permit to deploy one exact commit. The worker gets no shell: Panter checks that the commit is merged, green and independently approved, runs the same deploy script, and reports back. See [SERVER_ACTIONS.md](docs/SERVER_ACTIONS.md). |
 
 ## Ground rules
 
@@ -177,6 +178,17 @@ The script builds and tests that commit, stops the service for a consistent back
 
 Panter keeps its state in one SQLite ledger plus a few JSON stores. Run **one process** per data directory.
 
+### Letting a worker deploy (optional)
+
+By default only you run that script. If you turn on server actions, the leader can delegate one deployment to a worker without giving it your server:
+
+1. You authorize it, once per release or with a standing setting.
+2. The leader gives the worker a permit: one use, one exact commit, valid only while that worker holds the task.
+3. The worker asks Panter to deploy. Panter verifies on its own that the commit is on `main`, came through one merged pull request, passed the required checks and was approved on its final commit by the independent reviewer.
+4. Panter runs the same `deploy.sh`, unchanged. The leader and the worker each get a message with the result.
+
+The worker never gets a terminal, SSH or any other command. Nothing is enabled until you set `PANTER_SERVER_ACTIONS`, and a dry-run setting lets you check your configuration first without deploying. See [SERVER_ACTIONS.md](docs/SERVER_ACTIONS.md) and [OPERATIONS.md](docs/OPERATIONS.md).
+
 ## Documentation
 
 | Topic | Read |
@@ -192,6 +204,7 @@ Panter keeps its state in one SQLite ledger plus a few JSON stores. Run **one pr
 | Downstream MCP servers | [DOWNSTREAM_MCP.md](docs/DOWNSTREAM_MCP.md) |
 | Login and consent | [OAUTH_EMBEDDED.md](docs/OAUTH_EMBEDDED.md) |
 | Operations | [OPERATIONS.md](docs/OPERATIONS.md), [ORACLE_ARM.md](docs/ORACLE_ARM.md) |
+| Delegated deployments | [SERVER_ACTIONS.md](docs/SERVER_ACTIONS.md) |
 | History (v0.1 to v0.15) | [HISTORY.md](docs/HISTORY.md) |
 
 Most guides under `docs/` are written in English or Spanish; this README is available in both.

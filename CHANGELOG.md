@@ -2,7 +2,7 @@
 
 All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://semver.org/). Releases before 1.0 are described in [docs/HISTORY.md](docs/HISTORY.md).
 
-## Unreleased
+## 1.6.0 (2026-11-10)
 
 ### Added
 - **Server actions** (disabled unless `PANTER_SERVER_ACTIONS` is set; see `docs/SERVER_ACTIONS.md` and `docs/OPERATIONS.md`). The leader can hand a worker a single-use permit to deploy one exact commit. Panter gives no shell: it checks that the commit is on `main`, merged through one pull request, green on the required checks and approved on its final head by the independent reviewer, and then runs the unchanged `deploy/deploy.sh` for it in a transient systemd unit.
