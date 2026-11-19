@@ -22,7 +22,7 @@ export const EFFORT_REQUEST_PATTERN = /^[A-Za-z0-9._-]{1,32}$/;
 export type WorkerExecutionRequest = { serviceTier?: string; stream?: boolean; parallelToolCalls?: boolean; maxNativeSubagents?: number };
 export type WorkExecutionRequest = WorkerExecutionRequest & { status: 'REQUESTED_UNVERIFIED'; model: string; reasoningEffort: string };
 export type MeshMessage = { id: string; missionId: string; from: Host; to: Host; workId: string | null; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' | 'RESULT'; text: string; createdAt: string; inboxRevision: number };
-export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; /** When its current attempt was claimed by the worker itself (never a transport). */claimedAt?: string; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; /** What the server's sweep found for a writer of unknown outcome (looked at once). */sweep?: {at:string;effects:SweepEffects;evidence:string}; transportClaim?: boolean; withdrawn?: boolean;
+export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; /** When its current attempt was claimed by the worker itself (never a transport). */claimedAt?: string; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; /** When a writer became OUTCOME_UNKNOWN (absent on older ledgers). */uncertainAt?: string; /** What the server's sweep found for a writer of unknown outcome (looked at once). */sweep?: {at:string;effects:SweepEffects;evidence:string}; transportClaim?: boolean; withdrawn?: boolean;
   /** How a result reached Panter when it was not a direct worker call (the text itself stays exactly as sent). */via?: 'gmail-relay' };
 export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
@@ -126,7 +126,7 @@ export class MeshEngine {
           else if (w.state === 'RUNNING' || w.state === 'WAITING_INPUT') {
             // A writer may have produced effects: reconcile it. Read-only work had none, so it aborts
             // cleanly and any review it belonged to reads as INTERRUPTED instead of a failed lens.
-            if (w.role === 'implementer') w.state = 'OUTCOME_UNKNOWN';
+            if (w.role === 'implementer') { w.state = 'OUTCOME_UNKNOWN'; w.uncertainAt = stamp; }
             else { w.state = 'ABORTED_NO_EFFECTS'; w.completedAt = stamp; w.result = `Leader switch ${from} -> ${lead}: interrupted while running, read-only, no effects`; }
             w.leaseUntil = null;
           }
@@ -932,7 +932,7 @@ export class MeshEngine {
       }
       // A lost ACK after an uncertain write cannot authorize an automatic replay.
       if (expired && w.role === 'implementer') {
-        w.state = 'OUTCOME_UNKNOWN';
+        w.state = 'OUTCOME_UNKNOWN'; w.uncertainAt = iso();
         revokeIssued(d, w.id);
         this.notify(d, leaderHost());
         return { ...w, instruction: '', result: null };
@@ -1138,7 +1138,7 @@ export class MeshEngine {
       const abandoned: string[] = [], uncertain: string[] = [];
       for (const w of due(d)) {
         revokeIssued(d, w.id);
-        if (w.role === 'implementer') { w.state = 'OUTCOME_UNKNOWN'; uncertain.push(w.id); continue; }
+        if (w.role === 'implementer') { w.state = 'OUTCOME_UNKNOWN'; w.uncertainAt = iso(); uncertain.push(w.id); continue; }
         const leaseExpiredAt = w.leaseUntil;
         w.state = 'ABORTED_NO_EFFECTS'; w.attemptId = null; w.leaseUntil = null; w.completedAt = iso(); w.withdrawn = true;
         w.result = `Swept by Panter: its lease expired at ${leaseExpiredAt} and was never renewed`;
@@ -1153,9 +1153,14 @@ export class MeshEngine {
       return { abandoned, uncertain };
     });
   }
-  /** Writers of unknown outcome the sweep has not looked at yet. */
-  unsweptUncertainWriters() {
-    return this.read(d => d.works.filter(w => w.role === 'implementer' && w.state === 'OUTCOME_UNKNOWN' && !w.sweep && w.attemptId)
+  /** Writers of unknown outcome the sweep has not looked at yet and that have been uncertain for at least settleMs.
+   * The wait matters: a GitHub write authorized just before the work became uncertain may still be on its way,
+   * and nothing new can be authorized after (the claim is no longer RUNNING). Looking too early could see nothing
+   * and release a writer whose commit lands a moment later. A ledger without the timestamp is old enough. */
+  unsweptUncertainWriters(settleMs = 0) {
+    check(Number.isFinite(settleMs) && settleMs >= 0, 'Invalid sweep settle time');
+    return this.read(d => d.works.filter(w => w.role === 'implementer' && w.state === 'OUTCOME_UNKNOWN' && !w.sweep && w.attemptId &&
+      !(Date.now() - Date.parse(w.uncertainAt ?? '') < settleMs))
       .map(w => ({ workId: w.id, missionId: w.missionId, target: w.target, attemptId: w.attemptId!, leaseGeneration: w.leaseGeneration })));
   }
   /** Record, once, what the sweep found for a writer of unknown outcome, and tell the leader. Only in owner mode,

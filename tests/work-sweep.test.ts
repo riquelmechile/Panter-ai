@@ -7,7 +7,7 @@ import { MeshEngine } from '../src/core/mesh.js';
 import { SqliteLedger } from '../src/core/sqlite-ledger.js';
 import { GitHubWorkforce } from '../src/core/github-workforce.js';
 import { leaderHost } from '../src/core/leadership.js';
-import { sweepExpiredWork, parseSweepGrace, SWEEP_GRACE_SECONDS, type SweepGitHub } from '../src/core/work-sweep.js';
+import { sweepExpiredWork, parseSweepGrace, SWEEP_GRACE_SECONDS, SWEEP_SETTLE_SECONDS, type SweepGitHub } from '../src/core/work-sweep.js';
 import { orderByAvailability, RECENT_ACTIVITY_MS } from '../src/core/owner-routing.js';
 
 before(() => { process.env.PANTER_LEAD_HOST = 'claude'; });
@@ -45,7 +45,15 @@ function fakeGitHub(answers: Record<string, Seen | Error>) {
   };
   return { github, revoked, asked };
 }
-const nothing = (branch: string): Seen => ({ known: true, repository: 'acme/site', branch, branchExists: false, pulls: [], writes: 0 });
+const nothing = (branch: string): Seen => ({ known: true, repository: 'acme/site', branch, branchExists: false, pulls: [], writes: 0, createdBranch: false, opened: 0 });
+/** One pass that looks at uncertain writers at once (no settle time): the verdict rules are tested apart from the wait. */
+const sweepNow = (m: MeshEngine, github: SweepGitHub) => sweepExpiredWork(m, github, SWEEP_GRACE_SECONDS, 0);
+/** Move the moment a writer became uncertain into the past. */
+function ageUncertain(dir: string, workId: string, agoMs: number) {
+  const db = SqliteLedger.open(dir);
+  db.mutate('mesh', {} as any, (d: any) => { d.works.find((w: any) => w.id === workId).uncertainAt = new Date(Date.now() - agoMs).toISOString(); });
+  db.close();
+}
 
 test('the sweep grace is 6 hours by default and bounded when configured', () => {
   assert.equal(SWEEP_GRACE_SECONDS, 21600);
@@ -102,7 +110,7 @@ test('outside owner mode an expired writer becomes OUTCOME_UNKNOWN, keeps its sc
   setLease(dir, writer.id, -(GRACE + 60_000));
   const { github, revoked, asked } = fakeGitHub({ [writer.id]: nothing('panter/gpt-a-strict') });
   await withOwner('0', async () => {
-    const report = await sweepExpiredWork(m, github);
+    const report = await sweepNow(m, github);
     assert.deepEqual(report, { abandoned: [], uncertain: [writer.id], cleared: [], reported: [writer.id], deferred: [] });
     assert.equal(await stateOf(m, writer.id), 'OUTCOME_UNKNOWN', 'nothing found is not enough to release a writer here');
     assert.deepEqual(revoked, []);
@@ -114,7 +122,7 @@ test('outside owner mode an expired writer becomes OUTCOME_UNKNOWN, keeps its sc
     assert.equal(seen[0].leaseGeneration, c.leaseGeneration);
     await assert.rejects(m.complete('gpt-a', writer.id, c.attemptId!, c.leaseGeneration, '{}'), /Stale work lease/);
     // Looked at once: later passes neither ask GitHub nor write to the leader again.
-    await sweepExpiredWork(m, github);
+    await sweepNow(m, github);
     assert.deepEqual(asked, [writer.id]);
     assert.equal((await leaderUpdates(m, writer.id)).length, 1);
     // The operator's fenced decision still closes it.
@@ -134,9 +142,9 @@ test('owner mode: an expired writer that left nothing is closed without effects;
     for (const w of [clean, dirty, blind]) setLease(dir, w.id, -(GRACE + 60_000));
     const { github, revoked } = fakeGitHub({
       [clean.id]: nothing('panter/gpt-a-clean'),
-      [dirty.id]: { known: true, repository: 'acme/site', branch: 'panter/gpt-a-dirty', branchExists: true, pulls: [87], writes: 3 },
+      [dirty.id]: { known: true, repository: 'acme/site', branch: 'panter/gpt-a-dirty', branchExists: true, pulls: [87], writes: 3, createdBranch: true, opened: 1 },
     });
-    const report = await sweepExpiredWork(m, github);
+    const report = await sweepNow(m, github);
     assert.deepEqual(report.uncertain.sort(), [clean.id, dirty.id, blind.id].sort());
     assert.deepEqual(report.cleared, [clean.id]);
     assert.deepEqual(report.reported.sort(), [dirty.id, blind.id].sort());
@@ -145,7 +153,7 @@ test('owner mode: an expired writer that left nothing is closed without effects;
     assert.equal(await stateOf(m, clean.id), 'ABORTED_NO_EFFECTS');
     const cleared = await leaderUpdates(m, clean.id);
     assert.equal(cleared[0].event, 'SWEPT_WRITER_NO_EFFECTS');
-    assert.match(cleared[0].evidence, /branch panter\/gpt-a-clean does not exist; pull requests from it: none; audited writes: 0/);
+    assert.match(cleared[0].evidence, /branch panter\/gpt-a-clean does not exist; pull requests from it: none; writes reserved by its grant: 0; branch created by its grant: no; pull requests and issues it opened: 0/);
     await assert.rejects(m.complete('gpt-a', clean.id, a.attemptId!, a.leaseGeneration, '{}'), /Stale work lease/);
     // Its scope is free again: the same mission can get a new writer.
     assert.equal((await m.delegate('claude', { ...work('clean', 'implementer'), idempotencyKey: 'clean-2' })).state, 'QUEUED');
@@ -154,7 +162,7 @@ test('owner mode: an expired writer that left nothing is closed without effects;
     const found = await leaderUpdates(m, dirty.id);
     assert.equal(found[0].event, 'UNCERTAIN_WRITER_NEEDS_RECONCILIATION');
     assert.equal(found[0].effects, 'FOUND');
-    assert.match(found[0].evidence, /branch panter\/gpt-a-dirty exists; pull requests from it: #87; audited writes: 3/);
+    assert.match(found[0].evidence, /branch panter\/gpt-a-dirty exists; pull requests from it: #87; writes reserved by its grant: 3; branch created by its grant: yes; pull requests and issues it opened: 1/);
     assert.equal(found[0].attemptId, b.attemptId);
     await assert.rejects(m.delegate('claude', { ...work('dirty', 'implementer'), idempotencyKey: 'dirty-2' }), /Overlapping active writer/);
 
@@ -171,12 +179,61 @@ test('a GitHub failure defers the verdict to the next pass instead of guessing',
     setLease(dir, writer.id, -(GRACE + 60_000));
     const answers: Record<string, Seen | Error> = { [writer.id]: new Error('GitHub branch lookup failed (HTTP 502)') };
     const { github } = fakeGitHub(answers);
-    const first = await sweepExpiredWork(m, github);
+    const first = await sweepNow(m, github);
     assert.deepEqual(first.deferred, [writer.id]);
     assert.equal(await stateOf(m, writer.id), 'OUTCOME_UNKNOWN');
     assert.equal((await leaderUpdates(m, writer.id)).length, 0);
     answers[writer.id] = nothing('panter/gpt-a-flaky');
-    assert.deepEqual((await sweepExpiredWork(m, github)).cleared, [writer.id]);
+    assert.deepEqual((await sweepNow(m, github)).cleared, [writer.id]);
+  });
+}));
+
+test('a writer is looked at only after it has been uncertain for the settle time: a write in flight can still land', () => fixture(async (m, dir) => {
+  assert.equal(SWEEP_SETTLE_SECONDS, 600);
+  await withOwner('1', async () => {
+    const writer = await m.delegate('claude', work('settle', 'implementer'));
+    await m.claim('gpt-a', writer.id);
+    setLease(dir, writer.id, -(GRACE + 60_000));
+    // The grant looks clean now; a commit authorized just before the sweep is still on its way to GitHub.
+    const answers: Record<string, Seen | Error> = { [writer.id]: nothing('panter/gpt-a-settle') };
+    const { github, asked, revoked } = fakeGitHub(answers);
+    const first = await sweepExpiredWork(m, github);
+    assert.deepEqual(first, { abandoned: [], uncertain: [writer.id], cleared: [], reported: [], deferred: [] });
+    assert.deepEqual(asked, [], 'not looked at in the pass that marked it');
+    assert.equal(await stateOf(m, writer.id), 'OUTCOME_UNKNOWN');
+    // Still inside the settle time on the next pass.
+    ageUncertain(dir, writer.id, (SWEEP_SETTLE_SECONDS - 60) * 1000);
+    await sweepExpiredWork(m, github);
+    assert.deepEqual(asked, []);
+    // The commit landed meanwhile. After the settle time the sweep sees it and never closes the work.
+    answers[writer.id] = { known: true, repository: 'acme/site', branch: 'panter/gpt-a-settle', branchExists: true, pulls: [], writes: 1, createdBranch: true, opened: 0 };
+    ageUncertain(dir, writer.id, (SWEEP_SETTLE_SECONDS + 60) * 1000);
+    const later = await sweepExpiredWork(m, github);
+    assert.deepEqual(asked, [writer.id]);
+    assert.deepEqual(later.reported, [writer.id]);
+    assert.deepEqual(revoked, []);
+    assert.equal(await stateOf(m, writer.id), 'OUTCOME_UNKNOWN');
+    assert.equal((await leaderUpdates(m, writer.id))[0].effects, 'FOUND');
+  });
+}));
+
+test('what the grant durably recorded is enough to keep a writer from being closed, with nothing left on GitHub', () => fixture(async (m, dir) => {
+  await withOwner('1', async () => {
+    for (const [key, seen] of [
+      ['wrote', { ...nothing('panter/gpt-a-wrote'), writes: 2 }],
+      ['branched', { ...nothing('panter/gpt-a-branched'), createdBranch: true }],
+      ['opened', { ...nothing('panter/gpt-a-opened'), opened: 1 }],
+    ] as const) {
+      const writer = await m.delegate('claude', work(key, 'implementer'));
+      await m.claim('gpt-a', writer.id);
+      setLease(dir, writer.id, -(GRACE + 60_000));
+      const { github, revoked } = fakeGitHub({ [writer.id]: seen as Seen });
+      const report = await sweepNow(m, github);
+      assert.deepEqual(report.cleared, [], key);
+      assert.deepEqual(report.reported, [writer.id], key);
+      assert.deepEqual(revoked, [], key);
+      assert.equal(await stateOf(m, writer.id), 'OUTCOME_UNKNOWN', key);
+    }
   });
 }));
 
@@ -186,14 +243,20 @@ test('a writer already of unknown outcome (claimed again after expiry) is looked
     await m.claim('gpt-a', writer.id);
     setLease(dir, writer.id, -60_000);
     assert.equal((await m.claim('gpt-a', writer.id)).state, 'OUTCOME_UNKNOWN');
-    const { github } = fakeGitHub({ [writer.id]: nothing('panter/gpt-a-reclaimed') });
+    const { github, asked } = fakeGitHub({ [writer.id]: nothing('panter/gpt-a-reclaimed') });
+    // It became uncertain a moment ago, so it waits like any other; a ledger from before the timestamp does not.
+    assert.deepEqual((await sweepExpiredWork(m, github)).cleared, []);
+    assert.deepEqual(asked, []);
+    const db = SqliteLedger.open(dir);
+    db.mutate('mesh', {} as any, (d: any) => { delete d.works.find((w: any) => w.id === writer.id).uncertainAt; });
+    db.close();
     const report = await sweepExpiredWork(m, github);
     assert.deepEqual(report.uncertain, [], 'it was not RUNNING any more');
     assert.deepEqual(report.cleared, [writer.id]);
   });
 }));
 
-test('what a work left on GitHub: its own branch, pull requests from it and its audited writes', () => fixture(async (m, dir) => {
+test('what a work left: its own branch and pull requests on GitHub, and what its grant durably recorded', () => fixture(async (m, dir) => {
   let branchStatus = 404, pulls: unknown = [], fail = false;
   const calls: string[] = [];
   const fetcher = (async (url: string) => {
@@ -209,11 +272,22 @@ test('what a work left on GitHub: its own branch, pull requests from it and its 
   assert.deepEqual(await gh.effects(writer.id), { known: false, reason: 'The work has no GitHub grant with a working branch' });
   assert.equal(gh.revokeEnded(writer.id), false, 'no grant: nothing to close, and no tombstone is left behind');
   const grant = await gh.grant('claude', { workId: writer.id, repository: 'acme/site', ops: ['commit', 'pr'] });
-  assert.deepEqual(await gh.effects(writer.id), { known: true, repository: 'acme/site', branch: grant.branch, branchExists: false, pulls: [], writes: 0 });
+  assert.deepEqual(await gh.effects(writer.id), { known: true, repository: 'acme/site', branch: grant.branch, branchExists: false, pulls: [], writes: 0, createdBranch: false, opened: 0 });
   assert.ok(calls.some(c => c === `/repos/acme/site/branches/${grant.branch}`));
   assert.ok(calls.some(c => c.startsWith('/repos/acme/site/pulls?') && c.includes('state=all') && c.includes(encodeURIComponent(`acme:${grant.branch}`))));
   branchStatus = 200; pulls = [{ number: 87 }, { number: 90 }];
-  assert.deepEqual(await gh.effects(writer.id), { known: true, repository: 'acme/site', branch: grant.branch, branchExists: true, pulls: [87, 90], writes: 0 });
+  assert.deepEqual(await gh.effects(writer.id), { known: true, repository: 'acme/site', branch: grant.branch, branchExists: true, pulls: [87, 90], writes: 0, createdBranch: false, opened: 0 });
+  // What the grant itself recorded survives everything: the branch deleted, the pull requests gone and every audit
+  // row evicted (the audit keeps only its latest entries). The write budget is reserved before each write.
+  branchStatus = 404; pulls = [];
+  const ledger = SqliteLedger.open(dir);
+  ledger.mutate('github_workforce', {} as any, (d: any) => {
+    const g = d.grants.find((x: any) => x.workId === writer.id);
+    g.writes = 2; g.branchCreated = true; g.createdBranch = { repository: 'acme/site', branch: g.branch, lastSha: 'c0ffee' }; g.own = [87];
+    d.audit = [];
+  });
+  ledger.close();
+  assert.deepEqual(await gh.effects(writer.id), { known: true, repository: 'acme/site', branch: grant.branch, branchExists: false, pulls: [], writes: 2, createdBranch: true, opened: 1 });
   fail = true;
   await assert.rejects(gh.effects(writer.id), /GitHub branch lookup failed \(HTTP 502\)/);
   assert.equal(gh.revokeEnded(writer.id), true);
