@@ -29,6 +29,8 @@ type Claim={workId:string;attemptId:string;leaseGeneration:number};
 export type WorkforceMesh={
   liveWork(caller:string,id:string,attemptId:string,generation:number):Promise<{id:string;target:string;role:string}>;
   workTarget(caller:string,id:string):Promise<{id:string;target:string;role:string;state:string}>;
+  /** Implicit heartbeat: a worker using its grant is alive, so its lease is renewed (same fence, never shortened). */
+  renewOnActivity?(caller:string,id:string,attemptId:string,generation:number):Promise<boolean>;
 };
 export type FileChange={path:string;content?:string;delete?:boolean};
 export type GrantInput={repository:string;ops:GitHubWriteOp[];branch?:string;base?:string;numbers?:number[];
@@ -295,6 +297,8 @@ export class GitHubWorkforce{
   /** Live claim + live grant (+ operation). Called on entry AND again right before every mutation. */
   private async authorize(caller:string,claim:Claim,op:'read'|GitHubWriteOp){
     this.ensure();
+    // Best effort: liveWork below is the authority and reports exactly why a claim is not usable.
+    await this.mesh.renewOnActivity?.(caller,claim.workId,claim.attemptId,claim.leaseGeneration).catch(()=>false);
     await this.mesh.liveWork(caller,claim.workId,claim.attemptId,claim.leaseGeneration);
     const g=this.current(claim.workId);
     check(g&&!g.revokedAt&&g.host===caller,'No GitHub grant for this work: ask the leader');

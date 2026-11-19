@@ -10,10 +10,10 @@ import type {Host,MeshEngine} from './mesh.js';
 type ProtocolEra='2025-11-25'|'2026-07-28';
 
 export async function appWorkforceTurn(mesh:MeshEngine,caller:Host,
-  protocolEra:ProtocolEra,leaseSeconds=900){
+  protocolEra:ProtocolEra,leaseSeconds?:number){
   if(!isAppEventHost(caller))
     throw Error('Native ChatGPT/Gemini app OAuth worker required');
-  if(!Number.isInteger(leaseSeconds)||leaseSeconds<30||leaseSeconds>3600)
+  if(leaseSeconds!==undefined&&(!Number.isInteger(leaseSeconds)||leaseSeconds<30||leaseSeconds>3600))
     throw Error('Invalid lease');
   // Authenticated client call, not a self-reported scheduler/listener.
   await mesh.workforcePoll(caller,{protocolEra,deliveryMode:'DELIVERY_ONLY'});

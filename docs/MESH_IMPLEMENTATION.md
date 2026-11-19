@@ -13,8 +13,8 @@ The main orchestration host is **gpt-a**. A second independently authenticated G
 `panter_mesh_profile_set` — GPT-A chooses host, actor label, requested model/effort, roles and revision CAS.
 `panter_mesh_delegate` — GPT-A queues a role-scoped unit for a configured host; idempotency is mission+key and payload checked.
 `panter_mesh_pending` — authenticated worker reads **its own** queue pointers.
-`panter_mesh_claim` — worker claims, returns attempt ID, generation, instructions and lease.
-`panter_mesh_heartbeat` — same worker renews a live lease.
+`panter_mesh_claim` — worker claims, returns attempt ID, generation, instructions and lease. Without `leaseSeconds` the lease is the role default: 3600 s for a writer, 900 s for read-only work.
+`panter_mesh_heartbeat` — same worker renews its lease (role default when no `leaseSeconds` is given). Using the work's GitHub grant renews it too (those calls carry the same fence), so a worker that is visibly working does not lose its claim. A message never renews a lease. Read-only work, and in owner mode a writer, may also renew after the lease ran out while the fenced attempt still holds.
 `panter_mesh_message` — authenticated host asks or answers a question bound to its actual delegation.
 `panter_mesh_complete` — checks actor, attempt, generation and expiry; stores an immutable terminal digest and appends a RESULT message to GPT-A's inbox.
 `panter_mesh_inbox` — orchestrator and workers read their own messages and authorized work summary.

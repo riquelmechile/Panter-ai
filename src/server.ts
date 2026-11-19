@@ -740,14 +740,14 @@ const handler = createMcpHandler(reqCtx => {
   // Self-reported wake routes are never promoted to verified autonomous delivery.
   server.registerTool('panter_workforce_app_turn',{
     description:'Native ChatGPT or Gemini app, not Codex CLI, Gemini CLI or ChatGPT Work: authenticate using existing per-account MCP OAuth connection; receive one actor-owned task with fenced execution identity. No provider APIs or server-side model inference. Cannot initiate a model turn in an inactive chat.',
-    inputSchema:z.object({leaseSeconds:z.number().int().min(30).max(3600).default(900)}).strict()
+    inputSchema:z.object({leaseSeconds:z.number().int().min(30).max(3600).optional().describe('Lease for this claim. Omit it for the role default: 3600 for a writer, 900 for read-only work.')}).strict()
   },async x=>execute(()=>appWorkforceTurn(mesh,hostPrincipal(),
     reqCtx.era==='modern'?'2026-07-28':'2025-11-25',x.leaseSeconds)));
   server.registerTool('panter_workforce_schedule_pickup',{
     description:`For a host-owned recurring Task or Skill: authenticate the scheduled MCP poll and claim at most one actor-owned non-writer task. Requires ${leaderLabel()} scheduled-worker opt-in. The server never starts the host, and self-reported mode does not prove autonomous wake.`,
     inputSchema:z.object({
       intervalSeconds:z.number().int().min(3600).max(86400).default(3600),
-      leaseSeconds:z.number().int().min(30).max(3600).default(300),
+      leaseSeconds:z.number().int().min(30).max(3600).optional().describe('Lease for this claim. Omit it for the role default: 3600 for a writer, 900 for read-only work.'),
     }).strict(),
   },async x=>execute(async()=>{
     const actor=hostPrincipal();
@@ -810,7 +810,7 @@ const handler = createMcpHandler(reqCtx => {
   // Client must re-arm after a terminal receipt; no server-side model execution.
   server.registerTool('panter_workforce_pickup',{
     description:'Standing worker claims its next QUEUED authorized work with a fenced attempt. No arbitrary work ID required.',
-    inputSchema:z.object({leaseSeconds:z.number().int().min(30).max(3600).default(300)}).strict()
+    inputSchema:z.object({leaseSeconds:z.number().int().min(30).max(3600).optional().describe('Lease for this claim. Omit it for the role default: 3600 for a writer, 900 for read-only work.')}).strict()
   },async x=>execute(()=>mesh.pickup(hostPrincipal(),x.leaseSeconds)));
   server.registerTool('panter_workforce_complete_and_rearm',{
     description:'Persist terminal result and receipt first, then arm the next schema bridge listener; failure is a durable rearm retry, never a work replay.',
@@ -844,8 +844,8 @@ const handler = createMcpHandler(reqCtx => {
     description:`${leaderLabel()} retrieves complete terminal result from authoritative backend, not worker chat output.`,
     inputSchema:z.object({workId:z.uuid()}).strict(),annotations:{readOnlyHint:true}
   },async x=>execute(()=>mesh.resultGet(hostPrincipal(),x.workId)));
-  server.registerTool('panter_mesh_claim',{description:'Claim actor-owned work with a fenced attempt and obtain instructions.',inputSchema:z.object({workId:z.uuid(),leaseSeconds:z.number().int().min(30).max(3600).default(300)})},async x=>execute(()=>mesh.claim(hostPrincipal(),x.workId,x.leaseSeconds)));
-  server.registerTool('panter_mesh_heartbeat',{description:'Renew exact worker lease.',inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),leaseSeconds:z.number().int().min(30).max(3600).default(300)})},async x=>execute(()=>mesh.heartbeat(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.leaseSeconds)));
+  server.registerTool('panter_mesh_claim',{description:'Claim actor-owned work with a fenced attempt and obtain instructions.',inputSchema:z.object({workId:z.uuid(),leaseSeconds:z.number().int().min(30).max(3600).optional().describe('Lease for this claim. Omit it for the role default: 3600 for a writer, 900 for read-only work.')})},async x=>execute(()=>mesh.claim(hostPrincipal(),x.workId,x.leaseSeconds)));
+  server.registerTool('panter_mesh_heartbeat',{description:'Renew exact worker lease.',inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),leaseSeconds:z.number().int().min(30).max(3600).optional().describe('New lease from now. Omit it for the role default: 3600 for a writer, 900 for read-only work.')})},async x=>execute(()=>mesh.heartbeat(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.leaseSeconds)));
   server.registerTool('panter_mesh_complete',{description:`Persist terminal result in backend, enqueue compact ${leaderLabel()} receipt, create durable rearm intent; return only compact ack.`,inputSchema:z.object({workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive(),result:z.string().max(50000),success:z.boolean().default(true)})},async x=>execute(()=>mesh.complete(hostPrincipal(),x.workId,x.attemptId,x.leaseGeneration,x.result,x.success)));
   server.registerTool('panter_mesh_message',{description:`Send actor-bound A2A question, answer or progress update to collaborator or ${leaderLabel()}.`,inputSchema:z.object({missionId:bounded(120),to:hostEnum,workId:z.uuid(),kind:z.enum(['QUESTION','ANSWER','UPDATE']),text:bounded(10000)})},async x=>execute(()=>mesh.message(hostPrincipal(),x)));
   // Compact receipts for routine GPT-A orchestration: full result is fetched explicitly.
