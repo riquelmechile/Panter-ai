@@ -18,6 +18,8 @@ type Delivery={id:string;subId:string;workId:string;state:'PENDING'|'SENDING'|'A
   attempts:number;nextAt:number;lastStatus:number|null;terminalAt?:number;
   /** WORK_NOT_QUEUED: cancelled before it was sent, because its work left the host's queue (not a delivery failure). */
   failureReason?:'SUBSCRIPTION_INACTIVE'|'WORK_NOT_QUEUED';
+  /** Which time in the queue this event is for (absent = 0, the first). See queue(). */
+  cycle?:number;
   /** How many times this event was rung (absent = 1). See EVENT_RERING_MS. */
   rings?:number};
 /** revocations: per-owner epoch bumped by dropOwners; a subscribe that started before a bump never persists. */
@@ -281,7 +283,9 @@ export class WorkforceEvents{
       // worker) would wake the host for nothing: cancel it. One being sent right now is left to finish; if it comes
       // back for a retry, the next pass cancels it.
       const owned=new Set(d.subscriptions.filter(s=>s.owner===actor).map(s=>s.id));
-      for(const x of d.deliveries)if(x.state==='PENDING'&&owned.has(x.subId)&&!stillQueued.has(x.workId)){
+      // Same for an event of an earlier time in the queue: the work was claimed, parked and answered before that
+      // event went out, and the answer has its own event; sending both would ring twice for one answer.
+      for(const x of d.deliveries)if(x.state==='PENDING'&&owned.has(x.subId)&&(!stillQueued.has(x.workId)||(x.cycle??0)!==(cycles.get(x.workId)??0))){
         x.state='FAILED';x.terminalAt=now();x.failureReason='WORK_NOT_QUEUED';
       }
       compactTerminalHistory(d,actor,stillQueued);
@@ -316,7 +320,7 @@ export class WorkforceEvents{
           if(outstanding>=MAX_OUTSTANDING)throw Error('MCP event backlog limit reached');
           outstanding++;
           d.deliveries.push({id,subId:sub.id,workId,state:'PENDING',
-            attempts:0,nextAt:now(),lastStatus:null});added++;
+            attempts:0,nextAt:now(),lastStatus:null,...(cycle?{cycle}:{})});added++;
         }
       return added;
     }).result;

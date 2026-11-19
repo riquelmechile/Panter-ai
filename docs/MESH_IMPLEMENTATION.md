@@ -25,7 +25,7 @@ A new committed message/result increments an inbox revision and emits a local ev
 
 The leader is a chat host and is not always awake. A worker that asks and waits would otherwise hold a lease that runs out while nobody answers.
 
-- A worker's `QUESTION` (`panter_mesh_message`) about its own `RUNNING` work parks it: state `WAITING_INPUT`, no lease, attempt and generation kept, server permits revoked. Outside owner mode the question must carry the claim's `attemptId` and `leaseGeneration`; a wrong pair is rejected as a stale lease and the question is not delivered.
+- A worker's `QUESTION` (`panter_mesh_message`) about its own `RUNNING` work parks it: state `WAITING_INPUT`, no lease, attempt and generation kept, server permits revoked. The question must carry the claim's `attemptId` and `leaseGeneration`, in every mode; a wrong pair is rejected as a stale lease and the question is not delivered, and a question without them is a plain message.
 - Parked work is not load, is not offered to anyone, and is not swept. A parked writer keeps its edit scope.
 - The same attempt may carry on (heartbeat, a GitHub call through its grant) or complete at any time; that resumes or ends the work without an answer.
 - The leader's `ANSWER` moves parked work to `QUEUED` and wakes its worker through the normal routes. The next claim is a new attempt (the old one is fenced out) and returns `questionsAndAnswers`.

@@ -66,7 +66,7 @@ export function leaseLive(w: Pick<MeshWork, 'role' | 'leaseUntil'>, now = Date.n
 /** Delivered with every directed claim (never stored in the instruction, whose text and digest stay the leader's).
  * The leader is not always awake: a worker that stops to ask can wait for hours. */
 export const ASK_RULE = 'Do not stop to ask. If something is unclear, take the most reasonable reading, write the assumption in your result and continue. ' +
-  'Ask the leader (panter_mesh_message, kind QUESTION, with your attemptId and leaseGeneration) only when a wrong guess could not be undone. ' +
+  'Ask the leader (panter_mesh_message, kind QUESTION, always with the attemptId and leaseGeneration of your claim: without them the work is not parked) only when a wrong guess could not be undone. ' +
   'Then say what you did so far in the question and end your turn: the work is parked without losing anything, and you are woken again when the answer arrives.';
 /** A writer that ran and stopped on a question: parked, or back in the queue with the answer and not claimed again.
  * Nobody is writing; only an operator who looked at what it left can close it without it being claimed again. */
@@ -1492,9 +1492,11 @@ export class MeshEngine {
    * awake, and a lease that kept running while the worker waited used to expire and strand the work. Parked work has
    * no lease; its attempt and generation are kept, so the same attempt can carry on (heartbeat, a GitHub call) or
    * finish at any time. The leader's answer puts it back in the queue, which wakes its worker through the normal
-   * routes; the next claim is a new attempt and gets the questions and answers with it. Outside owner mode the
-   * question must carry the attempt and generation to park (a stale session of the same host cannot park a newer
-   * attempt); in owner mode every host is the owner's. Harness work and work held by a transport are never parked. */
+   * routes; the next claim is a new attempt and gets the questions and answers with it. In every mode the
+   * question must carry the attempt and generation of the claim to park: several sessions of one host share its
+   * credentials, and an old one must never park, strip the permits of, or get requeued a newer attempt that asked
+   * nothing. A question without them is a plain message, as it always was. Harness work and work held by a
+   * transport are never parked. */
   async message(caller: Host, input: { missionId: string; to: Host; workId?: string; text: string; kind: 'QUESTION' | 'ANSWER' | 'UPDATE'; attemptId?: string; leaseGeneration?: number }) {
     check(isHost(input.to) && caller !== input.to, 'Invalid recipient');
     check(input.text.trim().length > 0 && input.text.length <= 10000, 'Invalid message');
@@ -1512,7 +1514,7 @@ export class MeshEngine {
       const msg: MeshMessage = { id: randomUUID(), missionId: input.missionId, from: caller, to: input.to, workId: w.id, kind: input.kind, text: input.text, createdAt: iso(), inboxRevision: revision };
       d.messages.push(msg);
       if (input.kind === 'QUESTION' && input.to === lead && caller === w.target && w.state === 'RUNNING' && !w.transportClaim &&
-        !w.specialist && leaseLive(w) && (fenced || ownerMode())) {
+        !w.specialist && leaseLive(w) && fenced) {
         w.state = 'WAITING_INPUT'; w.waitingSince = msg.createdAt; w.leaseUntil = null;
         // A permit is usable only while the claim is live: parked work holds none.
         revokeIssued(d, w.id);

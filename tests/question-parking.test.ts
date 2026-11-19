@@ -31,8 +31,12 @@ function patch(dir: string, workId: string, fn: (w: any, d: any) => void) {
 }
 const stored = (dir: string, workId: string) => { const db = SqliteLedger.open(dir); const d: any = db.read('mesh', {} as any); db.close(); return d.works.find((w: any) => w.id === workId); };
 const work = (key: string, role: 'reviewer' | 'implementer' = 'reviewer') => ({ missionId: 'm-' + key, target: 'gpt-a' as const, role, instruction: 'do the work', idempotencyKey: key });
-const ask = (m: MeshEngine, w: { id: string; missionId: string }, extra: object = {}) =>
-  m.message('gpt-a', { missionId: w.missionId, to: 'claude', workId: w.id, kind: 'QUESTION', text: 'Which base branch?', ...extra }) as Promise<any>;
+/** A question from gpt-a about its work, with the fence of the claim it holds now (extra overrides; null = none). */
+const ask = async (m: MeshEngine, w: { id: string; missionId: string }, extra: object | null = {}) => {
+  const held = await m.workTarget('claude', w.id);
+  const fence = extra !== null && held.attemptId ? { attemptId: held.attemptId, leaseGeneration: held.leaseGeneration } : {};
+  return m.message('gpt-a', { missionId: w.missionId, to: 'claude', workId: w.id, kind: 'QUESTION', text: 'Which base branch?', ...fence, ...(extra ?? {}) }) as Promise<any>;
+};
 const answer = (m: MeshEngine, w: { id: string; missionId: string }) =>
   m.message('claude', { missionId: w.missionId, to: 'gpt-a', workId: w.id, kind: 'ANSWER', text: 'main' }) as Promise<any>;
 
@@ -121,14 +125,14 @@ test('the answer puts the work back in the queue; the next claim is a new attemp
   assert.equal((await m.delegate('claude', work('answer', 'implementer'))).id, w.id);
 }));
 
-test('outside owner mode a question parks only with the attempt and generation of the claim', () => fixture(async (m, dir) => {
+test('a question parks only with the attempt and generation of the claim (strict mode writer)', () => fixture(async (m, dir) => {
   const w = await m.delegate('claude', work('strict', 'implementer'));
   const c = await m.claim('gpt-a', w.id, 60);
-  assert.equal((await ask(m, w)).work, undefined, 'no fence: a message, as before');
+  assert.equal((await ask(m, w, null)).work, undefined, 'no fence: a message, as before');
   assert.equal(stored(dir, w.id).state, 'RUNNING');
   const before = (await m.inbox('claude')).messages.length;
   await assert.rejects(ask(m, w, { attemptId: c.attemptId!, leaseGeneration: 7 }), /Stale work lease/);
-  await assert.rejects(ask(m, w, { attemptId: c.attemptId! }), /Stale work lease/);
+  await assert.rejects(ask(m, w, { attemptId: c.attemptId!, leaseGeneration: undefined }), /Stale work lease/);
   assert.equal((await m.inbox('claude')).messages.length, before, 'a stale question is not delivered');
   assert.equal((await ask(m, w, { attemptId: c.attemptId!, leaseGeneration: c.leaseGeneration })).work.state, 'WAITING_INPUT');
   // Its lease would be long gone; parked work has none, so the writer that asked still finishes.
@@ -208,7 +212,7 @@ test('answered work is rung again with its own event, and counts as unclaimed fr
   await reconcile();
   assert.equal(posted.length, 1, 'one event while it waits in the queue');
   const c = await m.claim('gpt-b', w.id);
-  await m.message('gpt-b', { missionId: w.missionId, to: 'claude', workId: w.id, kind: 'QUESTION', text: 'Which base?' });
+  await m.message('gpt-b', { missionId: w.missionId, to: 'claude', workId: w.id, kind: 'QUESTION', text: 'Which base?', attemptId: c.attemptId!, leaseGeneration: c.leaseGeneration });
   await reconcile();
   assert.equal(posted.length, 1, 'parked work rings nobody');
   patch(dir, w.id, x => { x.createdAt = new Date(Date.now() - 2 * UNCLAIMED_AFTER_SECONDS * 1000).toISOString(); });
@@ -252,3 +256,54 @@ test('a leader switch reconciles a writer that went back to the queue with an an
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('owner mode too: an old session of the same host cannot park a newer attempt that asked nothing', () => fixture(async (m, dir) => {
+  const w = await m.delegate('claude', work('old-session', 'implementer'));
+  const a = await m.claim('gpt-a', w.id);
+  await ask(m, w);
+  await answer(m, w);
+  const b = await m.claim('gpt-a', w.id);
+  assert.equal(b.leaseGeneration, 2);
+  // The session of attempt A is still open and asks again: without a fence it is a message, with its own it is stale.
+  const unfenced = await ask(m, w, null);
+  assert.equal(unfenced.work, undefined);
+  await assert.rejects(ask(m, w, { attemptId: a.attemptId!, leaseGeneration: a.leaseGeneration }), /Stale work lease/);
+  const now = stored(dir, w.id);
+  assert.deepEqual({ state: now.state, attemptId: now.attemptId, ringCycle: now.ringCycle }, { state: 'RUNNING', attemptId: b.attemptId, ringCycle: 1 });
+  assert.ok(Date.parse(now.leaseUntil) > Date.now());
+  // An answer to that stray question changes nothing either: B keeps running and finishes.
+  assert.equal((await answer(m, w)).work, undefined);
+  assert.equal((await m.complete('gpt-a', w.id, b.attemptId!, b.leaseGeneration, 'done')).state, 'COMPLETED');
+}));
+
+test('an event of an earlier time in the queue that was never sent is cancelled when the answer brings its own', () => fixture(async (m, dir) => {
+  const posted: string[] = [];
+  let down = true;
+  const post: EventPost = async (_url, _headers, body) => {
+    const parsed = JSON.parse(body) as { type?: string; challenge?: string; eventId?: string };
+    if (parsed.type === 'verification') return { status: 200, body: JSON.stringify({ challenge: parsed.challenge }) };
+    if (down) return { status: 503, body: '' };
+    posted.push(parsed.eventId!);
+    return { status: 204, body: '' };
+  };
+  const events = new WorkforceEvents(dir, post);
+  await events.subscribe('gpt-b', { name: WORK_EVENT, arguments: { host: 'gpt-b' }, delivery: { mode: 'webhook', url: 'https://connectors.api.openai.com/mcp-events/test-callback', secret: 'whsec_' + Buffer.alloc(32, 7).toString('base64') } });
+  const w = await m.delegate('claude', { ...work('two-cycles'), target: 'gpt-b' });
+  const reconcile = () => reconcileWorkforceEventOutbox(['gpt-b'], host => m.queueSnapshot(host), events);
+  // The first event is still waiting for a retry when the work is claimed, parked and answered, with no outbox
+  // pass in between that would have seen it leave the queue.
+  await reconcile();
+  assert.equal(events.status('claude').pending, 1);
+  const c = await m.claim('gpt-b', w.id);
+  await m.message('gpt-b', { missionId: w.missionId, to: 'claude', workId: w.id, kind: 'QUESTION', text: 'Which base?', attemptId: c.attemptId!, leaseGeneration: c.leaseGeneration });
+  await m.message('claude', { missionId: w.missionId, to: 'gpt-b', workId: w.id, kind: 'ANSWER', text: 'main' });
+  down = false;
+  const ledger = SqliteLedger.open(dir);
+  ledger.mutate('events', {} as any, (d: any) => { for (const x of d.deliveries) x.nextAt = 0; });
+  ledger.close();
+  await reconcile();
+  await reconcile();
+  assert.equal(posted.length, 1, 'one ring for one answer');
+  const status = events.status('claude');
+  assert.deepEqual({ pending: status.pending, accepted: status.accepted, cancelled: status.cancelled }, { pending: 0, accepted: 1, cancelled: 1 });
+}));
