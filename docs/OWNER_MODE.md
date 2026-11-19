@@ -9,6 +9,7 @@ Para un despliegue de un solo dueño: todas las cuentas conectadas (Claude, GPT-
 | Escribir exige un permiso del operador (`panter_harness_write_grant`) atado al texto exacto del objetivo, de un solo uso, máximo 24 h y 16 rutas | El permiso es opcional: la delegación del líder es la autorización. Sigue disponible para fijar una corrida a rutas acotadas |
 | `panter_mesh_delegate` con rol `implementer` siempre fallaba con `Authorized run required` | El líder delega escritores directo |
 | Un escritor necesitaba rutas explícitas | Sin rutas = todo el repositorio |
+| Un escritor cuyo lease venció quedaba como resultado incierto: ni renovar ni completar | Mientras su intento siga vigente (mismo `attemptId` y `leaseGeneration`, nadie lo reclamó de nuevo) puede renovar y completar tarde, igual que el trabajo de solo lectura. Reclamarlo otra vez sigue dando `OUTCOME_UNKNOWN` |
 | Los despertares (Grok, eventos MCP, Claude Routine, sondeo programado) rechazaban escritores y a un host ocupado | Aceptan escritores, y el trabajo queda en cola detrás del que está ocupado |
 | `panter_mesh_delegate_auto` solo delegaba si el trabajador había llamado en los últimos 2 minutos | Elige al trabajador alcanzable (escucha en vivo, eventos MCP, webhook de Grok, Routine de Claude o correo de Gemini) con menos carga |
 | Palabras como "deploy", "permisos", "seguridad" o "migración" y no listar rutas mandaban la corrida a descubrimiento + diseño + verificación + 4R | Son un aviso. Solo una observación explícita (`requirementsClear:false`, `resumableFromDiff:false`) o Judgment Day piden la ruta completa |
@@ -19,6 +20,7 @@ Para un despliegue de un solo dueño: todas las cuentas conectadas (Claude, GPT-
 | Las unidades paralelas debían caber en rutas listadas | Con todo el repo como alcance, cualquier conjunto de unidades disjuntas |
 
 Además, en cualquier modo:
+- Un claim sin `leaseSeconds` recibe el lease de su rol: 3600 s un escritor, 900 s el trabajo de solo lectura (antes 300 s para todos). Usar el permiso GitHub del trabajo o mandar un mensaje sobre él renueva el lease sin llamar a `panter_mesh_heartbeat`.
 - `panter_workforce_status` agrega por trabajador `wakeRoutes` (cómo se le puede despertar ahora), `last24h` (completados, fallados y último resultado) y `reachable`. `presence` sigue midiendo solo los últimos 2 minutos.
 - `panter_mesh_withdraw` (por el router `panter_mesh`, operación `withdraw`): el líder retira trabajo en cola que nadie empezó y revoca su permiso GitHub.
 

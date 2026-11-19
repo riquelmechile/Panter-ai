@@ -22,7 +22,7 @@ export const EFFORT_REQUEST_PATTERN = /^[A-Za-z0-9._-]{1,32}$/;
 export type WorkerExecutionRequest = { serviceTier?: string; stream?: boolean; parallelToolCalls?: boolean; maxNativeSubagents?: number };
 export type WorkExecutionRequest = WorkerExecutionRequest & { status: 'REQUESTED_UNVERIFIED'; model: string; reasoningEffort: string };
 export type MeshMessage = { id: string; missionId: string; from: Host; to: Host; workId: string | null; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' | 'RESULT'; text: string; createdAt: string; inboxRevision: number };
-export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; transportClaim?: boolean; withdrawn?: boolean;
+export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; /** When its current attempt was claimed by the worker itself (never a transport). */claimedAt?: string; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; transportClaim?: boolean; withdrawn?: boolean;
   /** How a result reached Panter when it was not a direct worker call (the text itself stays exactly as sent). */via?: 'gmail-relay' };
 export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
@@ -45,12 +45,21 @@ export type GrokWakeAttempt = {workId:string;state:'RESERVED'|'SIGNAL_ACCEPTED'|
  * (at most GROK_MAX_RINGS times): a lost ring must never block Grok for every other work. */
 export const GROK_RING_STALE_MS=15*60_000;
 export const GROK_MAX_RINGS=3;
+/** Lease a claim gets when the worker names none. A writer needs time to read, change, test and publish; five
+ * minutes for every role used to expire before a writer's first commit and left the work stuck. */
+export const WRITER_LEASE_SECONDS = 3600;
+export const READ_ONLY_LEASE_SECONDS = 900;
+export function defaultLeaseSeconds(role: MeshRole): number {
+  return role === 'implementer' ? WRITER_LEASE_SECONDS : READ_ONLY_LEASE_SECONDS;
+}
 /** A worker's fenced attempt may still renew or complete its work. Read-only work whose lease ran out while its
  * worker was still busy (a review that took longer than the lease) keeps its result: the fence (state RUNNING,
  * same attemptId and generation) proves nobody requeued, reclaimed or abandoned it in the meantime. Writers stay
- * strict: an expired writer is OUTCOME_UNKNOWN territory and only an operator reconciles it. */
+ * strict: an expired writer is OUTCOME_UNKNOWN territory and only an operator reconciles it. In owner mode the
+ * fence is enough for a writer too: every host is the owner's, and the same attempt finishing late replays
+ * nothing. Claiming it again is still refused (OUTCOME_UNKNOWN): a second attempt never adopts an uncertain write. */
 export function leaseLive(w: Pick<MeshWork, 'role' | 'leaseUntil'>, now = Date.now()): boolean {
-  return w.role !== 'implementer' || Date.parse(w.leaseUntil ?? '') > now;
+  return w.role !== 'implementer' || ownerMode() || Date.parse(w.leaseUntil ?? '') > now;
 }
 export type ClaudeWakeAttempt = GrokWakeAttempt & {sessionId:string|null};
 type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; claudeWakeAttempts?: ClaudeWakeAttempt[]; serverPermits?: ServerPermit[]; leader?: Host; formerLeaders?: Host[]; pendingPhaseAdoption?: Host[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
@@ -887,9 +896,9 @@ export class MeshEngine {
 
   pending(caller: Host) { return this.read(d => d.works.filter(w => w.target === caller && w.state === 'QUEUED').map(w => ({ workId: w.id, missionId: w.missionId, role: w.role, createdAt: w.createdAt }))); }
   /** requireFree: never hand back another attempt's live lease (a transport retry must own a new claim). */
-  async claim(caller: Host, workId: string, leaseSeconds = 300, requireQueued = false, requireFree = false, transport = false) {
+  async claim(caller: Host, workId: string, leaseSeconds?: number, requireQueued = false, requireFree = false, transport = false) {
     check(caller!==leaderHost(),'Only workers may claim delegated work');
-    check(leaseSeconds >= 30 && leaseSeconds <= 3600, 'Invalid lease');
+    check(leaseSeconds === undefined || (leaseSeconds >= 30 && leaseSeconds <= 3600), 'Invalid lease');
     const offered=await this.read(d=>d.works.find(w=>w.id===workId&&w.target===caller)??null);
     if(offered?.role==='implementer'&&this.writeGuard)
       await this.writeGuard(offered.missionId,offered.specialist?.allowedEditSurfaces??[]);
@@ -923,12 +932,13 @@ export class MeshEngine {
       if (caller !== leaderHost() && !transport) {
         const presence = (d.workforce ??= {})[caller as WorkerHost] ??= {};
         presence.lastClaimAt = iso();
+        w.claimedAt = presence.lastClaimAt;
         const grokWake=(d.grokWakeAttempts??[]).find(a=>a.workId===w.id);
         const claudeWake=(d.claudeWakeAttempts??[]).find(a=>a.workId===w.id);
         for(const wake of [grokWake,claudeWake])
           if(wake?.state==='SIGNAL_ACCEPTED')wake.claimedAt=presence.lastClaimAt;
       }
-      w.leaseUntil = new Date(Date.now() + leaseSeconds * 1000).toISOString();
+      w.leaseUntil = new Date(Date.now() + (leaseSeconds ?? defaultLeaseSeconds(w.role)) * 1000).toISOString();
       this.notify(d, leaderHost());
       return w;
     });
@@ -936,9 +946,9 @@ export class MeshEngine {
   /** A standing worker obtains a real fenced claim, without enumerating IDs.
    * No inference takes place here; the host executes the returned instructions.
    */
-  async pickup(caller:Host,leaseSeconds=300,readOnlyOnly=false) {
+  async pickup(caller:Host,leaseSeconds?:number,readOnlyOnly=false) {
     check(caller!==leaderHost(),'Only workers may pick up delegated work');
-    check(Number.isInteger(leaseSeconds)&&leaseSeconds>=30&&leaseSeconds<=3600,'Invalid lease');
+    check(leaseSeconds===undefined||(Number.isInteger(leaseSeconds)&&leaseSeconds>=30&&leaseSeconds<=3600),'Invalid lease');
     // Snapshot candidates only; claim() still validates authority and CAS under SQLite.
     const candidates=(await this.pending(caller))
       .filter(w=>!readOnlyOnly||w.role!=='implementer')
@@ -982,7 +992,7 @@ export class MeshEngine {
     if ((await this.read(d => due(d).length)) === 0) return [];
     return this.write(d => {
       const ids: string[] = [];
-      for (const w of due(d)) { w.state = 'QUEUED'; w.attemptId = null; w.leaseUntil = null; delete w.transportClaim; revokeIssued(d, w.id); ids.push(w.id); }
+      for (const w of due(d)) { w.state = 'QUEUED'; w.attemptId = null; w.leaseUntil = null; delete w.transportClaim; delete w.claimedAt; revokeIssued(d, w.id); ids.push(w.id); }
       if (ids.length) { this.notify(d, host); this.notify(d, leaderHost()); }
       return ids;
     });
@@ -995,26 +1005,49 @@ export class MeshEngine {
       const w = d.works.find(w => w.id === id && w.target === caller);
       check(w && w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
       check(w.role !== 'implementer', 'Writer claims are never released automatically');
-      w.state = 'QUEUED'; w.attemptId = null; w.leaseUntil = null; delete w.transportClaim;
+      w.state = 'QUEUED'; w.attemptId = null; w.leaseUntil = null; delete w.transportClaim; delete w.claimedAt;
       revokeIssued(d, w.id);
       this.notify(d, caller);
       return {workId:w.id,state:w.state};
     });
   }
-  async heartbeat(caller: Host, id: string, attemptId: string, generation: number, leaseSeconds = 300) {
+  async heartbeat(caller: Host, id: string, attemptId: string, generation: number, leaseSeconds?: number) {
     check(caller!==leaderHost(),'Only workers may renew delegated work');
     return this.write(d => {
       const w = d.works.find(w => w.id === id && w.target === caller);
       check(w && w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
       check(leaseLive(w), 'Lease expired');
       check(!w.transportClaim, 'Work is held by a transport');
-      check(leaseSeconds >= 30 && leaseSeconds <= 3600, 'Invalid lease');
-      // Read-only work may renew a lease that already ran out (leaseLive), keeping its attempt and generation. That
-      // keeps its result, never its server authority: a permit is usable only while the claim is live, so a claim
-      // that lapsed loses its permits here, in the same mutation, and needs a new grant from the leader.
+      check(leaseSeconds === undefined || (leaseSeconds >= 30 && leaseSeconds <= 3600), 'Invalid lease');
+      // Read-only work (and, in owner mode, a writer) may renew a lease that already ran out (leaseLive), keeping its
+      // attempt and generation. That keeps its result, never its server authority: a permit is usable only while the
+      // claim is live, so a claim that lapsed loses its permits here, in the same mutation, and needs a new grant
+      // from the leader.
       if (!(Date.parse(w.leaseUntil ?? '') > Date.now())) revokeIssued(d, w.id);
-      w.leaseUntil = new Date(Date.now() + leaseSeconds * 1000).toISOString();
+      w.leaseUntil = new Date(Date.now() + (leaseSeconds ?? defaultLeaseSeconds(w.role)) * 1000).toISOString();
       return w;
+    });
+  }
+  /** Implicit heartbeat: a worker that is visibly working on its claim (a GitHub read or write through Panter)
+   * keeps its lease without having to remember panter_mesh_heartbeat. Same fence as an explicit heartbeat, and a
+   * lease is never shortened. It writes only when less than half the role's default lease is left, so a burst of
+   * calls costs one ledger write. Never throws: the caller's own authorization check reports what is wrong. */
+  async renewOnActivity(caller: Host, id: string, attemptId: string, generation: number): Promise<boolean> {
+    if (caller === leaderHost()) return false;
+    const due = (d: MeshData) => {
+      const w = d.works.find(w => w.id === id && w.target === caller);
+      if (!w || w.state !== 'RUNNING' || w.attemptId !== attemptId || w.leaseGeneration !== generation ||
+        w.transportClaim || !leaseLive(w)) return null;
+      const left = Date.parse(w.leaseUntil ?? '') - Date.now();
+      return left < defaultLeaseSeconds(w.role) * 500 ? w : null;
+    };
+    if (!(await this.read(d => due(d) !== null))) return false;
+    return this.write(d => {
+      const w = due(d);
+      if (!w) return false;
+      if (!(Date.parse(w.leaseUntil ?? '') > Date.now())) revokeIssued(d, w.id);
+      w.leaseUntil = new Date(Date.now() + defaultLeaseSeconds(w.role) * 1000).toISOString();
+      return true;
     });
   }
   /** The caller's live claim on its own work (no mutation): used to authorize work-scoped capabilities. */
@@ -1033,7 +1066,7 @@ export class MeshEngine {
     return this.read(d => {
       const w = d.works.find(w => w.id === id);
       check(w, 'Work not found');
-      return { id: w.id, target: w.target, role: w.role, state: w.state, createdAt: w.createdAt, leaseUntil: w.leaseUntil, attemptId: w.attemptId, leaseGeneration: w.leaseGeneration, transportHeld: Boolean(w.transportClaim && w.state === 'RUNNING') };
+      return { id: w.id, target: w.target, role: w.role, state: w.state, createdAt: w.createdAt, leaseUntil: w.leaseUntil, claimedAt: w.claimedAt ?? null, attemptId: w.attemptId, leaseGeneration: w.leaseGeneration, transportHeld: Boolean(w.transportClaim && w.state === 'RUNNING') };
     });
   }
   /** Leader withdraws remote read-only work nobody really started: still QUEUED, or only held by a transport
@@ -1234,6 +1267,14 @@ export class MeshEngine {
       check(w && w.missionId === input.missionId, 'Known work is required for peer messages');
       this.contentGuard?.(input.missionId,[input.text],'This message');
       check((caller === leaderHost() && w.target === input.to) || (input.to === leaderHost() && w.target === caller), 'Not a member of this delegation');
+      // A worker reporting on its own running work is alive: same implicit heartbeat as its GitHub calls.
+      if (w.target === caller && w.state === 'RUNNING' && !w.transportClaim && leaseLive(w)) {
+        const until = Date.now() + defaultLeaseSeconds(w.role) * 1000;
+        if (!(Date.parse(w.leaseUntil ?? '') >= until)) {
+          if (!(Date.parse(w.leaseUntil ?? '') > Date.now())) revokeIssued(d, w.id);
+          w.leaseUntil = new Date(until).toISOString();
+        }
+      }
       const revision = this.notify(d, input.to);
       const msg: MeshMessage = { id: randomUUID(), missionId: input.missionId, from: caller, to: input.to, workId: w.id, kind: input.kind, text: input.text, createdAt: iso(), inboxRevision: revision };
       d.messages.push(msg);
@@ -1268,7 +1309,7 @@ export class MeshEngine {
     return this.read(d => ({
       revision: d.inboxRevision[caller],
       messages: d.messages.filter(m => m.to === caller && m.inboxRevision > sinceRevision),
-      works: d.works.filter(w => w.target === caller || caller === leaderHost()).map(w => ({ id: w.id, missionId: w.missionId, target: w.target, role: w.role, state: w.state, receiptDigest: w.receiptDigest, completedAt: w.completedAt, withdrawn: w.withdrawn === true, ...(w.via ? { via: w.via } : {}) })),
+      works: d.works.filter(w => w.target === caller || caller === leaderHost()).map(w => ({ id: w.id, missionId: w.missionId, target: w.target, role: w.role, state: w.state, receiptDigest: w.receiptDigest, completedAt: w.completedAt, withdrawn: w.withdrawn === true, ...(w.claimedAt ? { claimedAt: w.claimedAt } : {}), ...(w.via ? { via: w.via } : {}) })),
     }));
   }
   /** Safe to publish across the host mesh: never include actor-specific counts or secrets. */

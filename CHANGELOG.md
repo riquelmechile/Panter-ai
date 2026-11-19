@@ -2,6 +2,15 @@
 
 All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://semver.org/). Releases before 1.0 are described in [docs/HISTORY.md](docs/HISTORY.md).
 
+## Unreleased
+
+### Fixed
+- **Leases that fit the work.** Every claim used to get five minutes unless the worker asked for more, so a writer's lease ran out before its first commit: the commit was refused as stale, the work stayed `RUNNING` with nobody on it, and only an operator could close it.
+  - A claim, pickup or heartbeat that names no `leaseSeconds` now gets the default of the work's role: 3600 s for a writer, 900 s for read-only work. An explicit value is honoured as before (30 to 3600).
+  - Implicit heartbeat: a worker using its work's GitHub grant (`panter_github_*`, reads included) or sending a message about its own running work keeps its lease. Same fence as `panter_mesh_heartbeat`, a lease is never shortened, and it writes only when less than half the default is left.
+  - Owner mode: a writer whose lease ran out can still renew or complete while its fenced attempt holds (same `attemptId` and `leaseGeneration`, nobody claimed it again), as read-only work already could. Outside owner mode writers stay strict. Claiming an expired writer again is still `OUTCOME_UNKNOWN` in every mode.
+- `claimedAt` on each work (when the worker itself claimed its current attempt), in the leader's inbox and in the work view used for grants.
+
 ## 1.6.0 (2026-11-10)
 
 ### Added

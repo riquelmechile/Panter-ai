@@ -256,3 +256,12 @@ La interfaz read-only no ejecuta código, no hace cambios en producción y no re
 - [x] Un trabajo de solo lectura vencido hace más de 15 minutos deja de contar como "Grok ocupado"; `leaseExpired` en el estado del workforce.
 - [x] Con eso, el barrido de cada minuto vuelve a avisar a Grok el trabajo en cola en cuanto el vencido deja de contar.
 - [x] Un evento MCP aceptado cuyo trabajo sigue en cola se repite a los 10 minutos, hasta 3 veces, con id propio.
+
+## Fiabilidad del workforce (después de 1.6.0)
+
+- [x] Lease por rol cuando el trabajador no pide uno (escritor 3600 s, solo lectura 900 s), latido implícito al usar el permiso GitHub o mandar un mensaje, y `claimedAt` por trabajo.
+- [x] Modo dueño: un escritor vencido cuyo intento sigue vigente puede renovar y completar tarde.
+- [ ] Barrido automático de trabajos vencidos sin esperar al harness ni a que alguien los reclame.
+- [ ] Una pregunta al líder deja el trabajo en espera sin que su lease venza.
+- [ ] Tras el tercer aviso sin reclamo, reasignar o escalar al líder en vez de dejar el trabajo huérfano.
+- [ ] `panter_mesh_delegate_auto` no cuenta como carga los trabajos vencidos.
