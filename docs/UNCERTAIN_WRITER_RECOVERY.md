@@ -14,3 +14,16 @@ This is a **manual security procedure** for an operator with authenticated acces
 **Failure rules:** never guess an `attemptId` from a log, copy a fence from another task, tell the peer to replay its own work, release overlapping edit scopes without confirmed isolation, or mark an unaudited operator statement as external runner attestation. A remote zombie cannot be fenced at the OS/GitHub layer by Panter alone.
 
 **Deployment policy:** Until real worker termination/revocation is integrated with the execution provider and independently tested, human oversight is mandatory for any `CONFIRMED_NO_EFFECTS` reconciliation.
+
+## The automatic sweep
+
+Every five minutes the server looks for claims whose lease ran out more than `PANTER_SWEEP_GRACE_SECONDS` ago (default 6 hours) and that no transport holds. It never starts a model, never replays a write and never contacts the worker.
+
+- **Read-only work** ends `ABORTED_NO_EFFECTS` (it left nothing to reconcile), its GitHub grant is closed and the leader gets one `SWEPT_EXPIRED_READ_ONLY` message. The swept attempt is fenced out: a result that arrives later is refused.
+- **A writer** becomes `OUTCOME_UNKNOWN`, exactly as when someone tries to claim it again. Ten minutes later Panter looks once, with the workforce token and only in the repository of that work's grant, for the work's own `panter/` branch and pull requests from that branch, and reads what the grant itself recorded (the write budget it reserved, taken before every write; the branch it created; the pull requests and issues it opened). The wait covers a write that was authorized just before the work became uncertain and is still on its way; nothing new can be authorized after. The audit log is not used as evidence, because it keeps only its latest entries. Panter then sends the leader one message with what it saw and the `attemptId` and `leaseGeneration` this procedure needs (`UNCERTAIN_WRITER_NEEDS_RECONCILIATION`). If GitHub cannot be asked, it tries again on the next pass. A work with no GitHub grant is reported as `UNVERIFIABLE`.
+
+"Nothing found" is evidence about that grant, not proof about the world: a worker that published through another tool, or on another branch, is not seen.
+
+**Outside owner mode** the sweep releases no writer. The procedure above stays the only way to close one, and its deployment policy is unchanged.
+
+**In owner mode** a writer for which nothing was found is closed `ABORTED_NO_EFFECTS` by the sweep itself, with the evidence stored as its reconciliation and one `SWEPT_WRITER_NO_EFFECTS` message to the leader; its grant is closed and its edit scope is free again. That is the owner accepting, for a deployment where every host is theirs, the residual risk named above. A writer whose grant reserved any write, created a branch or opened anything, or whose branch or pull request exists, is never closed automatically in any mode.

@@ -243,6 +243,37 @@ export class GitHubWorkforce{
     });
     return {workId,revoked:found};
   }
+  /** Server housekeeping, read-only: what a work left in its granted repository, for the sweep of expired writers.
+   * It looks at the work's own branch and at pull requests from that branch on GitHub, and at what the grant itself
+   * durably records: the write budget it reserved (taken before every write, never evicted), the branch it created
+   * and the pull requests and issues it opened. The audit log is not used: it keeps only the latest entries, so a
+   * real writer could look clean once its rows were dropped. A worker that published somewhere else (another
+   * branch, another tool) is not seen here: "nothing found" is evidence about this grant, not proof about the
+   * world. Throws when GitHub cannot be asked, so the caller retries later. */
+  async effects(workId:string):Promise<{known:false;reason:string}|{known:true;repository:string;branch:string;branchExists:boolean;pulls:number[];writes:number;createdBranch:boolean;opened:number}>{
+    if(!this.configured)return {known:false,reason:'GitHub workforce is not configured'};
+    const grantOf=()=>this.db!.read('github_workforce',seed).grants.find(x=>x.workId===workId);
+    const g=grantOf();
+    if(!g||!g.repository||!g.branch)return {known:false,reason:'The work has no GitHub grant with a working branch'};
+    if(!repoAllowed(this.allow,g.repository)||!validRefName(g.branch))return {known:false,reason:'The granted repository is no longer allowed'};
+    const branch=await this.api('GET',g.repository,`branches/${refPath(g.branch)}`);
+    check(branch.status===200||branch.status===404,`GitHub branch lookup failed (HTTP ${branch.status})`);
+    const owner=g.repository.split('/')[0];
+    const pulls=await this.api('GET',g.repository,`pulls?state=all&per_page=20&head=${encodeURIComponent(`${owner}:${g.branch}`)}`);
+    check(pulls.status===200&&Array.isArray(pulls.data),`GitHub pull request lookup failed (HTTP ${pulls.status})`);
+    // Read the grant again after asking GitHub: a write that was already authorized reserves its budget first.
+    const now=grantOf()??g;
+    return {known:true,repository:g.repository,branch:g.branch,branchExists:branch.status===200,
+      pulls:pulls.data.map((p:any)=>Number(p?.number)).filter((n:number)=>Number.isInteger(n)),
+      writes:Math.max(g.writes,now.writes),createdBranch:Boolean(now.branchCreated||now.createdBranch),opened:(now.own??[]).length};
+  }
+  /** Server housekeeping: a work the sweep ended holds no usable grant. Idempotent; never creates a tombstone. */
+  revokeEnded(workId:string){
+    if(!this.configured)return false;
+    let done=false;
+    this.db!.mutate('github_workforce',seed,d=>{const g=d.grants.find(x=>x.workId===workId);if(g&&!g.revokedAt){g.revokedAt=iso();done=true;}});
+    return done;
+  }
   /** Leader-side, read-only: the diff of a frozen candidate against its base, as text material for hosts that
    * cannot reach the repository (e.g. Gemini by e-mail). Pinned to an allowed repository like every call. */
   async candidateMaterial(repository:string,base:string|null,head:string,max=26_000){
