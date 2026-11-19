@@ -4,6 +4,10 @@ All notable changes to Panter-ai. Versions follow [Semantic Versioning](https://
 
 ## Unreleased
 
+### Added
+
+- **Workforce access by configuration** (`PANTER_WORKFORCE_ACCESS`, see `docs/OWNER_MODE.md`). `restricted` is the default and changes nothing. `open`, accepted only with `PANTER_OWNER_MODE=1`, is for an owner who runs every host and does not want delegated work to come back "not permitted": the paths of a GitHub grant become advice, a worker may take GitHub access itself for the work it holds in an allow-listed repository (`panter_github_access`, reachable through the `panter_github` router as `access`), and agent instruction files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`) may be committed. Workers still never merge, approve, or write default or protected branches, CI, tool or git configuration; a revoked grant stays revoked and a grant the leader set is never widened.
+
 ### Fixed
 - **Leases that fit the work.** Every claim used to get five minutes unless the worker asked for more, so a writer's lease ran out before its first commit: the commit was refused as stale, the work stayed `RUNNING` with nobody on it, and only an operator could close it.
   - A claim, pickup or heartbeat that names no `leaseSeconds` now gets the default of the work's role: 3600 s for a writer, 900 s for read-only work. An explicit value is honoured as before (30 to 3600).

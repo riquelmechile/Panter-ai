@@ -12,6 +12,7 @@
  *   branch; comments only on issues/PRs the leader listed or this grant opened, without bot commands.
  * - There is no merge, approve, delete, label, release, settings or secrets operation at all.
  */
+import { openAccess } from './access-mode.js';
 import {SqliteLedger} from './sqlite-ledger.js';
 
 export const GITHUB_WRITE_OPS=['commit','pr','comment','issue'] as const;
@@ -70,7 +71,9 @@ export function validRefName(name:string){
 }
 const refPath=(name:string)=>name.split('/').map(encodeURIComponent).join('/');
 /** A file path a worker may change: relative, no traversal, never CI, ownership or git configuration. */
-export function safeRepoPath(path:string){
+/** Files an agent obeys when the branch is checked out. Writable only with open access (see access-mode.ts). */
+const AGENT_FILES=new Set(['claude.md','agents.md','gemini.md']);
+export function safeRepoPath(path:string,open=false){
   if(typeof path!=='string'||!path||path.length>400||path.startsWith('/')||path.endsWith('/')||path.includes('\\')||path.includes('\0'))return false;
   const parts=path.split('/');
   if(parts.some(p=>!p||p==='.'||p==='..'))return false;
@@ -85,7 +88,7 @@ export function safeRepoPath(path:string){
     '.woodpecker.yml','.cirrus.yml','.readthedocs.yaml','.readthedocs.yml','action.yml','action.yaml','codemagic.yaml',
     'render.yaml','fly.toml','app.yaml','.gitpod.yml','wrangler.toml','wrangler.json','wrangler.jsonc',
     '.mcp.json','.envrc','.yarnrc','.yarnrc.yml','.pnpmfile.cjs','.npmrc','claude.md','agents.md','gemini.md']);
-  return !denied.has(name);
+  return !denied.has(name)||(open&&AGENT_FILES.has(name));
 }
 /** Repository resources workers may GET (path below repos/{owner}/{repo}/), checked segment by segment. */
 export function safeReadPath(path:string){
@@ -364,9 +367,33 @@ export class GitHubWorkforce{
     await this.mesh.renewOnActivity?.(caller,claim.workId,claim.attemptId,claim.leaseGeneration).catch(()=>false);
     await this.mesh.liveWork(caller,claim.workId,claim.attemptId,claim.leaseGeneration);
     const g=this.current(claim.workId);
-    check(g&&!g.revokedAt&&g.host===caller,'No GitHub grant for this work: ask the leader');
+    check(g&&!g.revokedAt&&g.host===caller,openAccess()&&!g?'No GitHub grant for this work yet: call panter_github with operation "access" (tool panter_github_access) and the repository':'No GitHub grant for this work: ask the leader');
     check(repoAllowed(this.allow,g.repository),'Repository no longer allowed');
     if(op!=='read')check(g.ops.includes(op),`This work's GitHub grant does not include "${op}"`);
+    return g;
+  }
+  /** Open access only: the worker of a live claim takes GitHub access for that work itself, in a repository of the
+   * allowlist (the delegation is the authorization; the owner runs every host). It gets what the leader's default
+   * grant gives: the work's own new panter/ branch, commits, a pull request, comments and issues; a read-only role
+   * gets comments only. It never replaces or widens a grant the leader set, never revives a revoked one, and never
+   * changes repository. Everything else a grant cannot do stays impossible. */
+  async selfGrant(caller:string,claim:Claim,input:{repository:string}){
+    this.ensure();
+    check(openAccess(),'Only the leader grants GitHub access');
+    check(caller!==this.leader(),'Leader work cannot hold a GitHub grant');
+    const work=await this.mesh.liveWork(caller,claim.workId,claim.attemptId,claim.leaseGeneration);
+    const existing=this.current(claim.workId);
+    check(!existing?.revokedAt,'This work\'s GitHub grant was revoked: ask the leader');
+    if(existing){
+      check(existing.host===caller&&existing.repository.toLowerCase()===input.repository.toLowerCase(),'This work already has a GitHub grant for another repository: ask the leader');
+      return existing;
+    }
+    const ops:GitHubWriteOp[]=work.role==='implementer'?['commit','pr','comment','issue']:['comment'];
+    const g=await this.grant(this.leader(),{workId:claim.workId,repository:input.repository,ops});
+    this.db!.mutate('github_workforce',seed,d=>{
+      d.audit.push({at:iso(),workId:g.workId,host:caller,repository:g.repository,op:'self-grant',ref:g.branch??'',outcome:ops.join(',')});
+      d.audit=d.audit.slice(-5000);
+    });
     return g;
   }
   /** Atomically reserve one unit of the work's budget before calling GitHub. */
@@ -444,9 +471,11 @@ export class GitHubWorkforce{
     check(typeof message==='string'&&message.trim().length>0&&message.length<=5000,'Invalid commit message');
     check(!botCommand(message),'Commit messages cannot contain @mentions, HTML comments or bot/slash commands');
     check(Array.isArray(files)&&files.length>0&&files.length<=MAX_FILES,`Commit 1-${MAX_FILES} files`);
+    // Open access: the grant's paths are advice and agent instruction files may be written.
+    const open=openAccess();
     for(const f of files){
-      check(safeRepoPath(f.path),`Path not allowed: ${String(f.path).slice(0,100)}`);
-      check(!g0.paths||g0.paths.some(q=>f.path===q||f.path.startsWith(q.replace(/\/+$/,'')+'/')),`Outside the approved edit surfaces: ${String(f.path).slice(0,100)}`);
+      check(safeRepoPath(f.path,open),`Path not allowed: ${String(f.path).slice(0,100)}`);
+      check(open||!g0.paths||g0.paths.some(q=>f.path===q||f.path.startsWith(q.replace(/\/+$/,'')+'/')),`Outside the approved edit surfaces: ${String(f.path).slice(0,100)}`);
       check(f.delete===true?f.content===undefined:typeof f.content==='string'&&Buffer.byteLength(f.content)<=MAX_FILE_BYTES,
         `Give either text content (≤1 MB) or delete:true for ${f.path}`);
     }
@@ -455,7 +484,7 @@ export class GitHubWorkforce{
     return this.serial(`${g0.repository}#${branch}`,async()=>{
       const g=await this.authorize(caller,claim,'commit');
       check(g.branch===branch&&validRefName(branch)&&branch.startsWith('panter/'),'Grant branch changed');
-      for(const f of files)check(!g.paths||g.paths.some(q=>f.path===q||f.path.startsWith(q.replace(/\/+$/,'')+'/')),`Outside the approved edit surfaces: ${String(f.path).slice(0,100)}`);
+      for(const f of files)check(open||!g.paths||g.paths.some(q=>f.path===q||f.path.startsWith(q.replace(/\/+$/,'')+'/')),`Outside the approved edit surfaces: ${String(f.path).slice(0,100)}`);
       this.reserve(g,'writes');
       try{
         const repo=this.ok(await this.call(g,'GET',''),'repository lookup');

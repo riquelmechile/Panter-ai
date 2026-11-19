@@ -37,3 +37,17 @@ Además, en cualquier modo:
 - Sin `PANTER_GITHUB_INDEPENDENT_REVIEWER` configurado, el portón de entrega bloquea: el revisor independiente es la compuerta que reemplaza a las convenciones.
 - El correo de Gemini nunca lleva escritores.
 - Los servidores downstream mantienen su política `writes` y sus propias aprobaciones.
+
+## Acceso abierto del workforce (`PANTER_WORKFORCE_ACCESS=open`)
+
+El modo dueño quita la fricción de coordinación; el acceso es una decisión aparte, con dos opciones por configuración:
+
+| | `restricted` (por defecto) | `open` (solo con `PANTER_OWNER_MODE=1`) |
+|---|---|---|
+| Rutas (`paths`) de un permiso GitHub | Límite: un commit fuera de ellas se rechaza entero (`Outside the approved edit surfaces`) | Orientación: el commit se acepta |
+| Trabajo delegado sin permiso GitHub | El trabajador no puede usar GitHub hasta que el líder lo otorgue | El trabajador lo toma él mismo para el trabajo que tiene reclamado (`panter_github`, operación `access`), en un repositorio de `PANTER_GITHUB_WORKFORCE_REPOS`: un escritor recibe su rama `panter/` propia, commits, PR, comentarios e issues; los demás roles, comentarios |
+| `AGENTS.md`, `CLAUDE.md`, `GEMINI.md` | No se pueden escribir | Se pueden escribir |
+
+Lo que no se abre en ningún modo: fusionar, aprobar, forzar, escribir ramas por defecto o protegidas, CI y configuración de herramientas o de git, repositorios fuera de la lista, y un permiso revocado sigue revocado. Un permiso que el líder ya dio no se amplía solo.
+
+El servidor no arranca con `open` sin modo dueño. Qué servidores downstream ve cada host no depende de esta variable: es la lista `hosts` de cada servidor en la configuración downstream.

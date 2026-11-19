@@ -1,5 +1,6 @@
 import { leaderHost, leaderLabel, appEventHosts, workerHosts, freezeLeaderHost, leaderPolicyProfile, adoptPendingLeaderPhases } from './core/leadership.js';
 import { freezeOwnerMode } from './core/owner-mode.js';
+import { freezeWorkforceAccess } from './core/access-mode.js';
 import { ExternalOAuthVerifier, staticBearerMatch } from './core/oauth.js';
 import { isAdminPrincipal, parseOwnerTrustedHosts } from './core/owner-trust.js';
 import { createToolSurface, DOMAINS, routerName, workflowTools, type SurfaceRole } from './core/tool-surface.js';
@@ -55,6 +56,8 @@ const configuredLeader = freezeLeaderHost();
 console.error(`Panter leader host: ${configuredLeader}`);
 // Owner mode (single owner operates every host): see src/core/owner-mode.ts. Frozen for the process like the leader.
 const owner = freezeOwnerMode();
+const workforceAccessOpen = freezeWorkforceAccess(owner);
+if (workforceAccessOpen) console.error('Workforce access is OPEN: grant paths are advice, workers may take GitHub access for their own work');
 if (owner) console.error('Panter owner mode: write grants optional, direct writers, keyword risk and delivery conventions are advice');
 const port = Number(process.env.PANTER_PORT ?? '8080');
 const bind = process.env.PANTER_BIND_HOST ?? '127.0.0.1';
@@ -646,6 +649,8 @@ const handler = createMcpHandler(reqCtx => {
   server.registerTool('panter_github_audit',{description:`${leaderLabel()} reads GitHub workforce configuration, grants and the audit of every worker GitHub action.`,inputSchema:z.object({workId:z.uuid().optional()}).strict(),annotations:{readOnlyHint:true}},
     async x=>execute(async()=>({...githubWorkforce.describe(),...githubWorkforce.audit(hostPrincipal(),x.workId)})));
   const githubClaim = {workId:z.uuid(),attemptId:z.uuid(),leaseGeneration:z.number().int().positive()};
+  server.registerTool('panter_github_access',{description:'Worker, only where the deployment runs with open workforce access (PANTER_WORKFORCE_ACCESS=open): take GitHub access yourself for the work you hold, in ONE allow-listed repository, when it came without a grant. An implementer gets its own new panter/ branch, commits, a pull request, comments and issues; other roles get comments. Never merge, approve, default or protected branches, CI or git config. Elsewhere only the leader grants access.',
+    inputSchema:z.object({...githubClaim,repository:bounded(201)}).strict()},async x=>execute(()=>githubWorkforce.selfGrant(hostPrincipal(),x,{repository:x.repository})));
   server.registerTool('panter_github_read',{description:'Worker: read GitHub for your claimed work, in the repository the leader granted. path is relative to repos/{owner}/{repo}/ (e.g. "contents/src/app.ts?ref=main", "pulls/12", "pulls/12/files", "issues?state=open", "commits?sha=main", "compare/main...my-branch"). path "grant" shows your grant. File contents come back decoded as text. Secrets, keys, hooks and admin paths are not readable.',
     inputSchema:z.object({...githubClaim,path:bounded(500)}).strict(),annotations:{readOnlyHint:true}},
     async x=>execute(()=>githubWorkforce.read(hostPrincipal(),x,x.path)));
