@@ -257,13 +257,18 @@ export class WorkforceEvents{
     }).result;
   }
   /** Reconcile only real QUEUED pointers for the authenticated host. */
-  /** workIds is the host's complete queue. revision is the mesh revision that queue was read at: the queue is read
+  /** works is the host's complete queue. revision is the mesh revision that queue was read at: the queue is read
    * in one ledger and applied here in another, so two reconciliations can finish out of order. An older picture
    * applied after a newer one would bring back an event that was just cancelled (its work moved or was claimed)
    * and wake the wrong host; with a revision, a picture older than the last one applied changes nothing. The same
    * revision is applied again on purpose: it is the same queue (see MeshEngine.queueSnapshot), and the periodic
-   * pass over an unchanged queue is what rings a second and third time. */
-  queue(actor:EventHost,workIds:string[],revision?:number){
+   * pass over an unchanged queue is what rings a second and third time.
+   * cycle: how many times the work went back to the queue with an answer from the leader. Each time is a new
+   * event (its own id, its own bounded rings); cycle 0 keeps the id events always had. */
+  queue(actor:EventHost,works:ReadonlyArray<string|{workId:string;cycle?:number}>,revision?:number){
+    const cycles=new Map<string,number>();
+    for(const w of works)if(typeof w!=='string'&&Number.isInteger(w.cycle)&&w.cycle!>0)cycles.set(w.workId,Math.min(w.cycle!,1_000_000));
+    const workIds=works.map(w=>typeof w==='string'?w:w.workId);
     const ids=[...new Set(workIds.filter(id=>
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)))].slice(0,100);
     const stillQueued=new Set(workIds);
@@ -285,7 +290,8 @@ export class WorkforceEvents{
       let outstanding=d.deliveries.filter(x=>!isTerminal(x)).length;
       for(const sub of d.subscriptions.filter(s=>s.owner===actor&&isLive(s)))
         for(const workId of ids){
-          const id='evt_'+hash(sub.id+':'+workId).slice(0,32);
+          const cycle=cycles.get(workId);
+          const id='evt_'+hash(sub.id+':'+workId+(cycle?':c'+cycle:'')).slice(0,32);
           const existing=d.deliveries.find(x=>x.id===id);
           if(existing){
             // Only an event that never reached the host can be rearmed (its subscription had expired, or it was
@@ -376,13 +382,14 @@ export class WorkforceEvents{
 /** Always drain existing webhooks even if one actor's enqueue hits its limit. */
 export async function reconcileWorkforceEventOutbox(
   hosts:readonly EventHost[],
-  pending:(host:EventHost)=>Promise<ReadonlyArray<{workId:string}>|{revision:number;works:ReadonlyArray<{workId:string}>}>,
+  pending:(host:EventHost)=>Promise<ReadonlyArray<{workId:string;cycle?:number}>|{revision:number;works:ReadonlyArray<{workId:string;cycle?:number}>}>,
   events:Pick<WorkforceEvents,'queue'|'flush'>
 ):Promise<{enqueueFailures:number;flushed:number}>{
   const attempts=await Promise.allSettled(hosts.map(async host=>{
     const rows=await pending(host);
-    if(Array.isArray(rows))events.queue(host,rows.map(x=>x.workId));
-    else{const snap=rows as {revision:number;works:ReadonlyArray<{workId:string}>};events.queue(host,snap.works.map(x=>x.workId),snap.revision);}
+    const cyc=(x:{workId:string;cycle?:number})=>({workId:x.workId,cycle:x.cycle});
+    if(Array.isArray(rows))events.queue(host,rows.map(cyc));
+    else{const snap=rows as {revision:number;works:ReadonlyArray<{workId:string;cycle?:number}>};events.queue(host,snap.works.map(cyc),snap.revision);}
   }));
   const flushed=await events.flush();
   return {enqueueFailures:attempts.filter(x=>x.status==='rejected').length,flushed};

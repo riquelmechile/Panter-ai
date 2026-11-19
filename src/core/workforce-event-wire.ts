@@ -28,7 +28,7 @@ export async function subscribeWorkEvents(events:Pick<WorkforceEvents,'subscribe
   // The actor is the authenticated MCP principal, not the client-supplied filter.
   if(!isAppEventHost(host))throw Error('Unsupported event actor');
   const snap=await mesh.queueSnapshot(host as Parameters<MeshEngine['queueSnapshot']>[0]);
-  events.queue(host as Parameters<WorkforceEvents['queue']>[0],snap.works.map(w=>w.workId),snap.revision);
+  events.queue(host as Parameters<WorkforceEvents['queue']>[0],snap.works.map(w=>({workId:w.workId,cycle:w.cycle})),snap.revision);
   void events.flush().catch(()=>{/* durable retry queue remains */});
   return result;
 }
