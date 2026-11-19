@@ -23,7 +23,7 @@ import { registerTaskWire } from './core/workforce-task-wire.js';
 import { WorkforceLongPoll, withListenHint } from './core/workforce-long-poll.js';
 import { GrokRoutineWake } from './core/grok-routine-wake.js';
 import { ringGrokForWork, ringNextGrokWork, pickupClockStart } from './core/harness-wake.js';
-import { sweepExpiredWork, parseSweepGrace } from './core/work-sweep.js';
+import { sweepExpiredWork, sweepUnclaimedWork, parseSweepGrace, type UnclaimedWork } from './core/work-sweep.js';
 import { orderByAvailability } from './core/owner-routing.js';
 import { GeminiMailWake, MailError } from './core/gemini-mail-wake.js';
 import { WorkforceEvents, reconcileWorkforceEventOutbox } from './core/workforce-events.js';
@@ -1272,7 +1272,7 @@ const handler = createMcpHandler(reqCtx => {
 // The event payload cannot authorize writes or expose instructions.
 const reconcileEvents=()=>{
   void reconcileWorkforceEventOutbox(appEventHosts(),
-    host=>mesh.pending(host),workforceEvents)
+    host=>mesh.queueSnapshot(host),workforceEvents)
     .then(({enqueueFailures})=>{
       if(enqueueFailures)console.error('MCP event outbox enqueue deferred');
     }).catch(()=>console.error('MCP event outbox reconciliation failed'));
@@ -1298,6 +1298,22 @@ const sweepWork = () => void sweepExpiredWork(mesh, githubWorkforce, sweepGraceS
 }).catch(() => console.error('Expired work sweep failed'));
 setTimeout(sweepWork, 60_000).unref();
 setInterval(sweepWork, 5 * 60_000).unref();
+// Queued work nobody claims after its rings: in owner mode it moves once to another reachable worker with the
+// role (the ones that answered recently first); otherwise the leader is told. Same reachability rules as
+// panter_mesh_delegate_auto: Gemini's mail relay never carries writers or sensitive missions.
+const unclaimedCandidates = async (w: UnclaimedWork): Promise<Host[]> => {
+  const profiles = await mesh.profiles(), events = workforceEvents.status(leaderHost());
+  const sensitive = downstream.isSensitiveMission(w.missionId);
+  const hosts = workerHosts().filter(h => h !== w.target && profiles.some(p => p.host === h && p.roles.includes(w.role as MeshRole)) &&
+    wakeRoutes(h, events).some(r => !(r === 'GMAIL_RELAY' && (sensitive || w.role === 'implementer'))));
+  return orderByAvailability(hosts, await mesh.loadByHost(), await mesh.lastWorkerActivity(), workerHosts());
+};
+const sweepUnclaimed = () => void sweepUnclaimedWork(mesh, githubWorkforce, unclaimedCandidates, owner).then(r => {
+  if (r.reassigned.length || r.reported.length) console.error(`Unclaimed work sweep: ${r.reassigned.length} moved to another worker, ${r.reported.length} reported to the leader`);
+  // A moved Grok work is rung by the minute sweep below; app hosts are rung by the event outbox.
+}).catch(() => console.error('Unclaimed work sweep failed'));
+setTimeout(sweepUnclaimed, 90_000).unref();
+setInterval(sweepUnclaimed, 5 * 60_000).unref();
 // Queued Grok work that could not be rung yet (Grok was busy) is rung once Grok is free.
 // (work younger than 30 s is left to its creator, which may still be attaching a GitHub grant)
 if (grokRoutineWake.configured) setInterval(() => { void ringNextGrokWork(mesh, grokRoutineWake, 30_000).catch(() => undefined); }, 60_000).unref();

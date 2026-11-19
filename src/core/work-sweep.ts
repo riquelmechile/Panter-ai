@@ -58,3 +58,54 @@ export async function sweepExpiredWork(mesh: SweepMesh, github: SweepGitHub, gra
   }
   return report;
 }
+
+/** Three rings ten minutes apart is what an app host gets (see EVENT_RERING_MS and EVENT_MAX_RINGS); queued work
+ * still unclaimed after that long is not going to be picked up by a wake that already happened. */
+export const UNCLAIMED_AFTER_SECONDS = 30 * 60;
+
+export type UnclaimedWork = { workId: string; missionId: string; target: string; role: string; neverClaimed: boolean; reassignedFrom: string | null; targetBusy: boolean };
+export type UnclaimedMesh<H extends string = string> = {
+  unclaimedQueued(afterMs: number): Promise<UnclaimedWork[]>;
+  reassignUnclaimed(input: { workId: string; to: H }): Promise<{ reassigned: boolean }>;
+  unsettledReassignments(): Promise<Array<{ workId: string; from: string; to: string }>>;
+  settleReassignment(input: { workId: string; grant: 'MOVED' | 'NONE' | 'NOT_MOVED' }): Promise<boolean>;
+  noteUnclaimed(workId: string): Promise<boolean>;
+};
+export type UnclaimedGitHub = {
+  rehostable(workId: string, from: string): 'NONE' | 'OK' | 'BLOCKED';
+  rehost(workId: string, from: string, to: string): 'MOVED' | 'NONE' | 'NOT_MOVED';
+};
+export type UnclaimedReport = { reassigned: Array<{ workId: string; from: string; to: string }>; reported: string[] };
+
+/** One pass over queued work nobody claims. In owner mode, work that was never claimed moves once to another
+ * reachable worker (candidates, best first), its GitHub grant with it; otherwise, and when that worker does not
+ * claim it either, the leader gets one message. Work whose worker is busy on something else is waiting its turn:
+ * it may move to a free worker, but it is not reported as ignored. Nothing is rung here: moving the work wakes
+ * its new worker through the normal routes.
+ *
+ * A move is two writes in two ledgers (the work, then its grant) and they cannot be one transaction. So the work
+ * records the move as unfinished until the grant followed and the leader was told, and every pass starts by
+ * finishing the moves it finds unfinished: a server that stops, or a write that fails, between the two leaves
+ * nothing stranded. Moving the grant is safe to repeat. Work whose grant could not follow is not moved at all. */
+export async function sweepUnclaimedWork<H extends string>(mesh: UnclaimedMesh<H>, github: UnclaimedGitHub,
+  candidates: (work: UnclaimedWork) => Promise<H[]>, owner: boolean, afterSeconds = UNCLAIMED_AFTER_SECONDS): Promise<UnclaimedReport> {
+  const report: UnclaimedReport = { reassigned: [], reported: [] };
+  const settle = async (workId: string, from: string, to: string) => {
+    if (await mesh.settleReassignment({ workId, grant: github.rehost(workId, from, to) })) report.reassigned.push({ workId, from, to });
+  };
+  for (const r of await mesh.unsettledReassignments()) await settle(r.workId, r.from, r.to);
+  for (const w of await mesh.unclaimedQueued(afterSeconds * 1000)) {
+    let movedTo: H | null = null;
+    if (owner && w.neverClaimed && !w.reassignedFrom && github.rehostable(w.workId, w.target) !== 'BLOCKED') {
+      for (const to of await candidates(w)) {
+        if ((to as string) === w.target) continue;
+        if (!(await mesh.reassignUnclaimed({ workId: w.workId, to })).reassigned) continue;
+        movedTo = to;
+        break;
+      }
+    }
+    if (movedTo) await settle(w.workId, w.target, movedTo);
+    else if (!w.targetBusy && await mesh.noteUnclaimed(w.workId)) report.reported.push(w.workId);
+  }
+  return report;
+}

@@ -16,11 +16,13 @@ export type EventHost=LeaderHost;
 type Subscription={id:string;owner:EventHost;url:string;secret:string;expiresAt:string;verifiedAt:string};
 type Delivery={id:string;subId:string;workId:string;state:'PENDING'|'SENDING'|'ACCEPTED'|'FAILED';
   attempts:number;nextAt:number;lastStatus:number|null;terminalAt?:number;
-  failureReason?:'SUBSCRIPTION_INACTIVE';
+  /** WORK_NOT_QUEUED: cancelled before it was sent, because its work left the host's queue (not a delivery failure). */
+  failureReason?:'SUBSCRIPTION_INACTIVE'|'WORK_NOT_QUEUED';
   /** How many times this event was rung (absent = 1). See EVENT_RERING_MS. */
   rings?:number};
 /** revocations: per-owner epoch bumped by dropOwners; a subscribe that started before a bump never persists. */
-type EventData={version:1;subscriptions:Subscription[];deliveries:Delivery[];revocations?:Record<string,number>};
+/** queueSeen: per owner, the newest mesh revision whose queue was applied here; an older picture is ignored. */
+type EventData={version:1;subscriptions:Subscription[];deliveries:Delivery[];revocations?:Record<string,number>;queueSeen?:Record<string,number>};
 type PostResult={status:number;body:string};
 export type EventPost=(url:string,headers:Record<string,string>,body:string)=>Promise<PostResult>;
 const seed:EventData={version:1,subscriptions:[],deliveries:[]};
@@ -255,11 +257,28 @@ export class WorkforceEvents{
     }).result;
   }
   /** Reconcile only real QUEUED pointers for the authenticated host. */
-  queue(actor:EventHost,workIds:string[]){
+  /** workIds is the host's complete queue. revision is the mesh revision that queue was read at: the queue is read
+   * in one ledger and applied here in another, so two reconciliations can finish out of order. An older picture
+   * applied after a newer one would bring back an event that was just cancelled (its work moved or was claimed)
+   * and wake the wrong host; with a revision, a picture older than the last one applied changes nothing. The same
+   * revision is applied again on purpose: it is the same queue (see MeshEngine.queueSnapshot), and the periodic
+   * pass over an unchanged queue is what rings a second and third time. */
+  queue(actor:EventHost,workIds:string[],revision?:number){
     const ids=[...new Set(workIds.filter(id=>
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)))].slice(0,100);
     const stillQueued=new Set(workIds);
     return this.db.mutate('events',seed,d=>{
+      if(revision!==undefined){
+        if(revision<(d.queueSeen?.[actor]??0))return 0;
+        (d.queueSeen??={})[actor]=revision;
+      }
+      // An event not sent yet whose work is no longer in this host's queue (claimed, withdrawn, or moved to another
+      // worker) would wake the host for nothing: cancel it. One being sent right now is left to finish; if it comes
+      // back for a retry, the next pass cancels it.
+      const owned=new Set(d.subscriptions.filter(s=>s.owner===actor).map(s=>s.id));
+      for(const x of d.deliveries)if(x.state==='PENDING'&&owned.has(x.subId)&&!stillQueued.has(x.workId)){
+        x.state='FAILED';x.terminalAt=now();x.failureReason='WORK_NOT_QUEUED';
+      }
       compactTerminalHistory(d,actor,stillQueued);
       if(!ids.length)return 0;
       let added=0;
@@ -269,9 +288,10 @@ export class WorkforceEvents{
           const id='evt_'+hash(sub.id+':'+workId).slice(0,32);
           const existing=d.deliveries.find(x=>x.id===id);
           if(existing){
-            // Only an expiration-failed event can be rearmed, and only when
-            // the actor is subscribed again AND the work remains queued.
-            if(existing.state==='FAILED'&&existing.failureReason==='SUBSCRIPTION_INACTIVE'){
+            // Only an event that never reached the host can be rearmed (its subscription had expired, or it was
+            // cancelled because the work had left the queue), and only when the actor is subscribed AND the
+            // work is queued for it now.
+            if(existing.state==='FAILED'&&(existing.failureReason==='SUBSCRIPTION_INACTIVE'||existing.failureReason==='WORK_NOT_QUEUED')){
               if(outstanding>=MAX_OUTSTANDING)throw Error('MCP event backlog limit reached');
               existing.state='PENDING';existing.attempts=0;existing.nextAt=now();
               existing.lastStatus=null;existing.terminalAt=undefined;
@@ -344,7 +364,9 @@ export class WorkforceEvents{
     return {hosts:appEventHosts().map(host=>({host,activeSubscriptions:data.subscriptions.filter(s=>s.owner===host&&isLive(s)).length})),subscriptions:data.subscriptions.filter(s=>isLive(s)).length,
       pending:data.deliveries.filter(x=>x.state==='PENDING'||x.state==='SENDING').length,
       accepted:data.deliveries.filter(x=>x.state==='ACCEPTED').length,
-      failed:data.deliveries.filter(x=>x.state==='FAILED').length,
+      failed:data.deliveries.filter(x=>x.state==='FAILED'&&x.failureReason!=='WORK_NOT_QUEUED').length,
+      // Not sent because the work left the host's queue first (claimed, withdrawn or moved): not a failure.
+      cancelled:data.deliveries.filter(x=>x.failureReason==='WORK_NOT_QUEUED').length,
       // Events rung more than once because their work stayed queued after an accepted ring.
       rerung:data.deliveries.filter(x=>(x.rings??1)>1).length,
       autonomousWakeVerified:false as const};
@@ -354,12 +376,13 @@ export class WorkforceEvents{
 /** Always drain existing webhooks even if one actor's enqueue hits its limit. */
 export async function reconcileWorkforceEventOutbox(
   hosts:readonly EventHost[],
-  pending:(host:EventHost)=>Promise<ReadonlyArray<{workId:string}>>,
+  pending:(host:EventHost)=>Promise<ReadonlyArray<{workId:string}>|{revision:number;works:ReadonlyArray<{workId:string}>}>,
   events:Pick<WorkforceEvents,'queue'|'flush'>
 ):Promise<{enqueueFailures:number;flushed:number}>{
   const attempts=await Promise.allSettled(hosts.map(async host=>{
     const rows=await pending(host);
-    events.queue(host,rows.map(x=>x.workId));
+    if(Array.isArray(rows))events.queue(host,rows.map(x=>x.workId));
+    else{const snap=rows as {revision:number;works:ReadonlyArray<{workId:string}>};events.queue(host,snap.works.map(x=>x.workId),snap.revision);}
   }));
   const flushed=await events.flush();
   return {enqueueFailures:attempts.filter(x=>x.status==='rejected').length,flushed};

@@ -267,6 +267,38 @@ export class GitHubWorkforce{
       pulls:pulls.data.map((p:any)=>Number(p?.number)).filter((n:number)=>Number.isInteger(n)),
       writes:Math.max(g.writes,now.writes),createdBranch:Boolean(now.branchCreated||now.createdBranch),opened:(now.own??[]).length};
   }
+  /** Whether the grant of never-claimed work could follow it to another worker: NONE (it has no grant), OK, or
+   * BLOCKED (the grant is not that worker's, or it already wrote something). Asked before the work moves, so work
+   * whose grant cannot follow stays where it is and the leader decides. */
+  rehostable(workId:string,from:string):'NONE'|'OK'|'BLOCKED'{
+    if(!this.configured)return 'NONE';
+    const g=this.db!.read('github_workforce',seed).grants.find(x=>x.workId===workId);
+    if(!g||g.revokedAt||!g.repository)return 'NONE';
+    return g.host===from&&!g.branchCreated&&!g.createdBranch&&!g.writes&&!(g.own??[]).length?'OK':'BLOCKED';
+  }
+  /** Server housekeeping: queued work that was never claimed moved to another worker, so its grant moves too (a
+   * grant belongs to the work's worker; without this the new worker would be told it has no GitHub grant). Only a
+   * grant that never wrote anything moves. The default branch name follows the worker, unless another grant in
+   * the repository already uses that name: then it keeps the one it has, which is its own. Nothing is widened.
+   * Safe to repeat: a grant that already moved answers MOVED and nothing changes, so a move the server could not
+   * finish (it stopped between moving the work and moving the grant) is finished by calling this again. */
+  rehost(workId:string,from:string,to:string):'MOVED'|'NONE'|'NOT_MOVED'{
+    if(!this.configured)return 'NONE';
+    let out:'MOVED'|'NONE'|'NOT_MOVED'='NONE';
+    this.db!.mutate('github_workforce',seed,d=>{
+      const g=d.grants.find(x=>x.workId===workId);
+      if(!g||g.revokedAt||!g.repository)return;
+      if(g.host===to){out='MOVED';return;}
+      if(g.host!==from||g.branchCreated||g.createdBranch||g.writes>0||(g.own??[]).length>0){out='NOT_MOVED';return;}
+      const short=workId.slice(0,8),next=`panter/${to}-${short}`;
+      if(g.branch===`panter/${from}-${short}`&&!d.grants.some(x=>x.workId!==workId&&
+        x.repository.toLowerCase()===g.repository.toLowerCase()&&(x.branch??'').toLowerCase()===next.toLowerCase()))g.branch=next;
+      g.host=to;d.writers=writersOf(d);out='MOVED';
+      d.audit.push({at:iso(),workId,host:to,repository:g.repository,op:'rehost',ref:g.branch??'',outcome:`moved from ${from}`});
+      d.audit=d.audit.slice(-5000);
+    });
+    return out;
+  }
   /** Server housekeeping: a work the sweep ended holds no usable grant. Idempotent; never creates a tombstone. */
   revokeEnded(workId:string){
     if(!this.configured)return false;
