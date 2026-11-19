@@ -22,7 +22,7 @@ export const EFFORT_REQUEST_PATTERN = /^[A-Za-z0-9._-]{1,32}$/;
 export type WorkerExecutionRequest = { serviceTier?: string; stream?: boolean; parallelToolCalls?: boolean; maxNativeSubagents?: number };
 export type WorkExecutionRequest = WorkerExecutionRequest & { status: 'REQUESTED_UNVERIFIED'; model: string; reasoningEffort: string };
 export type MeshMessage = { id: string; missionId: string; from: Host; to: Host; workId: string | null; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' | 'RESULT'; text: string; createdAt: string; inboxRevision: number };
-export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; /** When its current attempt was claimed by the worker itself (never a transport). */claimedAt?: string; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; /** When a writer became OUTCOME_UNKNOWN (absent on older ledgers). */uncertainAt?: string; /** Never-claimed work the server moved to another worker: who had it before, and when it moved. */reassignedFrom?: Host; reassignedAt?: string; /** When the leader was told nobody claims this queued work (told once). */unclaimedReportedAt?: string; /** What the server's sweep found for a writer of unknown outcome (looked at once). */sweep?: {at:string;effects:SweepEffects;evidence:string}; transportClaim?: boolean; withdrawn?: boolean;
+export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; /** When its current attempt was claimed by the worker itself (never a transport). */claimedAt?: string; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; /** When a writer became OUTCOME_UNKNOWN (absent on older ledgers). */uncertainAt?: string; /** Never-claimed work the server moved to another worker: who had it before, when it moved, and when the move was finished (its GitHub grant followed and the leader was told). A move without the last one is finished by the next sweep. */reassignedFrom?: Host; reassignedAt?: string; reassignSettledAt?: string; /** When the leader was told nobody claims this queued work (told once). */unclaimedReportedAt?: string; /** What the server's sweep found for a writer of unknown outcome (looked at once). */sweep?: {at:string;effects:SweepEffects;evidence:string}; transportClaim?: boolean; withdrawn?: boolean;
   /** How a result reached Panter when it was not a direct worker call (the text itself stays exactly as sent). */via?: 'gmail-relay' };
 export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
@@ -1176,19 +1176,42 @@ export class MeshEngine {
       return { workId: w.id, reassigned: true as const, from, to: input.to };
     });
   }
-  /** Tell the leader, once, what the server did about unclaimed work: it moved it (the leader hears again only if
-   * the new worker does not claim it either), or it could only report it. No worker text is involved. */
-  async noteUnclaimed(input: { workId: string; event: 'REASSIGNED_UNCLAIMED' | 'UNCLAIMED_QUEUED'; from?: Host; to?: Host; grant?: 'MOVED' | 'NONE' | 'NOT_MOVED' }) {
+  /** Moves that are not finished: the work has its new worker, but the step after it (its GitHub grant follows, the
+   * leader is told) did not happen yet, e.g. the server stopped in between. The sweep finishes them first. */
+  unsettledReassignments() {
+    return this.read(d => d.works.filter(w => w.reassignedFrom && !w.reassignSettledAt)
+      .map(w => ({ workId: w.id, from: w.reassignedFrom!, to: w.target })));
+  }
+  /** Finish a move: record what happened to the GitHub grant and tell the leader, once, in the same write. The
+   * leader hears again only if the new worker does not claim the work either. */
+  async settleReassignment(input: { workId: string; grant: 'MOVED' | 'NONE' | 'NOT_MOVED' }) {
     return this.write(d => {
       const w = d.works.find(w => w.id === input.workId);
-      if (!w) return false;
-      // A move is reported even if the new worker already took the work; "nobody claims it" only while that is true.
-      if (input.event === 'UNCLAIMED_QUEUED') { if (w.state !== 'QUEUED' || w.unclaimedReportedAt) return false; w.unclaimedReportedAt = iso(); }
+      if (!w || !w.reassignedFrom || w.reassignSettledAt) return false;
+      w.reassignSettledAt = iso();
       const lead = leaderHost();
       const revision = this.notify(d, lead);
       d.messages.push({ id: randomUUID(), missionId: w.missionId, from: w.target, to: lead, workId: w.id, kind: 'UPDATE',
-        text: JSON.stringify({ event: input.event, workId: w.id, target: w.target, role: w.role, queuedSince: w.createdAt,
-          ...(w.reassignedFrom ? { reassignedFrom: w.reassignedFrom } : {}), ...(input.grant ? { githubGrant: input.grant } : {}) }),
+        text: JSON.stringify({ event: 'REASSIGNED_UNCLAIMED', workId: w.id, target: w.target, role: w.role, queuedSince: w.createdAt,
+          reassignedFrom: w.reassignedFrom, githubGrant: input.grant,
+          // Only possible if the grant changed between the check and the move: the new worker has no GitHub access.
+          ...(input.grant === 'NOT_MOVED' ? { action: 'Grant GitHub access to the new worker again, or withdraw the work' } : {}) }),
+        createdAt: iso(), inboxRevision: revision });
+      return true;
+    });
+  }
+  /** Tell the leader, once, that queued work is still unclaimed and Panter did not (or could not) move it. No
+   * worker text is involved. */
+  async noteUnclaimed(workId: string) {
+    return this.write(d => {
+      const w = d.works.find(w => w.id === workId);
+      if (!w || w.state !== 'QUEUED' || w.unclaimedReportedAt) return false;
+      w.unclaimedReportedAt = iso();
+      const lead = leaderHost();
+      const revision = this.notify(d, lead);
+      d.messages.push({ id: randomUUID(), missionId: w.missionId, from: w.target, to: lead, workId: w.id, kind: 'UPDATE',
+        text: JSON.stringify({ event: 'UNCLAIMED_QUEUED', workId: w.id, target: w.target, role: w.role, queuedSince: w.createdAt,
+          ...(w.reassignedFrom ? { reassignedFrom: w.reassignedFrom } : {}) }),
         createdAt: iso(), inboxRevision: revision });
       return true;
     });
