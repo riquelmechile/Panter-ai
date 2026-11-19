@@ -267,6 +267,28 @@ export class GitHubWorkforce{
       pulls:pulls.data.map((p:any)=>Number(p?.number)).filter((n:number)=>Number.isInteger(n)),
       writes:Math.max(g.writes,now.writes),createdBranch:Boolean(now.branchCreated||now.createdBranch),opened:(now.own??[]).length};
   }
+  /** Server housekeeping: queued work that was never claimed moved to another worker, so its grant moves too (a
+   * grant belongs to the work's worker; without this the new worker would be told it has no GitHub grant). Only a
+   * grant that never wrote anything moves; the default branch name follows the worker. Nothing is widened. */
+  rehost(workId:string,from:string,to:string):'MOVED'|'NONE'|'NOT_MOVED'{
+    if(!this.configured)return 'NONE';
+    let out:'MOVED'|'NONE'|'NOT_MOVED'='NONE';
+    this.db!.mutate('github_workforce',seed,d=>{
+      const g=d.grants.find(x=>x.workId===workId);
+      if(!g||g.revokedAt||!g.repository)return;
+      if(g.host!==from||g.branchCreated||g.createdBranch||g.writes>0||(g.own??[]).length>0){out='NOT_MOVED';return;}
+      const short=workId.slice(0,8);
+      if(g.branch===`panter/${from}-${short}`){
+        const next=`panter/${to}-${short}`;
+        if(d.grants.some(x=>x.workId!==workId&&x.repository.toLowerCase()===g.repository.toLowerCase()&&(x.branch??'').toLowerCase()===next.toLowerCase())){out='NOT_MOVED';return;}
+        g.branch=next;
+      }
+      g.host=to;d.writers=writersOf(d);out='MOVED';
+      d.audit.push({at:iso(),workId,host:to,repository:g.repository,op:'rehost',ref:g.branch??'',outcome:`moved from ${from}`});
+      d.audit=d.audit.slice(-5000);
+    });
+    return out;
+  }
   /** Server housekeeping: a work the sweep ended holds no usable grant. Idempotent; never creates a tombstone. */
   revokeEnded(workId:string){
     if(!this.configured)return false;

@@ -22,7 +22,7 @@ export const EFFORT_REQUEST_PATTERN = /^[A-Za-z0-9._-]{1,32}$/;
 export type WorkerExecutionRequest = { serviceTier?: string; stream?: boolean; parallelToolCalls?: boolean; maxNativeSubagents?: number };
 export type WorkExecutionRequest = WorkerExecutionRequest & { status: 'REQUESTED_UNVERIFIED'; model: string; reasoningEffort: string };
 export type MeshMessage = { id: string; missionId: string; from: Host; to: Host; workId: string | null; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' | 'RESULT'; text: string; createdAt: string; inboxRevision: number };
-export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; /** When its current attempt was claimed by the worker itself (never a transport). */claimedAt?: string; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; /** When a writer became OUTCOME_UNKNOWN (absent on older ledgers). */uncertainAt?: string; /** What the server's sweep found for a writer of unknown outcome (looked at once). */sweep?: {at:string;effects:SweepEffects;evidence:string}; transportClaim?: boolean; withdrawn?: boolean;
+export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; /** When its current attempt was claimed by the worker itself (never a transport). */claimedAt?: string; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; /** When a writer became OUTCOME_UNKNOWN (absent on older ledgers). */uncertainAt?: string; /** Never-claimed work the server moved to another worker: who had it before, and when it moved. */reassignedFrom?: Host; reassignedAt?: string; /** When the leader was told nobody claims this queued work (told once). */unclaimedReportedAt?: string; /** What the server's sweep found for a writer of unknown outcome (looked at once). */sweep?: {at:string;effects:SweepEffects;evidence:string}; transportClaim?: boolean; withdrawn?: boolean;
   /** How a result reached Panter when it was not a direct worker call (the text itself stays exactly as sent). */via?: 'gmail-relay' };
 export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
@@ -1121,6 +1121,69 @@ export class MeshEngine {
       revokeIssued(d, w.id);
       this.notify(d, w.target); this.notify(d, leaderHost());
       return { workId: w.id, state: w.state, abandoned: true };
+    });
+  }
+  /** Queued directed work nobody has claimed for at least afterMs and the leader has not been told about. A wake
+   * is rung a bounded number of times; after that nothing used to happen and the work sat in the queue for days.
+   * Harness and review work (bound to a specialist) is left out: the harness has its own pickup timeouts. A host
+   * that only polls on a schedule gets two of its intervals before its work counts as unclaimed. */
+  unclaimedQueued(afterMs: number) {
+    check(Number.isFinite(afterMs) && afterMs >= 0, 'Invalid unclaimed threshold');
+    return this.read(d => {
+      const lead = leaderHost(), now = Date.now();
+      return d.works.filter(w => {
+        if (w.state !== 'QUEUED' || w.target === lead || w.specialist || w.unclaimedReportedAt) return false;
+        const p = d.profiles.find(x => x.host === w.target);
+        const wait = Math.max(afterMs, p?.scheduledPickupEnabled ? 2 * (p.scheduledPollIntervalSeconds ?? 0) * 1000 : 0);
+        return now - Date.parse(w.reassignedAt ?? w.createdAt) >= wait;
+      }).map(w => ({ workId: w.id, missionId: w.missionId, target: w.target, role: w.role, queuedSince: w.createdAt,
+        neverClaimed: w.leaseGeneration === 0, reassignedFrom: w.reassignedFrom ?? null,
+        // Its worker is on other work with a live lease: this one is waiting its turn, not ignored.
+        targetBusy: d.works.some(o => o.target === w.target && o.state === 'RUNNING' && Date.parse(o.leaseUntil ?? '') > now) }));
+    });
+  }
+  /** Owner mode: move queued work that was never claimed to another worker, once. Every host is the owner's, so
+   * which of them does the work is not an authority question; outside owner mode the leader decides. Refused for
+   * work that was ever claimed, is bound to a specialist, holds a server permit, or already moved once. */
+  async reassignUnclaimed(input: { workId: string; to: Host }) {
+    check(ownerMode(), 'Unclaimed work is reassigned only in owner mode');
+    check(isWorker(input.to), 'Invalid worker');
+    return this.write(d => {
+      const w = d.works.find(w => w.id === input.workId);
+      const refused = (reason: string) => ({ workId: input.workId, reassigned: false as const, reason });
+      if (!w || w.state !== 'QUEUED') return refused('NOT_QUEUED');
+      if (w.leaseGeneration !== 0 || w.attemptId) return refused('ALREADY_CLAIMED');
+      if (w.specialist) return refused('BOUND_TO_SPECIALIST');
+      if (w.reassignedFrom) return refused('ALREADY_REASSIGNED');
+      if (w.target === input.to) return refused('SAME_WORKER');
+      if (!d.profiles.some(p => p.host === input.to && p.roles.includes(w.role))) return refused('ROLE_NOT_CONFIGURED');
+      if ((d.serverPermits ?? []).some(p => p.workId === w.id && p.state === 'ISSUED')) return refused('HOLDS_SERVER_PERMIT');
+      const from = w.target;
+      w.target = input.to; w.reassignedFrom = from; w.reassignedAt = iso();
+      // The frozen execution settings are the new worker's, not the old one's.
+      const execution = frozenExecution(d, input.to);
+      if (execution) w.executionRequest = execution; else delete w.executionRequest;
+      // A ring sent to the old worker says nothing about the new one.
+      d.grokWakeAttempts = (d.grokWakeAttempts ?? []).filter(a => a.workId !== w.id);
+      d.claudeWakeAttempts = (d.claudeWakeAttempts ?? []).filter(a => a.workId !== w.id);
+      this.notify(d, from); this.notify(d, input.to); this.notify(d, leaderHost());
+      return { workId: w.id, reassigned: true as const, from, to: input.to };
+    });
+  }
+  /** Tell the leader, once, what the server did about unclaimed work: it moved it (the leader hears again only if
+   * the new worker does not claim it either), or it could only report it. No worker text is involved. */
+  async noteUnclaimed(input: { workId: string; event: 'REASSIGNED_UNCLAIMED' | 'UNCLAIMED_QUEUED'; from?: Host; to?: Host; grant?: 'MOVED' | 'NONE' | 'NOT_MOVED' }) {
+    return this.write(d => {
+      const w = d.works.find(w => w.id === input.workId);
+      if (!w || w.state !== 'QUEUED') return false;
+      if (input.event === 'UNCLAIMED_QUEUED') { if (w.unclaimedReportedAt) return false; w.unclaimedReportedAt = iso(); }
+      const lead = leaderHost();
+      const revision = this.notify(d, lead);
+      d.messages.push({ id: randomUUID(), missionId: w.missionId, from: w.target, to: lead, workId: w.id, kind: 'UPDATE',
+        text: JSON.stringify({ event: input.event, workId: w.id, target: w.target, role: w.role, queuedSince: w.createdAt,
+          ...(w.reassignedFrom ? { reassignedFrom: w.reassignedFrom } : {}), ...(input.grant ? { githubGrant: input.grant } : {}) }),
+        createdAt: iso(), inboxRevision: revision });
+      return true;
     });
   }
   /** Server housekeeping for directed work, which nothing else ends: a claim whose lease ran out more than graceMs
