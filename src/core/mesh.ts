@@ -22,7 +22,7 @@ export const EFFORT_REQUEST_PATTERN = /^[A-Za-z0-9._-]{1,32}$/;
 export type WorkerExecutionRequest = { serviceTier?: string; stream?: boolean; parallelToolCalls?: boolean; maxNativeSubagents?: number };
 export type WorkExecutionRequest = WorkerExecutionRequest & { status: 'REQUESTED_UNVERIFIED'; model: string; reasoningEffort: string };
 export type MeshMessage = { id: string; missionId: string; from: Host; to: Host; workId: string | null; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' | 'RESULT'; text: string; createdAt: string; inboxRevision: number };
-export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; /** When its current attempt was claimed by the worker itself (never a transport). */claimedAt?: string; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; transportClaim?: boolean; withdrawn?: boolean;
+export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; /** When its current attempt was claimed by the worker itself (never a transport). */claimedAt?: string; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; /** What the server's sweep found for a writer of unknown outcome (looked at once). */sweep?: {at:string;effects:SweepEffects;evidence:string}; transportClaim?: boolean; withdrawn?: boolean;
   /** How a result reached Panter when it was not a direct worker call (the text itself stays exactly as sent). */via?: 'gmail-relay' };
 export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
@@ -40,6 +40,8 @@ function revokeIssued(d: { serverPermits?: ServerPermit[] }, workId?: string, is
     if (p.state === 'ISSUED' && (!workId || p.workId === workId) && (!issuer || p.issuedBy === issuer))
       p.state = 'REVOKED';
 }
+/** What an expired writer left behind, as far as Panter can see: nothing, something, or it could not look. */
+export type SweepEffects = 'NONE' | 'FOUND' | 'UNVERIFIABLE';
 export type GrokWakeAttempt = {workId:string;state:'RESERVED'|'SIGNAL_ACCEPTED'|'SIGNAL_FAILED';reservedAt:string;statusCode:number|null;claimedAt?:string;rings?:number};
 /** A ring that failed, or that Grok did not pick up within this long, no longer makes Grok busy and may be rung again
  * (at most GROK_MAX_RINGS times): a lost ring must never block Grok for every other work. */
@@ -514,12 +516,27 @@ export class MeshEngine {
       specialist:{agentId:packet.agentId,skillIds:packet.skillIds,packetDigest:packet.digest,assetDigests:packet.assetDigests,modelRequest:binding.modelRequest,effortRequest:binding.effortRequest,bindingRevision:binding.revision,candidateSha:input.candidateSha,allowedEditSurfaces:packet.allowedEditSurfaces}});
   }
   /** Whether a delegate with this mission and idempotency key already exists (a delegate call would replay it). */
-  /** Open work (queued, running or of unknown outcome) per host: owner-mode routing sends new work to the least loaded. */
+  /** Work a host really has ahead of it (queued, or running on a live lease): owner-mode routing sends new work to
+   * the least loaded. Work whose lease ran out and writers of unknown outcome are not load: nobody is working on
+   * them, and counting them sent new work to the hosts that answer least. */
   async loadByHost(): Promise<Partial<Record<Host, number>>> {
     return this.read(d => {
       const load: Partial<Record<Host, number>> = {};
-      for (const w of d.works) if (['QUEUED', 'RUNNING', 'OUTCOME_UNKNOWN'].includes(w.state)) load[w.target] = (load[w.target] ?? 0) + 1;
+      const now = Date.now();
+      for (const w of d.works) if (w.state === 'QUEUED' || (w.state === 'RUNNING' && Date.parse(w.leaseUntil ?? '') > now))
+        load[w.target] = (load[w.target] ?? 0) + 1;
       return load;
+    });
+  }
+  /** When each worker last claimed or completed work itself (a transport acting for it does not count). */
+  async lastWorkerActivity(): Promise<Partial<Record<Host, string>>> {
+    return this.read(d => {
+      const out: Partial<Record<Host, string>> = {};
+      for (const [host, seen] of Object.entries(d.workforce ?? {})) {
+        const at = [seen?.lastClaimAt, seen?.lastReceiptAt].filter((x): x is string => !!x).sort().at(-1);
+        if (at && isHost(host)) out[host] = at;
+      }
+      return out;
     });
   }
   /** Completed and failed work per host since a moment (ISO): what the status reports as recent activity. */
@@ -1104,6 +1121,69 @@ export class MeshEngine {
       revokeIssued(d, w.id);
       this.notify(d, w.target); this.notify(d, leaderHost());
       return { workId: w.id, state: w.state, abandoned: true };
+    });
+  }
+  /** Server housekeeping for directed work, which nothing else ends: a claim whose lease ran out more than graceMs
+   * ago, unrenewed, has no worker on it. Read-only work ends ABORTED_NO_EFFECTS (it left nothing to reconcile) and
+   * the leader gets one message. A writer becomes OUTCOME_UNKNOWN, exactly as if someone had tried to claim it
+   * again: its edit scope stays held and nothing is replayed. Work held by a transport is left to that transport.
+   * The grace is long on purpose: until it passes, the same attempt may still renew or complete late. */
+  async sweepExpired(graceMs: number) {
+    check(Number.isFinite(graceMs) && graceMs >= 0, 'Invalid sweep grace');
+    const lead = leaderHost();
+    const due = (d: MeshData) => d.works.filter(w => w.state === 'RUNNING' && !w.transportClaim && w.target !== lead &&
+      Date.now() - Date.parse(w.leaseUntil ?? '') > graceMs);
+    if ((await this.read(d => due(d).length)) === 0) return { abandoned: [] as string[], uncertain: [] as string[] };
+    return this.write(d => {
+      const abandoned: string[] = [], uncertain: string[] = [];
+      for (const w of due(d)) {
+        revokeIssued(d, w.id);
+        if (w.role === 'implementer') { w.state = 'OUTCOME_UNKNOWN'; uncertain.push(w.id); continue; }
+        const leaseExpiredAt = w.leaseUntil;
+        w.state = 'ABORTED_NO_EFFECTS'; w.attemptId = null; w.leaseUntil = null; w.completedAt = iso(); w.withdrawn = true;
+        w.result = `Swept by Panter: its lease expired at ${leaseExpiredAt} and was never renewed`;
+        const revision = this.notify(d, lead);
+        d.messages.push({ id: randomUUID(), missionId: w.missionId, from: w.target, to: lead, workId: w.id, kind: 'UPDATE',
+          text: JSON.stringify({ event: 'SWEPT_EXPIRED_READ_ONLY', workId: w.id, target: w.target, role: w.role, state: w.state, leaseExpiredAt }),
+          createdAt: iso(), inboxRevision: revision });
+        this.notify(d, w.target);
+        abandoned.push(w.id);
+      }
+      if (uncertain.length) this.notify(d, lead);
+      return { abandoned, uncertain };
+    });
+  }
+  /** Writers of unknown outcome the sweep has not looked at yet. */
+  unsweptUncertainWriters() {
+    return this.read(d => d.works.filter(w => w.role === 'implementer' && w.state === 'OUTCOME_UNKNOWN' && !w.sweep && w.attemptId)
+      .map(w => ({ workId: w.id, missionId: w.missionId, target: w.target, attemptId: w.attemptId!, leaseGeneration: w.leaseGeneration })));
+  }
+  /** Record, once, what the sweep found for a writer of unknown outcome, and tell the leader. Only in owner mode,
+   * and only when nothing was found, the work is closed without effects: outside owner mode a writer is released
+   * only by the operator's fenced decision (reconcileWriter). Evidence of effects never closes anything. */
+  async sweepVerdict(input: { workId: string; attemptId: string; leaseGeneration: number; effects: SweepEffects; evidence: string }) {
+    check(['NONE', 'FOUND', 'UNVERIFIABLE'].includes(input.effects), 'Invalid sweep verdict');
+    check(input.evidence.trim().length > 0 && input.evidence.length <= 1000, 'Invalid sweep evidence');
+    return this.write(d => {
+      const w = d.works.find(w => w.id === input.workId);
+      if (!w || w.role !== 'implementer' || w.state !== 'OUTCOME_UNKNOWN' || w.sweep ||
+        w.attemptId !== input.attemptId || w.leaseGeneration !== input.leaseGeneration)
+        return { workId: input.workId, state: w?.state ?? null, recorded: false };
+      const lead = leaderHost();
+      w.sweep = { at: iso(), effects: input.effects, evidence: input.evidence };
+      const cleared = input.effects === 'NONE' && ownerMode();
+      if (cleared) {
+        w.reconciliation = { resolution: 'CONFIRMED_NO_EFFECTS', evidence: 'Automatic sweep in owner mode: ' + input.evidence, at: w.sweep.at };
+        w.state = 'ABORTED_NO_EFFECTS'; w.completedAt = w.sweep.at; w.leaseUntil = null; w.result = null; w.receiptDigest = null;
+        revokeIssued(d, w.id);
+      }
+      const revision = this.notify(d, lead);
+      d.messages.push({ id: randomUUID(), missionId: w.missionId, from: w.target, to: lead, workId: w.id, kind: 'UPDATE',
+        text: JSON.stringify({ event: cleared ? 'SWEPT_WRITER_NO_EFFECTS' : 'UNCERTAIN_WRITER_NEEDS_RECONCILIATION', workId: w.id,
+          target: w.target, state: w.state, effects: input.effects, evidence: input.evidence,
+          ...(cleared ? {} : { attemptId: w.attemptId, leaseGeneration: w.leaseGeneration }) }),
+        createdAt: iso(), inboxRevision: revision });
+      return { workId: w.id, state: w.state, recorded: true };
     });
   }
   async complete(caller: Host, id: string, attemptId: string, generation: number, result: string, success = true, transport = false, via?: 'gmail-relay') {

@@ -23,6 +23,8 @@ import { registerTaskWire } from './core/workforce-task-wire.js';
 import { WorkforceLongPoll, withListenHint } from './core/workforce-long-poll.js';
 import { GrokRoutineWake } from './core/grok-routine-wake.js';
 import { ringGrokForWork, ringNextGrokWork, pickupClockStart } from './core/harness-wake.js';
+import { sweepExpiredWork, parseSweepGrace } from './core/work-sweep.js';
+import { orderByAvailability } from './core/owner-routing.js';
 import { GeminiMailWake, MailError } from './core/gemini-mail-wake.js';
 import { WorkforceEvents, reconcileWorkforceEventOutbox } from './core/workforce-events.js';
 import { registerWorkforceEventWire } from './core/workforce-event-wire.js';
@@ -286,13 +288,15 @@ function wakeRoutes(host: string, events: { hosts: Array<{ host: string; activeS
  * Gemini's mail relay picks up queued work on its own (never for sensitive missions). */
 async function ownerAutoDelegate(caller: Host, x: { missionId: string; role: MeshRole; instruction: string; idempotencyKey: string }) {
   const profiles = await mesh.profiles(), load = await mesh.loadByHost(), events = workforceEvents.status(caller);
+  const seen = await mesh.lastWorkerActivity();
   const sensitive = downstream.isSensitiveMission(x.missionId);
   const candidates = workerHosts().filter(h => profiles.some(p => p.host === h && p.roles.includes(x.role)))
     // Gemini's mail relay never carries sensitive missions nor writers (it has no repository access).
     .map(h => ({ host: h, routes: wakeRoutes(h, events).filter(r => !(r === 'GMAIL_RELAY' && (sensitive || x.role === 'implementer'))) }))
-    .filter(c => c.routes.length > 0)
-    .sort((a, b) => (load[a.host] ?? 0) - (load[b.host] ?? 0) || workerHosts().indexOf(a.host) - workerHosts().indexOf(b.host));
-  const chosen = candidates[0];
+    .filter(c => c.routes.length > 0);
+  // Workers that answered in the last three days first, then the least loaded.
+  const first = orderByAvailability(candidates.map(c => c.host), load, seen, workerHosts())[0];
+  const chosen = candidates.find(c => c.host === first);
   if (!chosen) return mesh.delegateScheduled(caller, x);
   const work = await mesh.delegate(caller, { ...x, target: chosen.host });
   let wake: unknown = null;
@@ -1285,6 +1289,15 @@ if(geminiMailWake.configured){
   setInterval(mailGemini,30_000).unref();
 }
 eventRetry.unref();
+// Directed work whose lease ran out long ago has nobody on it: end it (read-only) or mark it for reconciliation
+// (writers), so it stops looking busy. A failed pass is retried on the next one.
+const sweepGraceSeconds = parseSweepGrace(process.env.PANTER_SWEEP_GRACE_SECONDS);
+const sweepWork = () => void sweepExpiredWork(mesh, githubWorkforce, sweepGraceSeconds).then(r => {
+  const n = r.abandoned.length + r.uncertain.length + r.cleared.length + r.reported.length;
+  if (n) console.error(`Expired work sweep: ${r.abandoned.length} read-only ended, ${r.uncertain.length} writer(s) marked uncertain, ${r.cleared.length} closed without effects, ${r.reported.length} reported to the leader`);
+}).catch(() => console.error('Expired work sweep failed'));
+setTimeout(sweepWork, 60_000).unref();
+setInterval(sweepWork, 5 * 60_000).unref();
 // Queued Grok work that could not be rung yet (Grok was busy) is rung once Grok is free.
 // (work younger than 30 s is left to its creator, which may still be attaching a GitHub grant)
 if (grokRoutineWake.configured) setInterval(() => { void ringNextGrokWork(mesh, grokRoutineWake, 30_000).catch(() => undefined); }, 60_000).unref();
