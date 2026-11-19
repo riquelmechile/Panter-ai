@@ -1144,7 +1144,8 @@ export class MeshEngine {
   }
   /** Owner mode: move queued work that was never claimed to another worker, once. Every host is the owner's, so
    * which of them does the work is not an authority question; outside owner mode the leader decides. Refused for
-   * work that was ever claimed, is bound to a specialist, holds a server permit, or already moved once. */
+   * work that was ever claimed, is bound to a specialist, holds a server permit, or already moved once, and for a
+   * move that would make one worker both write and check the same mission. */
   async reassignUnclaimed(input: { workId: string; to: Host }) {
     check(ownerMode(), 'Unclaimed work is reassigned only in owner mode');
     check(isWorker(input.to), 'Invalid worker');
@@ -1158,6 +1159,11 @@ export class MeshEngine {
       if (w.target === input.to) return refused('SAME_WORKER');
       if (!d.profiles.some(p => p.host === input.to && p.roles.includes(w.role))) return refused('ROLE_NOT_CONFIGURED');
       if ((d.serverPermits ?? []).some(p => p.workId === w.id && p.state === 'ISSUED')) return refused('HOLDS_SERVER_PERMIT');
+      // Whoever checks a mission's work is never the worker that wrote it: the leader may have picked this worker
+      // exactly because the other one is the author.
+      const checks = (r: MeshRole) => r === 'reviewer' || r === 'verifier';
+      if (d.works.some(o => o.id !== w.id && o.missionId === w.missionId && o.target === input.to &&
+        ((checks(w.role) && o.role === 'implementer') || (w.role === 'implementer' && checks(o.role))))) return refused('NOT_INDEPENDENT');
       const from = w.target;
       w.target = input.to; w.reassignedFrom = from; w.reassignedAt = iso();
       // The frozen execution settings are the new worker's, not the old one's.
@@ -1175,8 +1181,9 @@ export class MeshEngine {
   async noteUnclaimed(input: { workId: string; event: 'REASSIGNED_UNCLAIMED' | 'UNCLAIMED_QUEUED'; from?: Host; to?: Host; grant?: 'MOVED' | 'NONE' | 'NOT_MOVED' }) {
     return this.write(d => {
       const w = d.works.find(w => w.id === input.workId);
-      if (!w || w.state !== 'QUEUED') return false;
-      if (input.event === 'UNCLAIMED_QUEUED') { if (w.unclaimedReportedAt) return false; w.unclaimedReportedAt = iso(); }
+      if (!w) return false;
+      // A move is reported even if the new worker already took the work; "nobody claims it" only while that is true.
+      if (input.event === 'UNCLAIMED_QUEUED') { if (w.state !== 'QUEUED' || w.unclaimedReportedAt) return false; w.unclaimedReportedAt = iso(); }
       const lead = leaderHost();
       const revision = this.notify(d, lead);
       d.messages.push({ id: randomUUID(), missionId: w.missionId, from: w.target, to: lead, workId: w.id, kind: 'UPDATE',

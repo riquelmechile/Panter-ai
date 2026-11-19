@@ -116,6 +116,9 @@ test('owner mode: never-claimed work moves once to another worker, with that wor
     const claimed = await m.claim('gpt-b', w.id);
     assert.equal(claimed.state, 'RUNNING');
     assert.equal(claimed.executionRequest?.model, 'model-b');
+    // A move is still reported when the new worker took the work before the note was written.
+    assert.equal(await m.noteUnclaimed({ workId: w.id, event: 'REASSIGNED_UNCLAIMED', grant: 'NONE' }), true);
+    assert.equal(await m.noteUnclaimed({ workId: w.id, event: 'UNCLAIMED_QUEUED' }), false);
   });
 }));
 
@@ -142,6 +145,12 @@ test('owner mode: work is not moved when it was ever claimed, is bound, or has n
     age(dir, writer.id, AFTER + 60_000);
     assert.deepEqual((await sweepUnclaimedWork(m, noGitHub, to('grok', 'gpt-b'), true)).reassigned, [{ workId: writer.id, from: 'gpt-a', to: 'gpt-b' }]);
     assert.deepEqual(await m.reassignUnclaimed({ workId: writer.id, to: 'gpt-a' }), { workId: writer.id, reassigned: false, reason: 'ALREADY_REASSIGNED' });
+    // Review of a mission never moves to the worker that writes that mission, nor the other way round.
+    const author = await m.delegate('claude', { ...work('pair-write', 'implementer', 'gpt-b'), missionId: 'm-pair' });
+    const review = await m.delegate('claude', { ...work('pair-review', 'reviewer', 'gpt-a'), missionId: 'm-pair' });
+    assert.deepEqual(await m.reassignUnclaimed({ workId: review.id, to: 'gpt-b' }), { workId: review.id, reassigned: false, reason: 'NOT_INDEPENDENT' });
+    assert.deepEqual(await m.reassignUnclaimed({ workId: author.id, to: 'gpt-a' }), { workId: author.id, reassigned: false, reason: 'NOT_INDEPENDENT' });
+    assert.equal((await m.reassignUnclaimed({ workId: review.id, to: 'grok' })).reassigned, true);
     const done = await m.delegate('claude', work('done'));
     const c = await m.claim('gpt-a', done.id);
     await m.complete('gpt-a', done.id, c.attemptId!, c.leaseGeneration, 'ok');
