@@ -20,7 +20,7 @@ Para un despliegue de un solo dueño: todas las cuentas conectadas (Claude, GPT-
 | Las unidades paralelas debían caber en rutas listadas | Con todo el repo como alcance, cualquier conjunto de unidades disjuntas |
 
 Además, en cualquier modo:
-- Un claim sin `leaseSeconds` recibe el lease de su rol: 3600 s un escritor, 900 s el trabajo de solo lectura (antes 300 s para todos). Usar el permiso GitHub del trabajo o mandar un mensaje sobre él renueva el lease sin llamar a `panter_mesh_heartbeat`.
+- Un claim sin `leaseSeconds` recibe el lease de su rol: 3600 s un escritor, 900 s el trabajo de solo lectura (antes 300 s para todos). Usar el permiso GitHub del trabajo renueva el lease sin llamar a `panter_mesh_heartbeat` (esas llamadas llevan el mismo intento y generación). Un mensaje no renueva nada.
 - `panter_workforce_status` agrega por trabajador `wakeRoutes` (cómo se le puede despertar ahora), `last24h` (completados, fallados y último resultado) y `reachable`. `presence` sigue midiendo solo los últimos 2 minutos.
 - `panter_mesh_withdraw` (por el router `panter_mesh`, operación `withdraw`): el líder retira trabajo en cola que nadie empezó y revoca su permiso GitHub.
 

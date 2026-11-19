@@ -1028,8 +1028,8 @@ export class MeshEngine {
       return w;
     });
   }
-  /** Implicit heartbeat: a worker that is visibly working on its claim (a GitHub read or write through Panter)
-   * keeps its lease without having to remember panter_mesh_heartbeat. Same fence as an explicit heartbeat, and a
+  /** Implicit heartbeat: a worker that is visibly working on its claim (a GitHub read or write through Panter,
+   * which carries its attempt and generation) keeps its lease without having to remember panter_mesh_heartbeat. Same fence as an explicit heartbeat, and a
    * lease is never shortened. It writes only when less than half the role's default lease is left, so a burst of
    * calls costs one ledger write. Never throws: the caller's own authorization check reports what is wrong. */
   async renewOnActivity(caller: Host, id: string, attemptId: string, generation: number): Promise<boolean> {
@@ -1267,14 +1267,8 @@ export class MeshEngine {
       check(w && w.missionId === input.missionId, 'Known work is required for peer messages');
       this.contentGuard?.(input.missionId,[input.text],'This message');
       check((caller === leaderHost() && w.target === input.to) || (input.to === leaderHost() && w.target === caller), 'Not a member of this delegation');
-      // A worker reporting on its own running work is alive: same implicit heartbeat as its GitHub calls.
-      if (w.target === caller && w.state === 'RUNNING' && !w.transportClaim && leaseLive(w)) {
-        const until = Date.now() + defaultLeaseSeconds(w.role) * 1000;
-        if (!(Date.parse(w.leaseUntil ?? '') >= until)) {
-          if (!(Date.parse(w.leaseUntil ?? '') > Date.now())) revokeIssued(d, w.id);
-          w.leaseUntil = new Date(until).toISOString();
-        }
-      }
+      // A message never renews a lease: it carries no attempt or generation, so a stale session of the same host
+      // could keep a newer attempt alive. Renewal stays with the fenced paths (heartbeat, renewOnActivity).
       const revision = this.notify(d, input.to);
       const msg: MeshMessage = { id: randomUUID(), missionId: input.missionId, from: caller, to: input.to, workId: w.id, kind: input.kind, text: input.text, createdAt: iso(), inboxRevision: revision };
       d.messages.push(msg);

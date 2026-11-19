@@ -144,18 +144,29 @@ test('owner mode: a writer whose lease ran out finishes late while its fence hol
   });
 }));
 
-test('a worker message about its own running work renews the lease; the leader answering does not', () => fixture(async (m, dir) => {
+test('a message never renews a lease: it carries no fence, so a stale session cannot keep a newer attempt alive', () => fixture(async (m, dir) => {
   const review = await m.delegate('claude', work('msg', 'reviewer'));
-  await m.claim('gpt-a', review.id);
+  const first = await m.claim('gpt-a', review.id);
+  // Attempt A expires and goes back to the queue; the same host claims attempt B.
+  setLease(dir, review.id, -60_000);
+  assert.deepEqual(await m.requeueExpiredReadOnly('gpt-a'), [review.id]);
+  const second = await m.claim('gpt-a', review.id);
+  assert.notEqual(second.attemptId, first.attemptId);
   setLease(dir, review.id, 60_000);
+  // A message from the host (it could be the stale session of attempt A) or from the leader changes no lease.
+  await m.message('gpt-a', { missionId: review.missionId, to: 'claude', workId: review.id, kind: 'UPDATE', text: 'still here' });
   await m.message('claude', { missionId: review.missionId, to: 'gpt-a', workId: review.id, kind: 'UPDATE', text: 'any news?' });
   near(leftSeconds(await leaseOf(m, review.id)), 60);
-  await m.message('gpt-a', { missionId: review.missionId, to: 'claude', workId: review.id, kind: 'UPDATE', text: 'halfway there' });
+  // The stale attempt cannot renew through the fenced paths either; the live one can.
+  assert.equal(await m.renewOnActivity('gpt-a', review.id, first.attemptId!, first.leaseGeneration), false);
+  await assert.rejects(m.heartbeat('gpt-a', review.id, first.attemptId!, first.leaseGeneration), /Stale work lease/);
+  near(leftSeconds(await leaseOf(m, review.id)), 60);
+  assert.equal(await m.renewOnActivity('gpt-a', review.id, second.attemptId!, second.leaseGeneration), true);
   near(leftSeconds(await leaseOf(m, review.id)), 900);
-  // A longer lease the worker asked for is never shortened by a message.
-  setLease(dir, review.id, 3_000_000);
-  await m.message('gpt-a', { missionId: review.missionId, to: 'claude', workId: review.id, kind: 'UPDATE', text: 'still going' });
-  near(leftSeconds(await leaseOf(m, review.id)), 3000);
+  // A lapsed lease is not revived by a message.
+  setLease(dir, review.id, -60_000);
+  await m.message('gpt-a', { missionId: review.missionId, to: 'claude', workId: review.id, kind: 'UPDATE', text: 'late' });
+  assert.ok(leftSeconds(await leaseOf(m, review.id)) < 0);
 }));
 
 test('a GitHub call through the work grant is an implicit heartbeat; a strict expired writer is still refused', () => fixture(async (m, dir) => {

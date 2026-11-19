@@ -259,7 +259,7 @@ La interfaz read-only no ejecuta código, no hace cambios en producción y no re
 
 ## Fiabilidad del workforce (después de 1.6.0)
 
-- [x] Lease por rol cuando el trabajador no pide uno (escritor 3600 s, solo lectura 900 s), latido implícito al usar el permiso GitHub o mandar un mensaje, y `claimedAt` por trabajo.
+- [x] Lease por rol cuando el trabajador no pide uno (escritor 3600 s, solo lectura 900 s), latido implícito al usar el permiso GitHub, y `claimedAt` por trabajo.
 - [x] Modo dueño: un escritor vencido cuyo intento sigue vigente puede renovar y completar tarde.
 - [ ] Barrido automático de trabajos vencidos sin esperar al harness ni a que alguien los reclame.
 - [ ] Una pregunta al líder deja el trabajo en espera sin que su lease venza.
