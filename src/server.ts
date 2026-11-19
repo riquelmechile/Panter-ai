@@ -1272,7 +1272,7 @@ const handler = createMcpHandler(reqCtx => {
 // The event payload cannot authorize writes or expose instructions.
 const reconcileEvents=()=>{
   void reconcileWorkforceEventOutbox(appEventHosts(),
-    host=>mesh.pending(host),workforceEvents)
+    host=>mesh.queueSnapshot(host),workforceEvents)
     .then(({enqueueFailures})=>{
       if(enqueueFailures)console.error('MCP event outbox enqueue deferred');
     }).catch(()=>console.error('MCP event outbox reconciliation failed'));

@@ -19,7 +19,7 @@ type SubscribeInput=Parameters<WorkforceEvents['subscribe']>[1];
  *  it after the subscription is stored, so a connection revoked while its request was still in flight
  *  (slow body, slow callback verification) never keeps a subscription. */
 export async function subscribeWorkEvents(events:Pick<WorkforceEvents,'subscribe'|'unsubscribe'|'queue'|'flush'>,
-  mesh:Pick<MeshEngine,'pending'>,host:string,input:SubscribeInput,stillAuthorized:()=>Promise<boolean>){
+  mesh:Pick<MeshEngine,'queueSnapshot'>,host:string,input:SubscribeInput,stillAuthorized:()=>Promise<boolean>){
   const result=await events.subscribe(host,input);
   if(!(await stillAuthorized())){
     events.unsubscribe(host,{name:input.name,arguments:input.arguments,delivery:{url:input.delivery.url}});
@@ -27,8 +27,8 @@ export async function subscribeWorkEvents(events:Pick<WorkforceEvents,'subscribe
   }
   // The actor is the authenticated MCP principal, not the client-supplied filter.
   if(!isAppEventHost(host))throw Error('Unsupported event actor');
-  const pending=await mesh.pending(host as Parameters<MeshEngine['pending']>[0]);
-  events.queue(host as Parameters<WorkforceEvents['queue']>[0],pending.map(w=>w.workId));
+  const snap=await mesh.queueSnapshot(host as Parameters<MeshEngine['queueSnapshot']>[0]);
+  events.queue(host as Parameters<WorkforceEvents['queue']>[0],snap.works.map(w=>w.workId),snap.revision);
   void events.flush().catch(()=>{/* durable retry queue remains */});
   return result;
 }

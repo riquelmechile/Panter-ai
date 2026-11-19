@@ -911,6 +911,15 @@ export class MeshEngine {
     });
   }
 
+  /** A host's queue together with the ledger revision it was read at. The revision only grows, so a consumer that
+   * keeps state about the queue elsewhere (the event outbox) can tell an older picture from a newer one and
+   * never apply them out of order. */
+  async queueSnapshot(caller: Host) {
+    await this.chain;
+    const revision = this.sqlite.revision('mesh');
+    this.state = this.sqlite.read('mesh', this.state);
+    return { revision, works: this.state.works.filter(w => w.target === caller && w.state === 'QUEUED').map(w => ({ workId: w.id })) };
+  }
   pending(caller: Host) { return this.read(d => d.works.filter(w => w.target === caller && w.state === 'QUEUED').map(w => ({ workId: w.id, missionId: w.missionId, role: w.role, createdAt: w.createdAt }))); }
   /** requireFree: never hand back another attempt's live lease (a transport retry must own a new claim). */
   async claim(caller: Host, workId: string, leaseSeconds?: number, requireQueued = false, requireFree = false, transport = false) {

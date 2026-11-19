@@ -323,10 +323,11 @@ test('an event not sent yet for work that left a host\'s queue is cancelled; the
     const urlA = 'https://connectors.api.openai.com/mcp-events/host-a', urlB = 'https://connectors.api.openai.com/mcp-events/host-b';
     await events.subscribe('gpt-a', { name: WORK_EVENT, arguments: { host: 'gpt-a' }, delivery: { mode: 'webhook', url: urlA, secret } });
     await events.subscribe('gpt-b', { name: WORK_EVENT, arguments: { host: 'gpt-b' }, delivery: { mode: 'webhook', url: urlB, secret } });
-    const reconcile = () => reconcileWorkforceEventOutbox(['gpt-a', 'gpt-b'], host => m.pending(host), events);
+    const reconcile = () => reconcileWorkforceEventOutbox(['gpt-a', 'gpt-b'], host => m.queueSnapshot(host), events);
     // The old worker's receiver is failing: its event waits for a retry.
     const w = await m.delegate('claude', work('stale-ring'));
     await reconcile();
+    const before = await m.queueSnapshot('gpt-a');
     assert.deepEqual({ pending: events.status('claude').pending, accepted: events.status('claude').accepted }, { pending: 1, accepted: 0 });
     // The work moves. The retry for the old worker is cancelled, not sent; the new worker gets its own event.
     assert.equal((await m.reassignUnclaimed({ workId: w.id, to: 'gpt-b' })).reassigned, true);
@@ -339,7 +340,14 @@ test('an event not sent yet for work that left a host\'s queue is cancelled; the
     assert.deepEqual(posted, [{ url: urlB, workId: w.id }]);
     const status = events.status('claude');
     assert.deepEqual({ pending: status.pending, accepted: status.accepted, failed: status.failed, cancelled: status.cancelled }, { pending: 0, accepted: 1, failed: 0, cancelled: 1 });
-    // Claimed work is not rung either: an event still waiting when its work is taken is cancelled the same way.
+    // A reconciliation that read the old worker's queue before the move and applies it after the newer one changes
+    // nothing: the cancelled event stays cancelled and the old worker is not woken.
+    const stale = { revision: before.revision, works: before.works };
+    assert.ok(stale.works.some(x => x.workId === w.id) && stale.revision < (await m.queueSnapshot('gpt-a')).revision);
+    await reconcileWorkforceEventOutbox(['gpt-a'], async () => stale, events);
+    assert.deepEqual(posted, [{ url: urlB, workId: w.id }]);
+    assert.equal(events.status('claude').cancelled, 1);
+        // Claimed work is not rung either: an event still waiting when its work is taken is cancelled the same way.
     down = true;
     const quick = await m.delegate('claude', work('quick'));
     await reconcile();
