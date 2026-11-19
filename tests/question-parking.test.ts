@@ -224,3 +224,31 @@ test('answered work is rung again with its own event, and counts as unclaimed fr
   assert.deepEqual(late.map(x => [x.workId, x.neverClaimed]), [[w.id, false]]);
   await assert.rejects(m.complete('gpt-b', w.id, c.attemptId!, c.leaseGeneration, 'late'), /Stale work lease/);
 }));
+
+test('a leader switch reconciles a writer that went back to the queue with an answer; answered work is never handed to a transport', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'panter-question-switch-'));
+  const prior = { o: process.env.PANTER_OWNER_MODE, l: process.env.PANTER_LEAD_HOST };
+  process.env.PANTER_OWNER_MODE = '1';
+  try {
+    const m = await MeshEngine.open(dir);
+    await m.setProfile('claude', profile('gpt-a'), 0);
+    const writer = await m.delegate('claude', work('switch-writer', 'implementer'));
+    const reader = await m.delegate('claude', { ...work('switch-reader'), missionId: 'm-switch-reader' });
+    const fresh = await m.delegate('claude', { ...work('switch-fresh'), missionId: 'm-switch-fresh' });
+    for (const w of [writer, reader]) { await m.claim('gpt-a', w.id); await ask(m, w); await answer(m, w); }
+    // The mail relay sends the instruction only: it cannot take work that came back with an answer.
+    await assert.rejects(m.claim('gpt-a', reader.id, 600, true, true, true), /Work is not claimable/);
+    assert.equal(stored(dir, reader.id).state, 'QUEUED');
+    // gpt-a becomes the leader: its own queue can never be claimed now.
+    process.env.PANTER_LEAD_HOST = 'gpt-a';
+    await MeshEngine.open(dir);
+    assert.equal(stored(dir, writer.id).state, 'OUTCOME_UNKNOWN', 'a started writer is reconciled, not declared clean');
+    assert.equal(stored(dir, reader.id).state, 'ABORTED_NO_EFFECTS');
+    assert.match(stored(dir, reader.id).result, /back in the queue after an answer/);
+    assert.match(stored(dir, fresh.id).result, /never claimed/);
+  } finally {
+    process.env.PANTER_LEAD_HOST = prior.l ?? 'claude';
+    if (prior.o === undefined) delete process.env.PANTER_OWNER_MODE; else process.env.PANTER_OWNER_MODE = prior.o;
+    await rm(dir, { recursive: true, force: true });
+  }
+});

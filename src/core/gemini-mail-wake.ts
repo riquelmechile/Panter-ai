@@ -35,7 +35,7 @@ const REFUSAL_LIMIT=8;
 export type MailClaim={id:string;state:string;attemptId:string|null;leaseGeneration:number;leaseUntil:string|null;
   instruction:string;role:string;missionId:string};
 export type MailMesh={
-  pending(host:'gemini'):Promise<Array<{workId:string;role:string;createdAt:string;missionId?:string}>>;
+  pending(host:'gemini'):Promise<Array<{workId:string;role:string;createdAt:string;missionId?:string;cycle?:number}>>;
   claim(host:'gemini',workId:string,leaseSeconds:number,requireQueued:boolean,requireFree:boolean,transport:boolean):Promise<MailClaim>;
   requeueExpiredReadOnly(host:'gemini'):Promise<string[]>;
   complete(host:'gemini',id:string,attemptId:string,generation:number,result:string,success:boolean,transport?:boolean,via?:'gmail-relay'):Promise<unknown>;
@@ -115,7 +115,8 @@ export class GeminiMailWake{
     try{
       await this.mesh.requeueExpiredReadOnly('gemini').catch(()=>[]);
       if(this.isListening())return out; // an open Gemini chat takes queued work directly
-      const pending=(await this.mesh.pending('gemini')).filter(w=>w.role!=='implementer'&&!(w.missionId&&this.skipMission(w.missionId)));
+      // Work back in the queue with an answer is not mailed: the mail carries the instruction only (see MeshEngine.claim).
+      const pending=(await this.mesh.pending('gemini')).filter(w=>w.role!=='implementer'&&!w.cycle&&!(w.missionId&&this.skipMission(w.missionId)));
       const data=this.db!.read('gemini_mail',seed);
       const blocked=(id:string)=>(data.backoff??[]).some(b=>b.workId===id&&b.nextAt>now);
       // Forget backoff of works that are no longer waiting, so the list cannot grow forever.

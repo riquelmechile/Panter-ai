@@ -136,7 +136,10 @@ export class MeshEngine {
         // Work addressed to the new leader can never be claimed now: close it explicitly.
         for (const w of data.works) {
           if (w.target !== lead) continue;
-          if (w.state === 'QUEUED') { w.state = 'ABORTED_NO_EFFECTS'; w.completedAt = stamp; w.result = `Leader switch ${from} -> ${lead}: never claimed, aborted without effects`; }
+          // A writer that ran, asked, and went back to the queue with its answer is queued but not "never claimed":
+          // it may have left effects, so it is reconciled like a running one.
+          if (w.state === 'QUEUED' && w.role === 'implementer' && w.leaseGeneration > 0) { w.state = 'OUTCOME_UNKNOWN'; w.uncertainAt = stamp; w.leaseUntil = null; }
+          else if (w.state === 'QUEUED') { w.state = 'ABORTED_NO_EFFECTS'; w.completedAt = stamp; w.result = `Leader switch ${from} -> ${lead}: ${w.leaseGeneration > 0 ? 'back in the queue after an answer, read-only, no effects' : 'never claimed, aborted without effects'}`; }
           else if (w.state === 'RUNNING' || w.state === 'WAITING_INPUT') {
             // A writer may have produced effects: reconcile it. Read-only work had none, so it aborts
             // cleanly and any review it belonged to reads as INTERRUPTED instead of a failed lens.
@@ -949,6 +952,10 @@ export class MeshEngine {
       if(requireQueued)check(w.state==='QUEUED','Work is not claimable');
       const expired = w.state === 'RUNNING' && Date.parse(w.leaseUntil ?? '') <= Date.now();
       check(w.state !== 'WAITING_INPUT', `Work is not claimable: it waits for ${leaderLabel()}'s answer`);
+      // A transport (the mail relay) sends only the instruction: it cannot carry the question and the answer the
+      // work came back with, and its worker would start again from the wrong assumption. Such work waits for a
+      // live session of its worker; if none comes, the leader is told it is unclaimed.
+      check(!(transport && w.ringCycle), 'Work is not claimable');
       check(w.state === 'QUEUED' || w.state === 'RUNNING', 'Work is not claimable');
       if (w.state === 'RUNNING' && !expired) {
         // A live transport claim (task in flight by e-mail) is never adopted: one live copy per task.
