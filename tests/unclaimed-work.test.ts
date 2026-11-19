@@ -347,6 +347,17 @@ test('an event not sent yet for work that left a host\'s queue is cancelled; the
     await reconcileWorkforceEventOutbox(['gpt-a'], async () => stale, events);
     assert.deepEqual(posted, [{ url: urlB, workId: w.id }]);
     assert.equal(events.status('claude').cancelled, 1);
+        // The revision always labels the queue it came with, even when another process commits around the read: a
+    // picture taken after a foreign commit never carries the revision of the one taken before it.
+    const first = await m.queueSnapshot('gpt-b');
+    const foreign = SqliteLedger.open(dir);
+    foreign.mutate('mesh', {} as any, (d: any) => { d.works.find((x: any) => x.id === w.id).state = 'ABORTED_NO_EFFECTS'; });
+    const second = await m.queueSnapshot('gpt-b');
+    foreign.mutate('mesh', {} as any, (d: any) => { d.works.find((x: any) => x.id === w.id).state = 'QUEUED'; });
+    foreign.close();
+    assert.deepEqual([first.works.length, second.works.length], [1, 0]);
+    assert.ok(second.revision > first.revision);
+    assert.equal((await m.queueSnapshot('gpt-b')).works.length, 1);
         // Claimed work is not rung either: an event still waiting when its work is taken is cancelled the same way.
     down = true;
     const quick = await m.delegate('claude', work('quick'));

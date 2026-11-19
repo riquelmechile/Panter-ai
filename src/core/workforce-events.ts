@@ -260,7 +260,9 @@ export class WorkforceEvents{
   /** workIds is the host's complete queue. revision is the mesh revision that queue was read at: the queue is read
    * in one ledger and applied here in another, so two reconciliations can finish out of order. An older picture
    * applied after a newer one would bring back an event that was just cancelled (its work moved or was claimed)
-   * and wake the wrong host; with a revision, a picture older than the last one applied changes nothing. */
+   * and wake the wrong host; with a revision, a picture older than the last one applied changes nothing. The same
+   * revision is applied again on purpose: it is the same queue (see MeshEngine.queueSnapshot), and the periodic
+   * pass over an unchanged queue is what rings a second and third time. */
   queue(actor:EventHost,workIds:string[],revision?:number){
     const ids=[...new Set(workIds.filter(id=>
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)))].slice(0,100);

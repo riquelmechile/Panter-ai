@@ -70,6 +70,12 @@ export class SqliteLedger {
     const row = this.db.prepare('SELECT payload,revision FROM ledger WHERE name=?').get(name) as LedgerRow | undefined;
     return row ? JSON.parse(row.payload) as T : structuredClone(fallback);
   }
+  /** Payload and its revision from the same row, in one statement: a writer in another process cannot commit
+   * between the two, so the revision always labels exactly this payload. */
+  readWithRevision<T>(name: LedgerName, fallback: T): { value: T; revision: number } {
+    const row = this.db.prepare('SELECT payload,revision FROM ledger WHERE name=?').get(name) as LedgerRow | undefined;
+    return row ? { value: JSON.parse(row.payload) as T, revision: row.revision } : { value: structuredClone(fallback), revision: 0 };
+  }
   /** Committed revision only (no payload parse): lets callers skip re-reading an unchanged ledger. */
   revision(name: LedgerName): number {
     const row = this.db.prepare('SELECT revision FROM ledger WHERE name=?').get(name) as { revision: number } | undefined;

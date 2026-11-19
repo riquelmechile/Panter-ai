@@ -913,11 +913,12 @@ export class MeshEngine {
 
   /** A host's queue together with the ledger revision it was read at. The revision only grows, so a consumer that
    * keeps state about the queue elsewhere (the event outbox) can tell an older picture from a newer one and
-   * never apply them out of order. */
+   * never apply them out of order. Queue and revision come from one row in one statement: two pictures with the
+   * same revision are the same queue, whatever another process commits meanwhile. */
   async queueSnapshot(caller: Host) {
     await this.chain;
-    const revision = this.sqlite.revision('mesh');
-    this.state = this.sqlite.read('mesh', this.state);
+    const { value, revision } = this.sqlite.readWithRevision('mesh', this.state);
+    this.state = value;
     return { revision, works: this.state.works.filter(w => w.target === caller && w.state === 'QUEUED').map(w => ({ workId: w.id })) };
   }
   pending(caller: Host) { return this.read(d => d.works.filter(w => w.target === caller && w.state === 'QUEUED').map(w => ({ workId: w.id, missionId: w.missionId, role: w.role, createdAt: w.createdAt }))); }
