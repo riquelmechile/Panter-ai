@@ -285,7 +285,10 @@ export class WorkforceEvents{
       const owned=new Set(d.subscriptions.filter(s=>s.owner===actor).map(s=>s.id));
       // Same for an event of an earlier time in the queue: the work was claimed, parked and answered before that
       // event went out, and the answer has its own event; sending both would ring twice for one answer.
-      for(const x of d.deliveries)if(x.state==='PENDING'&&owned.has(x.subId)&&(!stillQueued.has(x.workId)||(x.cycle??0)!==(cycles.get(x.workId)??0))){
+      // One being sent right now is left to finish; one whose send lease ran out (the process stopped, the attempt was
+      // lost) is as retryable as a pending one and is cancelled with them.
+      const at=now();
+      for(const x of d.deliveries)if((x.state==='PENDING'||(x.state==='SENDING'&&x.nextAt<=at))&&owned.has(x.subId)&&(!stillQueued.has(x.workId)||(x.cycle??0)!==(cycles.get(x.workId)??0))){
         x.state='FAILED';x.terminalAt=now();x.failureReason='WORK_NOT_QUEUED';
       }
       compactTerminalHistory(d,actor,stillQueued);

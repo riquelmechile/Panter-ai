@@ -306,4 +306,24 @@ test('an event of an earlier time in the queue that was never sent is cancelled 
   assert.equal(posted.length, 1, 'one ring for one answer');
   const status = events.status('claude');
   assert.deepEqual({ pending: status.pending, accepted: status.accepted, cancelled: status.cancelled }, { pending: 0, accepted: 1, cancelled: 1 });
+  // The same when the earlier event was mid-send and the process stopped: once its send lease ran out it is as
+  // retryable as a pending one. One still inside its lease is left to finish.
+  for (const [lease, expectPosts, expectCancelled] of [[-1000, 1, 1], [60_000, 1, 0]] as const) {
+    const w2 = await m.delegate('claude', { ...work('sending' + lease), target: 'gpt-b', missionId: 'm-sending' + lease });
+    down = true;
+    await reconcile();
+    const c2 = await m.claim('gpt-b', w2.id);
+    await m.message('gpt-b', { missionId: w2.missionId, to: 'claude', workId: w2.id, kind: 'QUESTION', text: 'Which base?', attemptId: c2.attemptId!, leaseGeneration: c2.leaseGeneration });
+    await m.message('claude', { missionId: w2.missionId, to: 'gpt-b', workId: w2.id, kind: 'ANSWER', text: 'main' });
+    const db = SqliteLedger.open(dir);
+    db.mutate('events', {} as any, (d: any) => { for (const x of d.deliveries) if (x.workId === w2.id) { x.state = 'SENDING'; x.nextAt = Date.now() + lease; } });
+    db.close();
+    down = false;
+    const beforePosts: number = posted.length; const beforeCancelled: number = events.status("claude").cancelled;
+    await reconcile();
+    assert.equal(posted.length - beforePosts, expectPosts, `one ring for the answer (send lease ${lease})`);
+    assert.equal(events.status('claude').cancelled - beforeCancelled, expectCancelled, `send lease ${lease}`);
+    await m.claim('gpt-b', w2.id);
+    await reconcile();
+  }
 }));
