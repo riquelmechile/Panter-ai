@@ -12,12 +12,13 @@
  *   branch; comments only on issues/PRs the leader listed or this grant opened, without bot commands.
  * - There is no merge, approve, delete, label, release, settings or secrets operation at all.
  */
+import { openAccess } from './access-mode.js';
 import {SqliteLedger} from './sqlite-ledger.js';
 
 export const GITHUB_WRITE_OPS=['commit','pr','comment','issue'] as const;
 export type GitHubWriteOp=typeof GITHUB_WRITE_OPS[number];
 export type GitHubGrant={workId:string;host:string;repository:string;ops:GitHubWriteOp[];branch:string|null;
-  base:string|null;numbers:number[];paths?:string[];auto?:boolean;own?:number[];branchCreated:boolean;createdBranch?:{repository:string;branch:string;lastSha?:string};createdAt:string;revokedAt:string|null;writes:number;reads:number};
+  base:string|null;numbers:number[];paths?:string[];auto?:boolean;/** Taken by the worker itself (open access). */self?:boolean;own?:number[];branchCreated:boolean;createdBranch?:{repository:string;branch:string;lastSha?:string};createdAt:string;revokedAt:string|null;writes:number;reads:number};
 type Audit={at:string;workId:string;host:string;repository:string;op:string;ref:string;outcome:string};
 /** writers: every host ever granted commit or pr, in any repository; never pruned (grant eviction cannot forget a writer). */
 type Data={version:1;grants:GitHubGrant[];audit:Audit[];writers?:string[]};
@@ -35,7 +36,8 @@ export type WorkforceMesh={
 export type FileChange={path:string;content?:string;delete?:boolean};
 export type GrantInput={repository:string;ops:GitHubWriteOp[];branch?:string;base?:string;numbers?:number[];
   /** When set, commits may only touch these files or folders (the run's approved edit surfaces). */paths?:string[];
-  /** Issued by the harness on its own; never overrides a grant the leader set by hand. */auto?:boolean};
+  /** Issued by the harness on its own; never overrides a grant the leader set by hand. */auto?:boolean;
+  /** A worker's own request (open access): creates the grant only if the work has none; never replaces one. */ifAbsent?:boolean};
 export class GitHubWorkforceError extends Error{}
 
 const API='https://api.github.com';
@@ -70,7 +72,9 @@ export function validRefName(name:string){
 }
 const refPath=(name:string)=>name.split('/').map(encodeURIComponent).join('/');
 /** A file path a worker may change: relative, no traversal, never CI, ownership or git configuration. */
-export function safeRepoPath(path:string){
+/** Files an agent obeys when the branch is checked out. Writable only with open access (see access-mode.ts). */
+const AGENT_FILES=new Set(['claude.md','agents.md','gemini.md']);
+export function safeRepoPath(path:string,open=false){
   if(typeof path!=='string'||!path||path.length>400||path.startsWith('/')||path.endsWith('/')||path.includes('\\')||path.includes('\0'))return false;
   const parts=path.split('/');
   if(parts.some(p=>!p||p==='.'||p==='..'))return false;
@@ -85,7 +89,7 @@ export function safeRepoPath(path:string){
     '.woodpecker.yml','.cirrus.yml','.readthedocs.yaml','.readthedocs.yml','action.yml','action.yaml','codemagic.yaml',
     'render.yaml','fly.toml','app.yaml','.gitpod.yml','wrangler.toml','wrangler.json','wrangler.jsonc',
     '.mcp.json','.envrc','.yarnrc','.yarnrc.yml','.pnpmfile.cjs','.npmrc','claude.md','agents.md','gemini.md']);
-  return !denied.has(name);
+  return !denied.has(name)||(open&&AGENT_FILES.has(name));
 }
 /** Repository resources workers may GET (path below repos/{owner}/{repo}/), checked segment by segment. */
 export function safeReadPath(path:string){
@@ -203,6 +207,9 @@ export class GitHubWorkforce{
       check(!existing?.revokedAt,'This work\'s GitHub grant was revoked; delegate a new work');
       // A grant the leader set by hand is never widened back by the harness's automatic re-issue.
       if(existing&&input.auto===true&&!existing.auto){out=existing;return;}
+      // A worker's own request never replaces a grant, whoever set it and whenever: decided here, inside the
+      // transaction, so a leader grant that lands while the request is on its way is the one that stands.
+      if(existing&&input.ifAbsent===true){out=existing;return;}
       // A path limit only narrows: a later grant without paths keeps it, and new paths must fit inside it.
       if(existing?.paths&&paths)check(paths.every(p=>existing.paths!.some(q=>{const base=q.replace(/\/+$/,'');return p.replace(/\/+$/,'')===base||p.startsWith(base+'/');})),'Allowed paths can only narrow');
       const effPaths=paths??existing?.paths;
@@ -218,11 +225,12 @@ export class GitHubWorkforce{
       // One work per branch name in a repository (case-insensitive): two grants never share a working branch.
       if(branch)check(!d.grants.some(x=>x.workId!==work.id&&x.repository.toLowerCase()===input.repository.toLowerCase()&&
         (x.branch??'').toLowerCase()===branch.toLowerCase()),'Another work already uses that branch in this repository');
-      out={workId:work.id,host:work.target,repository:input.repository,ops,branch,base,numbers,...(effPaths?{paths:effPaths}:{}),...(input.auto===true?{auto:true}:{}),own:existing?.own??[],
+      out={workId:work.id,host:work.target,repository:input.repository,ops,branch,base,numbers,...(effPaths?{paths:effPaths}:{}),...(input.auto===true?{auto:true}:{}),...(input.ifAbsent===true?{self:true}:{}),own:existing?.own??[],
         branchCreated:existing?.branchCreated??false,...(existing?.createdBranch?{createdBranch:existing.createdBranch}:{}),
         createdAt:iso(),revokedAt:null,writes:existing?.writes??0,reads:existing?.reads??0};
       const i=d.grants.findIndex(x=>x.workId===out.workId);
       if(i>=0)d.grants[i]=out;else d.grants.push(out);
+      if(input.ifAbsent===true){d.audit.push({at:iso(),workId:out.workId,host:out.host,repository:out.repository,op:'self-grant',ref:out.branch??'',outcome:ops.join(',')});d.audit=d.audit.slice(-5000);}
       d.writers=writersOf(d);
       // Revoked grants are never evicted: "revoked stays revoked".
       const live=d.grants.filter(g=>!g.revokedAt);
@@ -364,9 +372,28 @@ export class GitHubWorkforce{
     await this.mesh.renewOnActivity?.(caller,claim.workId,claim.attemptId,claim.leaseGeneration).catch(()=>false);
     await this.mesh.liveWork(caller,claim.workId,claim.attemptId,claim.leaseGeneration);
     const g=this.current(claim.workId);
-    check(g&&!g.revokedAt&&g.host===caller,'No GitHub grant for this work: ask the leader');
+    check(g&&!g.revokedAt&&g.host===caller,openAccess()&&!g?'No GitHub grant for this work yet: call panter_github with operation "access" (tool panter_github_access) and the repository':'No GitHub grant for this work: ask the leader');
     check(repoAllowed(this.allow,g.repository),'Repository no longer allowed');
     if(op!=='read')check(g.ops.includes(op),`This work's GitHub grant does not include "${op}"`);
+    return g;
+  }
+  /** Open access only: the worker of a live claim takes GitHub access for that work itself, in a repository of the
+   * allowlist (the delegation is the authorization; the owner runs every host). It gets what the leader's default
+   * grant gives: the work's own new panter/ branch, commits, a pull request, comments and issues; a read-only role
+   * gets comments only, on the issue/PR numbers it names (a grant comments only on listed numbers and on what the
+   * work itself opened). It never replaces or widens a grant the leader set, never revives a revoked one, and never
+   * changes repository. Everything else a grant cannot do stays impossible. */
+  async selfGrant(caller:string,claim:Claim,input:{repository:string;numbers?:number[]}){
+    this.ensure();
+    check(openAccess(),'Only the leader grants GitHub access');
+    check(caller!==this.leader(),'Leader work cannot hold a GitHub grant');
+    const work=await this.mesh.liveWork(caller,claim.workId,claim.attemptId,claim.leaseGeneration);
+    const ops:GitHubWriteOp[]=work.role==='implementer'?['commit','pr','comment','issue']:['comment'];
+    // ifAbsent: created only if the work has no grant at all when the transaction runs; otherwise the grant that
+    // is there comes back untouched (a revoked one is refused inside grant()).
+    const g=await this.grant(this.leader(),{workId:claim.workId,repository:input.repository,ops,ifAbsent:true,
+      ...(input.numbers?.length?{numbers:input.numbers}:{})});
+    check(g.host===caller&&g.repository.toLowerCase()===input.repository.toLowerCase(),'This work already has a GitHub grant for another repository: ask the leader');
     return g;
   }
   /** Atomically reserve one unit of the work's budget before calling GitHub. */
@@ -444,9 +471,11 @@ export class GitHubWorkforce{
     check(typeof message==='string'&&message.trim().length>0&&message.length<=5000,'Invalid commit message');
     check(!botCommand(message),'Commit messages cannot contain @mentions, HTML comments or bot/slash commands');
     check(Array.isArray(files)&&files.length>0&&files.length<=MAX_FILES,`Commit 1-${MAX_FILES} files`);
+    // Open access: the grant's paths are advice and agent instruction files may be written.
+    const open=openAccess();
     for(const f of files){
-      check(safeRepoPath(f.path),`Path not allowed: ${String(f.path).slice(0,100)}`);
-      check(!g0.paths||g0.paths.some(q=>f.path===q||f.path.startsWith(q.replace(/\/+$/,'')+'/')),`Outside the approved edit surfaces: ${String(f.path).slice(0,100)}`);
+      check(safeRepoPath(f.path,open),`Path not allowed: ${String(f.path).slice(0,100)}`);
+      check(open||!g0.paths||g0.paths.some(q=>f.path===q||f.path.startsWith(q.replace(/\/+$/,'')+'/')),`Outside the approved edit surfaces: ${String(f.path).slice(0,100)}`);
       check(f.delete===true?f.content===undefined:typeof f.content==='string'&&Buffer.byteLength(f.content)<=MAX_FILE_BYTES,
         `Give either text content (≤1 MB) or delete:true for ${f.path}`);
     }
@@ -455,7 +484,7 @@ export class GitHubWorkforce{
     return this.serial(`${g0.repository}#${branch}`,async()=>{
       const g=await this.authorize(caller,claim,'commit');
       check(g.branch===branch&&validRefName(branch)&&branch.startsWith('panter/'),'Grant branch changed');
-      for(const f of files)check(!g.paths||g.paths.some(q=>f.path===q||f.path.startsWith(q.replace(/\/+$/,'')+'/')),`Outside the approved edit surfaces: ${String(f.path).slice(0,100)}`);
+      for(const f of files)check(open||!g.paths||g.paths.some(q=>f.path===q||f.path.startsWith(q.replace(/\/+$/,'')+'/')),`Outside the approved edit surfaces: ${String(f.path).slice(0,100)}`);
       this.reserve(g,'writes');
       try{
         const repo=this.ok(await this.call(g,'GET',''),'repository lookup');

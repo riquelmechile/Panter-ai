@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { parseWorkforceAccess, openAccess } from '../src/core/access-mode.js';
 import { test, before } from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -397,4 +398,114 @@ test('writer hosts: a legacy commit grant narrowed to comment-only keeps its hos
   db.mutate('github_workforce', { version: 1, grants: [], audit: [] }, (d: any) => { delete d.writers; });
   await gh.grant('claude', { workId, repository: 'acme/site', ops: ['comment'] });
   assert.deepEqual(gh.writerHosts(), ['gpt-a']);
+}));
+
+async function withAccess<T>(owner: '0' | '1', access: string | undefined, fn: () => Promise<T>): Promise<T> {
+  const prior = { o: process.env.PANTER_OWNER_MODE, a: process.env.PANTER_WORKFORCE_ACCESS };
+  process.env.PANTER_OWNER_MODE = owner;
+  if (access === undefined) delete process.env.PANTER_WORKFORCE_ACCESS; else process.env.PANTER_WORKFORCE_ACCESS = access;
+  try { return await fn(); } finally {
+    if (prior.o === undefined) delete process.env.PANTER_OWNER_MODE; else process.env.PANTER_OWNER_MODE = prior.o;
+    if (prior.a === undefined) delete process.env.PANTER_WORKFORCE_ACCESS; else process.env.PANTER_WORKFORCE_ACCESS = prior.a;
+  }
+}
+
+test('workforce access is restricted unless the deployment says open, and open needs owner mode', async () => {
+  assert.equal(parseWorkforceAccess(undefined), false);
+  assert.equal(parseWorkforceAccess('restricted'), false);
+  assert.equal(parseWorkforceAccess(' Open '), true);
+  assert.throws(() => parseWorkforceAccess('1'), /restricted or open/);
+  await withAccess('1', undefined, async () => assert.equal(openAccess(), false));
+  await withAccess('0', 'open', async () => assert.equal(openAccess(), false));
+  await withAccess('1', 'open', async () => assert.equal(openAccess(), true));
+  assert.equal(safeRepoPath('AGENTS.md'), false);
+  assert.equal(safeRepoPath('docs/CLAUDE.md', true), true);
+  // What executes or configures tools stays closed in every mode.
+  for (const p of ['.github/workflows/ci.yml', '.claude/settings.json', '.mcp.json', 'CODEOWNERS', '.gitmodules', '.npmrc', 'a/.git/config'])
+    assert.equal(safeRepoPath(p, true), false, p);
+});
+
+test('restricted (default, also in owner mode): paths limit, agent files are refused, a worker cannot take access', () => fixture(commitRoutes(), async ({ mesh, gh }) => {
+  await withAccess('1', undefined, async () => {
+    const w = await mesh.delegate('claude', { missionId: 'm-r', target: 'gpt-a', role: 'implementer', instruction: 'Do it', idempotencyKey: 'r' });
+    const c = await mesh.claim('gpt-a', w.id, 600);
+    const claim = { workId: w.id, attemptId: c.attemptId!, leaseGeneration: c.leaseGeneration };
+    await assert.rejects(gh.selfGrant('gpt-a', claim, { repository: 'acme/site' }), /Only the leader grants GitHub access/);
+    await assert.rejects(gh.read('gpt-a', claim, 'contents/README.md'), /No GitHub grant for this work: ask the leader/);
+    await gh.grant('claude', { workId: w.id, repository: 'acme/site', ops: ['commit'], paths: ['docs'] });
+    await assert.rejects(gh.commit('gpt-a', claim, 'x', [{ path: 'src/a.ts', content: 'a' }]), /Outside the approved edit surfaces: src\/a.ts/);
+    await assert.rejects(gh.commit('gpt-a', claim, 'x', [{ path: 'docs/AGENTS.md', content: 'a' }]), /Path not allowed: docs\/AGENTS.md/);
+  });
+}));
+
+test('open access: grant paths are advice and agent files can be committed; CI, protected names and the rest stay closed', () => fixture(commitRoutes(), async ({ mesh, gh, calls }) => {
+  await withAccess('1', 'open', async () => {
+    const w = await mesh.delegate('claude', { missionId: 'm-o', target: 'gpt-a', role: 'implementer', instruction: 'Do it', idempotencyKey: 'o' });
+    const c = await mesh.claim('gpt-a', w.id, 600);
+    const claim = { workId: w.id, attemptId: c.attemptId!, leaseGeneration: c.leaseGeneration };
+    await gh.grant('claude', { workId: w.id, repository: 'acme/site', ops: ['commit'], paths: ['docs'] });
+    const r = await gh.commit('gpt-a', claim, 'feat: all of it', [{ path: 'src/a.ts', content: 'a' }, { path: 'tests/a.test.ts', content: 't' }, { path: 'AGENTS.md', content: 'notes' }]);
+    assert.equal(r.commit, 'c0ffee');
+    assert.ok(calls.some(x => x.method === 'POST' && x.url === 'acme/site/git/trees'));
+    await assert.rejects(gh.commit('gpt-a', claim, 'ci', [{ path: '.github/workflows/x.yml', content: 'on: push' }]), /Path not allowed/);
+    await assert.rejects(gh.commit('gpt-a', claim, 'x', [{ path: 'CODEOWNERS', content: '* @me' }]), /Path not allowed/);
+    await assert.rejects(gh.openPr('gpt-a', claim, 't', 'b', false), /does not include "pr"/);
+    assert.deepEqual((gh as any).current(w.id).paths, ['docs'], 'the grant itself is not rewritten');
+  });
+}));
+
+test('open access: a worker takes GitHub access for the work it holds, and nothing more than a default grant', () => fixture(commitRoutes(), async ({ mesh, gh, claim, workId }) => {
+  await withAccess('1', 'open', async () => {
+    // The read-only work of the fixture: comments only.
+    await assert.rejects(gh.read('gpt-a', claim, 'contents/README.md'), /call panter_github with operation "access"/);
+    await assert.rejects(gh.selfGrant('gpt-a', claim, { repository: 'evil/site' }), /not in PANTER_GITHUB_WORKFORCE_REPOS/);
+    await assert.rejects(gh.selfGrant('gpt-a', { ...claim, leaseGeneration: 9 }, { repository: 'acme/site' }), /Stale work lease/);
+    await assert.rejects(gh.selfGrant('gpt-b', claim, { repository: 'acme/site' }), /Work not found|Stale work lease/);
+    await assert.rejects(gh.selfGrant('claude', claim, { repository: 'acme/site' }), /Leader work cannot hold a GitHub grant/);
+    const reader = await gh.selfGrant('gpt-a', claim, { repository: 'acme/site' });
+    assert.deepEqual({ host: reader.host, ops: reader.ops, branch: reader.branch, paths: reader.paths }, { host: 'gpt-a', ops: ['comment'], branch: null, paths: undefined });
+    await assert.rejects(gh.commit('gpt-a', claim, 'x', [{ path: 'a.md', content: 'a' }]), /does not include "commit"/);
+    // Asking again returns the same grant; another repository is the leader's call.
+    assert.equal((await gh.selfGrant('gpt-a', claim, { repository: 'acme/site' })).createdAt, reader.createdAt);
+    await assert.rejects(gh.selfGrant('gpt-a', claim, { repository: 'acme/other' }), /already has a GitHub grant for another repository/);
+    // A writer gets the default writer grant on its own new branch.
+    const w = await mesh.delegate('claude', { missionId: 'm-w', target: 'gpt-a', role: 'implementer', instruction: 'Do it', idempotencyKey: 'w' });
+    const c = await mesh.claim('gpt-a', w.id, 600);
+    const wc = { workId: w.id, attemptId: c.attemptId!, leaseGeneration: c.leaseGeneration };
+    const writer = await gh.selfGrant('gpt-a', wc, { repository: 'acme/site' });
+    assert.deepEqual({ ops: writer.ops, branch: writer.branch }, { ops: ['commit', 'pr', 'comment', 'issue'], branch: `panter/gpt-a-${w.id.slice(0, 8)}` });
+    assert.equal((await gh.commit('gpt-a', wc, 'feat: x', [{ path: 'src/a.ts', content: 'a' }])).commit, 'c0ffee');
+    const audit = gh.audit('claude', w.id).audit.map((a: any) => a.op);
+    assert.ok(audit.includes('self-grant'));
+    // A grant the leader set is returned as it is, never widened; a revoked one stays revoked.
+    const led = await mesh.delegate('claude', { missionId: 'm-l', target: 'gpt-a', role: 'implementer', instruction: 'Do it', idempotencyKey: 'l' });
+    await gh.grant('claude', { workId: led.id, repository: 'acme/site', ops: ['comment'], numbers: [7] });
+    const lc0 = await mesh.claim('gpt-a', led.id, 600);
+    const lc = { workId: led.id, attemptId: lc0.attemptId!, leaseGeneration: lc0.leaseGeneration };
+    assert.deepEqual((await gh.selfGrant('gpt-a', lc, { repository: 'acme/site' })).ops, ['comment']);
+    await gh.revoke('claude', led.id);
+    await assert.rejects(gh.selfGrant('gpt-a', lc, { repository: 'acme/site' }), /GitHub grant was revoked/);
+    void workId;
+    // A read-only role names the issues/PRs it must comment on; without them its grant can comment on nothing.
+    const rv = await mesh.delegate('claude', { missionId: 'm-rv', target: 'gpt-a', role: 'explorer', instruction: 'Review PR 7', idempotencyKey: 'rv' });
+    const rc0 = await mesh.claim('gpt-a', rv.id, 600);
+    const rc = { workId: rv.id, attemptId: rc0.attemptId!, leaseGeneration: rc0.leaseGeneration };
+    assert.deepEqual((await gh.selfGrant('gpt-a', rc, { repository: 'acme/site', numbers: [7] })).numbers, [7]);
+    await assert.rejects(gh.selfGrant('gpt-a', { ...rc, workId: w.id }, { repository: 'acme/site' }), /Stale work lease/);
+    // A leader grant that lands while the worker's request is on its way stands: the request creates a grant only
+    // if there is none when its transaction runs, and never replaces one.
+    const race = await mesh.delegate('claude', { missionId: 'm-race', target: 'gpt-a', role: 'implementer', instruction: 'Do it', idempotencyKey: 'race' });
+    const r0 = await mesh.claim('gpt-a', race.id, 600);
+    const rk = { workId: race.id, attemptId: r0.attemptId!, leaseGeneration: r0.leaseGeneration };
+    const inner = (mesh as any).workTarget.bind(mesh);
+    let once = true;
+    (mesh as any).workTarget = async (caller: string, id: string) => {
+      if (once && id === race.id) { once = false; (mesh as any).workTarget = inner; await gh.grant('claude', { workId: race.id, repository: 'acme/site', ops: ['comment'], numbers: [3] }); }
+      return inner(caller, id);
+    };
+    const kept = await gh.selfGrant('gpt-a', rk, { repository: 'acme/site' });
+    assert.deepEqual({ ops: kept.ops, numbers: kept.numbers, self: kept.self }, { ops: ['comment'], numbers: [3], self: undefined });
+    assert.equal(gh.audit('claude', race.id).audit.filter((a: any) => a.op === 'self-grant').length, 0);
+    assert.equal(gh.audit('claude', w.id).audit.filter((a: any) => a.op === 'self-grant').length, 1);
+  });
 }));

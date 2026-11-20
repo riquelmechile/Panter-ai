@@ -41,3 +41,7 @@ El repositorio es público: el token va solo en el entorno del servicio (por eje
 - **Riesgo a considerar:** subir una rama al mismo repo ejecuta el CI existente (`on: push` / `pull_request`) sobre el código del trabajador, con los secretos de Actions. Recomendado: `GITHUB_TOKEN` de Actions en solo lectura por defecto, "Require approval for workflow runs" y que los despliegues de preview y pasos privilegiados no corran en ramas `panter/*`; o un token fine-grained limitado a los repos necesarios.
 - El permiso muere con el lease de la tarea: al completarse, vencer o revocarse, las herramientas dejan de funcionar. Cada llamada del trabajador con su claim vigente renueva ese lease (latido implícito), así que no vence mientras trabaja; sin `leaseSeconds`, un escritor parte con 3600 s.
 - Máximo 200 escrituras y 1500 lecturas por tarea, reservadas de forma atómica. Cada commit lleva `Panter-Work` y `Panter-Host`; los PR, comentarios e issues indican qué trabajador y qué tarea los hizo.
+
+## Open access
+
+With `PANTER_WORKFORCE_ACCESS=open` (owner mode only) the `paths` of a grant are advice, a worker may take a default grant for the work it holds (`panter_github` operation `access`), and agent instruction files may be committed. Everything else on this page holds in every mode. See `docs/OWNER_MODE.md`.
