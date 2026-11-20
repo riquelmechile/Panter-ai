@@ -18,7 +18,7 @@ import {SqliteLedger} from './sqlite-ledger.js';
 export const GITHUB_WRITE_OPS=['commit','pr','comment','issue'] as const;
 export type GitHubWriteOp=typeof GITHUB_WRITE_OPS[number];
 export type GitHubGrant={workId:string;host:string;repository:string;ops:GitHubWriteOp[];branch:string|null;
-  base:string|null;numbers:number[];paths?:string[];auto?:boolean;own?:number[];branchCreated:boolean;createdBranch?:{repository:string;branch:string;lastSha?:string};createdAt:string;revokedAt:string|null;writes:number;reads:number};
+  base:string|null;numbers:number[];paths?:string[];auto?:boolean;/** Taken by the worker itself (open access). */self?:boolean;own?:number[];branchCreated:boolean;createdBranch?:{repository:string;branch:string;lastSha?:string};createdAt:string;revokedAt:string|null;writes:number;reads:number};
 type Audit={at:string;workId:string;host:string;repository:string;op:string;ref:string;outcome:string};
 /** writers: every host ever granted commit or pr, in any repository; never pruned (grant eviction cannot forget a writer). */
 type Data={version:1;grants:GitHubGrant[];audit:Audit[];writers?:string[]};
@@ -36,7 +36,8 @@ export type WorkforceMesh={
 export type FileChange={path:string;content?:string;delete?:boolean};
 export type GrantInput={repository:string;ops:GitHubWriteOp[];branch?:string;base?:string;numbers?:number[];
   /** When set, commits may only touch these files or folders (the run's approved edit surfaces). */paths?:string[];
-  /** Issued by the harness on its own; never overrides a grant the leader set by hand. */auto?:boolean};
+  /** Issued by the harness on its own; never overrides a grant the leader set by hand. */auto?:boolean;
+  /** A worker's own request (open access): creates the grant only if the work has none; never replaces one. */ifAbsent?:boolean};
 export class GitHubWorkforceError extends Error{}
 
 const API='https://api.github.com';
@@ -206,6 +207,9 @@ export class GitHubWorkforce{
       check(!existing?.revokedAt,'This work\'s GitHub grant was revoked; delegate a new work');
       // A grant the leader set by hand is never widened back by the harness's automatic re-issue.
       if(existing&&input.auto===true&&!existing.auto){out=existing;return;}
+      // A worker's own request never replaces a grant, whoever set it and whenever: decided here, inside the
+      // transaction, so a leader grant that lands while the request is on its way is the one that stands.
+      if(existing&&input.ifAbsent===true){out=existing;return;}
       // A path limit only narrows: a later grant without paths keeps it, and new paths must fit inside it.
       if(existing?.paths&&paths)check(paths.every(p=>existing.paths!.some(q=>{const base=q.replace(/\/+$/,'');return p.replace(/\/+$/,'')===base||p.startsWith(base+'/');})),'Allowed paths can only narrow');
       const effPaths=paths??existing?.paths;
@@ -221,11 +225,12 @@ export class GitHubWorkforce{
       // One work per branch name in a repository (case-insensitive): two grants never share a working branch.
       if(branch)check(!d.grants.some(x=>x.workId!==work.id&&x.repository.toLowerCase()===input.repository.toLowerCase()&&
         (x.branch??'').toLowerCase()===branch.toLowerCase()),'Another work already uses that branch in this repository');
-      out={workId:work.id,host:work.target,repository:input.repository,ops,branch,base,numbers,...(effPaths?{paths:effPaths}:{}),...(input.auto===true?{auto:true}:{}),own:existing?.own??[],
+      out={workId:work.id,host:work.target,repository:input.repository,ops,branch,base,numbers,...(effPaths?{paths:effPaths}:{}),...(input.auto===true?{auto:true}:{}),...(input.ifAbsent===true?{self:true}:{}),own:existing?.own??[],
         branchCreated:existing?.branchCreated??false,...(existing?.createdBranch?{createdBranch:existing.createdBranch}:{}),
         createdAt:iso(),revokedAt:null,writes:existing?.writes??0,reads:existing?.reads??0};
       const i=d.grants.findIndex(x=>x.workId===out.workId);
       if(i>=0)d.grants[i]=out;else d.grants.push(out);
+      if(input.ifAbsent===true){d.audit.push({at:iso(),workId:out.workId,host:out.host,repository:out.repository,op:'self-grant',ref:out.branch??'',outcome:ops.join(',')});d.audit=d.audit.slice(-5000);}
       d.writers=writersOf(d);
       // Revoked grants are never evicted: "revoked stays revoked".
       const live=d.grants.filter(g=>!g.revokedAt);
@@ -375,25 +380,20 @@ export class GitHubWorkforce{
   /** Open access only: the worker of a live claim takes GitHub access for that work itself, in a repository of the
    * allowlist (the delegation is the authorization; the owner runs every host). It gets what the leader's default
    * grant gives: the work's own new panter/ branch, commits, a pull request, comments and issues; a read-only role
-   * gets comments only. It never replaces or widens a grant the leader set, never revives a revoked one, and never
+   * gets comments only, on the issue/PR numbers it names (a grant comments only on listed numbers and on what the
+   * work itself opened). It never replaces or widens a grant the leader set, never revives a revoked one, and never
    * changes repository. Everything else a grant cannot do stays impossible. */
-  async selfGrant(caller:string,claim:Claim,input:{repository:string}){
+  async selfGrant(caller:string,claim:Claim,input:{repository:string;numbers?:number[]}){
     this.ensure();
     check(openAccess(),'Only the leader grants GitHub access');
     check(caller!==this.leader(),'Leader work cannot hold a GitHub grant');
     const work=await this.mesh.liveWork(caller,claim.workId,claim.attemptId,claim.leaseGeneration);
-    const existing=this.current(claim.workId);
-    check(!existing?.revokedAt,'This work\'s GitHub grant was revoked: ask the leader');
-    if(existing){
-      check(existing.host===caller&&existing.repository.toLowerCase()===input.repository.toLowerCase(),'This work already has a GitHub grant for another repository: ask the leader');
-      return existing;
-    }
     const ops:GitHubWriteOp[]=work.role==='implementer'?['commit','pr','comment','issue']:['comment'];
-    const g=await this.grant(this.leader(),{workId:claim.workId,repository:input.repository,ops});
-    this.db!.mutate('github_workforce',seed,d=>{
-      d.audit.push({at:iso(),workId:g.workId,host:caller,repository:g.repository,op:'self-grant',ref:g.branch??'',outcome:ops.join(',')});
-      d.audit=d.audit.slice(-5000);
-    });
+    // ifAbsent: created only if the work has no grant at all when the transaction runs; otherwise the grant that
+    // is there comes back untouched (a revoked one is refused inside grant()).
+    const g=await this.grant(this.leader(),{workId:claim.workId,repository:input.repository,ops,ifAbsent:true,
+      ...(input.numbers?.length?{numbers:input.numbers}:{})});
+    check(g.host===caller&&g.repository.toLowerCase()===input.repository.toLowerCase(),'This work already has a GitHub grant for another repository: ask the leader');
     return g;
   }
   /** Atomically reserve one unit of the work's budget before calling GitHub. */

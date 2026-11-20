@@ -484,7 +484,28 @@ test('open access: a worker takes GitHub access for the work it holds, and nothi
     const lc = { workId: led.id, attemptId: lc0.attemptId!, leaseGeneration: lc0.leaseGeneration };
     assert.deepEqual((await gh.selfGrant('gpt-a', lc, { repository: 'acme/site' })).ops, ['comment']);
     await gh.revoke('claude', led.id);
-    await assert.rejects(gh.selfGrant('gpt-a', lc, { repository: 'acme/site' }), /was revoked: ask the leader/);
+    await assert.rejects(gh.selfGrant('gpt-a', lc, { repository: 'acme/site' }), /GitHub grant was revoked/);
     void workId;
+    // A read-only role names the issues/PRs it must comment on; without them its grant can comment on nothing.
+    const rv = await mesh.delegate('claude', { missionId: 'm-rv', target: 'gpt-a', role: 'explorer', instruction: 'Review PR 7', idempotencyKey: 'rv' });
+    const rc0 = await mesh.claim('gpt-a', rv.id, 600);
+    const rc = { workId: rv.id, attemptId: rc0.attemptId!, leaseGeneration: rc0.leaseGeneration };
+    assert.deepEqual((await gh.selfGrant('gpt-a', rc, { repository: 'acme/site', numbers: [7] })).numbers, [7]);
+    await assert.rejects(gh.selfGrant('gpt-a', { ...rc, workId: w.id }, { repository: 'acme/site' }), /Stale work lease/);
+    // A leader grant that lands while the worker's request is on its way stands: the request creates a grant only
+    // if there is none when its transaction runs, and never replaces one.
+    const race = await mesh.delegate('claude', { missionId: 'm-race', target: 'gpt-a', role: 'implementer', instruction: 'Do it', idempotencyKey: 'race' });
+    const r0 = await mesh.claim('gpt-a', race.id, 600);
+    const rk = { workId: race.id, attemptId: r0.attemptId!, leaseGeneration: r0.leaseGeneration };
+    const inner = (mesh as any).workTarget.bind(mesh);
+    let once = true;
+    (mesh as any).workTarget = async (caller: string, id: string) => {
+      if (once && id === race.id) { once = false; (mesh as any).workTarget = inner; await gh.grant('claude', { workId: race.id, repository: 'acme/site', ops: ['comment'], numbers: [3] }); }
+      return inner(caller, id);
+    };
+    const kept = await gh.selfGrant('gpt-a', rk, { repository: 'acme/site' });
+    assert.deepEqual({ ops: kept.ops, numbers: kept.numbers, self: kept.self }, { ops: ['comment'], numbers: [3], self: undefined });
+    assert.equal(gh.audit('claude', race.id).audit.filter((a: any) => a.op === 'self-grant').length, 0);
+    assert.equal(gh.audit('claude', w.id).audit.filter((a: any) => a.op === 'self-grant').length, 1);
   });
 }));
