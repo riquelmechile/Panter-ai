@@ -21,6 +21,17 @@ The main orchestration host is **gpt-a**. A second independently authenticated G
 
 A new committed message/result increments an inbox revision and emits a local event. `panter://inbox/<host>` offers an actor-bound, minimal MCP resource projection. These changes support subscription implementation, but **the live MCP `subscriptions/listen` transport is not implemented or validated in this release**. Core notifications and subscription authorization depend on the installed SDK's negotiated protocol and the host's actual support. A successfully opened connection alone does not cause reasoning to resume in an app.
 
+## Questions to the leader
+
+The leader is a chat host and is not always awake. A worker that asks and waits would otherwise hold a lease that runs out while nobody answers.
+
+- A worker's `QUESTION` (`panter_mesh_message`) about its own `RUNNING` work parks it: state `WAITING_INPUT`, no lease, attempt and generation kept, server permits revoked. The question must carry the claim's `attemptId` and `leaseGeneration`, in every mode; a wrong pair is rejected as a stale lease and the question is not delivered, and a question without them is a plain message.
+- Parked work is not load, is not offered to anyone, and is not swept. A parked writer keeps its edit scope.
+- The same attempt may carry on (heartbeat, a GitHub call through its grant) or complete at any time; that resumes or ends the work without an answer.
+- The leader's `ANSWER` moves parked work to `QUEUED` and wakes its worker through the normal routes. The next claim is a new attempt (the old one is fenced out) and returns `questionsAndAnswers`.
+- The leader may end parked work instead: `panter_mesh_withdraw` for read-only work, `panter_mesh_reconcile_writer` for a writer.
+- Every directed claim returns `howToAsk`, the rule that asking is the exception. Harness (specialist) work keeps its own `interaction_required` contract and is never parked; neither is work held by a transport.
+
 ## Deployment limits and next gates
 
 - This alpha persists JSON using single-process atomic replacement. One process only; PostgreSQL transactions, leader epochs, and cross-replica notification bus are not yet available.

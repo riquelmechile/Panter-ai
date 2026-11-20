@@ -79,6 +79,8 @@ export function summarizeWorkforce(
       autonomousWakeVerified: false as const,
       effectiveDeliveryMode: 'DELIVERY_ONLY' as const,
       pending: own.filter(w => w.state === 'QUEUED').length,
+      // Parked on a question to the leader: nobody is working on it and no lease runs until the leader answers.
+      waitingInput: own.filter(w => w.state === 'WAITING_INPUT').length,
       running: own.filter(w => w.state === 'RUNNING' && Date.parse(w.leaseUntil ?? '') > nowMs).length,
       outcomesUnknown: own.filter(w => w.state === 'OUTCOME_UNKNOWN' ||
         (w.role === 'implementer' && w.state === 'RUNNING' &&

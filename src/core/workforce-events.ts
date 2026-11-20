@@ -18,6 +18,8 @@ type Delivery={id:string;subId:string;workId:string;state:'PENDING'|'SENDING'|'A
   attempts:number;nextAt:number;lastStatus:number|null;terminalAt?:number;
   /** WORK_NOT_QUEUED: cancelled before it was sent, because its work left the host's queue (not a delivery failure). */
   failureReason?:'SUBSCRIPTION_INACTIVE'|'WORK_NOT_QUEUED';
+  /** Which time in the queue this event is for (absent = 0, the first). See queue(). */
+  cycle?:number;
   /** How many times this event was rung (absent = 1). See EVENT_RERING_MS. */
   rings?:number};
 /** revocations: per-owner epoch bumped by dropOwners; a subscribe that started before a bump never persists. */
@@ -257,13 +259,18 @@ export class WorkforceEvents{
     }).result;
   }
   /** Reconcile only real QUEUED pointers for the authenticated host. */
-  /** workIds is the host's complete queue. revision is the mesh revision that queue was read at: the queue is read
+  /** works is the host's complete queue. revision is the mesh revision that queue was read at: the queue is read
    * in one ledger and applied here in another, so two reconciliations can finish out of order. An older picture
    * applied after a newer one would bring back an event that was just cancelled (its work moved or was claimed)
    * and wake the wrong host; with a revision, a picture older than the last one applied changes nothing. The same
    * revision is applied again on purpose: it is the same queue (see MeshEngine.queueSnapshot), and the periodic
-   * pass over an unchanged queue is what rings a second and third time. */
-  queue(actor:EventHost,workIds:string[],revision?:number){
+   * pass over an unchanged queue is what rings a second and third time.
+   * cycle: how many times the work went back to the queue with an answer from the leader. Each time is a new
+   * event (its own id, its own bounded rings); cycle 0 keeps the id events always had. */
+  queue(actor:EventHost,works:ReadonlyArray<string|{workId:string;cycle?:number}>,revision?:number){
+    const cycles=new Map<string,number>();
+    for(const w of works)if(typeof w!=='string'&&Number.isInteger(w.cycle)&&w.cycle!>0)cycles.set(w.workId,Math.min(w.cycle!,1_000_000));
+    const workIds=works.map(w=>typeof w==='string'?w:w.workId);
     const ids=[...new Set(workIds.filter(id=>
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)))].slice(0,100);
     const stillQueued=new Set(workIds);
@@ -276,7 +283,12 @@ export class WorkforceEvents{
       // worker) would wake the host for nothing: cancel it. One being sent right now is left to finish; if it comes
       // back for a retry, the next pass cancels it.
       const owned=new Set(d.subscriptions.filter(s=>s.owner===actor).map(s=>s.id));
-      for(const x of d.deliveries)if(x.state==='PENDING'&&owned.has(x.subId)&&!stillQueued.has(x.workId)){
+      // Same for an event of an earlier time in the queue: the work was claimed, parked and answered before that
+      // event went out, and the answer has its own event; sending both would ring twice for one answer.
+      // One being sent right now is left to finish; one whose send lease ran out (the process stopped, the attempt was
+      // lost) is as retryable as a pending one and is cancelled with them.
+      const at=now();
+      for(const x of d.deliveries)if((x.state==='PENDING'||(x.state==='SENDING'&&x.nextAt<=at))&&owned.has(x.subId)&&(!stillQueued.has(x.workId)||(x.cycle??0)!==(cycles.get(x.workId)??0))){
         x.state='FAILED';x.terminalAt=now();x.failureReason='WORK_NOT_QUEUED';
       }
       compactTerminalHistory(d,actor,stillQueued);
@@ -285,7 +297,8 @@ export class WorkforceEvents{
       let outstanding=d.deliveries.filter(x=>!isTerminal(x)).length;
       for(const sub of d.subscriptions.filter(s=>s.owner===actor&&isLive(s)))
         for(const workId of ids){
-          const id='evt_'+hash(sub.id+':'+workId).slice(0,32);
+          const cycle=cycles.get(workId);
+          const id='evt_'+hash(sub.id+':'+workId+(cycle?':c'+cycle:'')).slice(0,32);
           const existing=d.deliveries.find(x=>x.id===id);
           if(existing){
             // Only an event that never reached the host can be rearmed (its subscription had expired, or it was
@@ -310,7 +323,7 @@ export class WorkforceEvents{
           if(outstanding>=MAX_OUTSTANDING)throw Error('MCP event backlog limit reached');
           outstanding++;
           d.deliveries.push({id,subId:sub.id,workId,state:'PENDING',
-            attempts:0,nextAt:now(),lastStatus:null});added++;
+            attempts:0,nextAt:now(),lastStatus:null,...(cycle?{cycle}:{})});added++;
         }
       return added;
     }).result;
@@ -376,13 +389,14 @@ export class WorkforceEvents{
 /** Always drain existing webhooks even if one actor's enqueue hits its limit. */
 export async function reconcileWorkforceEventOutbox(
   hosts:readonly EventHost[],
-  pending:(host:EventHost)=>Promise<ReadonlyArray<{workId:string}>|{revision:number;works:ReadonlyArray<{workId:string}>}>,
+  pending:(host:EventHost)=>Promise<ReadonlyArray<{workId:string;cycle?:number}>|{revision:number;works:ReadonlyArray<{workId:string;cycle?:number}>}>,
   events:Pick<WorkforceEvents,'queue'|'flush'>
 ):Promise<{enqueueFailures:number;flushed:number}>{
   const attempts=await Promise.allSettled(hosts.map(async host=>{
     const rows=await pending(host);
-    if(Array.isArray(rows))events.queue(host,rows.map(x=>x.workId));
-    else{const snap=rows as {revision:number;works:ReadonlyArray<{workId:string}>};events.queue(host,snap.works.map(x=>x.workId),snap.revision);}
+    const cyc=(x:{workId:string;cycle?:number})=>({workId:x.workId,cycle:x.cycle});
+    if(Array.isArray(rows))events.queue(host,rows.map(cyc));
+    else{const snap=rows as {revision:number;works:ReadonlyArray<{workId:string;cycle?:number}>};events.queue(host,snap.works.map(cyc),snap.revision);}
   }));
   const flushed=await events.flush();
   return {enqueueFailures:attempts.filter(x=>x.status==='rejected').length,flushed};

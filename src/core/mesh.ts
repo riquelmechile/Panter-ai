@@ -22,7 +22,7 @@ export const EFFORT_REQUEST_PATTERN = /^[A-Za-z0-9._-]{1,32}$/;
 export type WorkerExecutionRequest = { serviceTier?: string; stream?: boolean; parallelToolCalls?: boolean; maxNativeSubagents?: number };
 export type WorkExecutionRequest = WorkerExecutionRequest & { status: 'REQUESTED_UNVERIFIED'; model: string; reasoningEffort: string };
 export type MeshMessage = { id: string; missionId: string; from: Host; to: Host; workId: string | null; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' | 'RESULT'; text: string; createdAt: string; inboxRevision: number };
-export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; /** When its current attempt was claimed by the worker itself (never a transport). */claimedAt?: string; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; /** When a writer became OUTCOME_UNKNOWN (absent on older ledgers). */uncertainAt?: string; /** Never-claimed work the server moved to another worker: who had it before, when it moved, and when the move was finished (its GitHub grant followed and the leader was told). A move without the last one is finished by the next sweep. */reassignedFrom?: Host; reassignedAt?: string; reassignSettledAt?: string; /** When the leader was told nobody claims this queued work (told once). */unclaimedReportedAt?: string; /** What the server's sweep found for a writer of unknown outcome (looked at once). */sweep?: {at:string;effects:SweepEffects;evidence:string}; transportClaim?: boolean; withdrawn?: boolean;
+export type MeshWork = { id: string; missionId: string; from: Host; target: Host; role: MeshRole; instruction: string; idempotencyKey: string; specialist?: {agentId:string;skillIds:string[];packetDigest:string;assetDigests:Record<string,string>;modelRequest:string;effortRequest:string;bindingRevision:number;candidateSha?:string;allowedEditSurfaces:string[]}; executionRequest?: WorkExecutionRequest; state: MeshWorkState; attemptId: string | null; leaseGeneration: number; leaseUntil: string | null; result: string | null; receiptDigest: string | null; createdAt: string; completedAt: string | null; /** When its current attempt was claimed by the worker itself (never a transport). */claimedAt?: string; reconciliation?: {resolution:'CONFIRMED_COMPLETE'|'CONFIRMED_NO_EFFECTS';evidence:string;at:string}; /** When a writer became OUTCOME_UNKNOWN (absent on older ledgers). */uncertainAt?: string; /** Never-claimed work the server moved to another worker: who had it before, when it moved, and when the move was finished (its GitHub grant followed and the leader was told). A move without the last one is finished by the next sweep. */reassignedFrom?: Host; reassignedAt?: string; reassignSettledAt?: string; /** When the leader was told nobody claims this queued work (told once per time in the queue). */unclaimedReportedAt?: string; /** Parked on a question to the leader since then (state WAITING_INPUT): no lease runs, the fence is kept. */waitingSince?: string; /** When the leader's answer put it back in the queue, and how many times that happened (each one is a new round of wakes). */queuedAt?: string; ringCycle?: number; /** What the server's sweep found for a writer of unknown outcome (looked at once). */sweep?: {at:string;effects:SweepEffects;evidence:string}; transportClaim?: boolean; withdrawn?: boolean;
   /** How a result reached Panter when it was not a direct worker call (the text itself stays exactly as sent). */via?: 'gmail-relay' };
 export type SpecialistBinding = {agentId:string;host:Host;modelRequest:string;effortRequest:string;skillIds:GentleSkillId[];revision:number};
 export type ReviewSession = {id:string;missionId:string;kind:'4r'|'judgment-day';objective:string;candidateSha:string;idempotencyKey:string;workIds:string[];createdAt:string};
@@ -63,6 +63,20 @@ export function defaultLeaseSeconds(role: MeshRole): number {
 export function leaseLive(w: Pick<MeshWork, 'role' | 'leaseUntil'>, now = Date.now()): boolean {
   return w.role !== 'implementer' || ownerMode() || Date.parse(w.leaseUntil ?? '') > now;
 }
+/** Delivered with every directed claim (never stored in the instruction, whose text and digest stay the leader's).
+ * The leader is not always awake: a worker that stops to ask can wait for hours. */
+export const ASK_RULE = 'Do not stop to ask. If something is unclear, take the most reasonable reading, write the assumption in your result and continue. ' +
+  'Ask the leader (panter_mesh_message, kind QUESTION, always with the attemptId and leaseGeneration of your claim: without them the work is not parked) only when a wrong guess could not be undone. ' +
+  'Then say what you did so far in the question and end your turn: the work is parked without losing anything, and you are woken again when the answer arrives.';
+/** A writer that ran and stopped on a question: parked, or back in the queue with the answer and not claimed again.
+ * Nobody is writing; only an operator who looked at what it left can close it without it being claimed again. */
+const startedAndIdle = (w: MeshWork) => w.role === 'implementer' && !!w.attemptId &&
+  (w.state === 'WAITING_INPUT' || (w.state === 'QUEUED' && w.leaseGeneration > 0));
+/** The worker's own attempt may still act on its work: it is running, or parked on a question it asked. */
+const heldBy = (w: MeshWork, attemptId: string, generation: number) =>
+  (w.state === 'RUNNING' || w.state === 'WAITING_INPUT') && w.attemptId === attemptId && w.leaseGeneration === generation;
+/** Parked work that its own attempt touches again was not waiting after all: it runs again. */
+function unpark(w: MeshWork) { if (w.state === 'WAITING_INPUT') { w.state = 'RUNNING'; delete w.waitingSince; } }
 export type ClaudeWakeAttempt = GrokWakeAttempt & {sessionId:string|null};
 type MeshData = { version: 1; profiles: ActorProfile[]; specialistBindings?: SpecialistBinding[]; reviews?:ReviewSession[]; workforce?: Partial<Record<WorkerHost, WorkerObservation>>; taskBridges?: WorkforceTaskBridge[]; rearmIntents?: WorkforceRearmIntent[]; grokWakeAttempts?: GrokWakeAttempt[]; claudeWakeAttempts?: ClaudeWakeAttempt[]; serverPermits?: ServerPermit[]; leader?: Host; formerLeaders?: Host[]; pendingPhaseAdoption?: Host[]; works: MeshWork[]; messages: MeshMessage[]; inboxRevision: Record<Host, number> };
 const hosts = new Set<string>(HOSTS);
@@ -122,7 +136,10 @@ export class MeshEngine {
         // Work addressed to the new leader can never be claimed now: close it explicitly.
         for (const w of data.works) {
           if (w.target !== lead) continue;
-          if (w.state === 'QUEUED') { w.state = 'ABORTED_NO_EFFECTS'; w.completedAt = stamp; w.result = `Leader switch ${from} -> ${lead}: never claimed, aborted without effects`; }
+          // A writer that ran, asked, and went back to the queue with its answer is queued but not "never claimed":
+          // it may have left effects, so it is reconciled like a running one.
+          if (w.state === 'QUEUED' && w.role === 'implementer' && w.leaseGeneration > 0) { w.state = 'OUTCOME_UNKNOWN'; w.uncertainAt = stamp; w.leaseUntil = null; }
+          else if (w.state === 'QUEUED') { w.state = 'ABORTED_NO_EFFECTS'; w.completedAt = stamp; w.result = `Leader switch ${from} -> ${lead}: ${w.leaseGeneration > 0 ? 'back in the queue after an answer, read-only, no effects' : 'never claimed, aborted without effects'}`; }
           else if (w.state === 'RUNNING' || w.state === 'WAITING_INPUT') {
             // A writer may have produced effects: reconcile it. Read-only work had none, so it aborts
             // cleanly and any review it belonged to reads as INTERRUPTED instead of a failed lens.
@@ -605,12 +622,12 @@ export class MeshEngine {
         // Owner mode: an empty scope is the whole repository, so it overlaps every other active writer of the mission,
         // in either order.
         const mine=input.specialist?.allowedEditSurfaces??[];
-        const conflict=d.works.find(w=>w.missionId===input.missionId && w.role==='implementer' && ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state) &&
+        const conflict=d.works.find(w=>w.missionId===input.missionId && w.role==='implementer' && ['QUEUED','RUNNING','WAITING_INPUT','OUTCOME_UNKNOWN'].includes(w.state) &&
           (()=>{const theirs=w.specialist?.allowedEditSurfaces??[];
             return !mine.length||!theirs.length||theirs.some(a=>mine.some(b=>a===b || a.startsWith(b+'/') || b.startsWith(a+'/')));})());
         check(!conflict,'Overlapping active writer edit surfaces');
       }else if(input.specialist?.allowedEditSurfaces?.length){
-        const conflict=d.works.find(w=>w.missionId===input.missionId && w.role==='implementer' && ['QUEUED','RUNNING','OUTCOME_UNKNOWN'].includes(w.state) && (w.specialist?.allowedEditSurfaces??[]).some(a=>input.specialist!.allowedEditSurfaces.some(b=>a===b || a.startsWith(b+'/') || b.startsWith(a+'/'))));
+        const conflict=d.works.find(w=>w.missionId===input.missionId && w.role==='implementer' && ['QUEUED','RUNNING','WAITING_INPUT','OUTCOME_UNKNOWN'].includes(w.state) && (w.specialist?.allowedEditSurfaces??[]).some(a=>input.specialist!.allowedEditSurfaces.some(b=>a===b || a.startsWith(b+'/') || b.startsWith(a+'/'))));
         check(!conflict,'Overlapping active writer edit surfaces');
       }
       const w: MeshWork = { id: randomUUID(), missionId: input.missionId, from: leaderHost(), target: input.target, role: input.role, instruction: input.instruction, idempotencyKey: input.idempotencyKey, specialist: input.specialist, executionRequest: frozenExecution(d, input.target, input.specialist), state: 'QUEUED', attemptId: null, leaseGeneration: 0, leaseUntil: null, result: null, receiptDigest: null, createdAt: iso(), completedAt: null };
@@ -919,9 +936,9 @@ export class MeshEngine {
     await this.chain;
     const { value, revision } = this.sqlite.readWithRevision('mesh', this.state);
     this.state = value;
-    return { revision, works: this.state.works.filter(w => w.target === caller && w.state === 'QUEUED').map(w => ({ workId: w.id })) };
+    return { revision, works: this.state.works.filter(w => w.target === caller && w.state === 'QUEUED').map(w => ({ workId: w.id, cycle: w.ringCycle ?? 0 })) };
   }
-  pending(caller: Host) { return this.read(d => d.works.filter(w => w.target === caller && w.state === 'QUEUED').map(w => ({ workId: w.id, missionId: w.missionId, role: w.role, createdAt: w.createdAt }))); }
+  pending(caller: Host) { return this.read(d => d.works.filter(w => w.target === caller && w.state === 'QUEUED').map(w => ({ workId: w.id, missionId: w.missionId, role: w.role, createdAt: w.createdAt, cycle: w.ringCycle ?? 0 }))); }
   /** requireFree: never hand back another attempt's live lease (a transport retry must own a new claim). */
   async claim(caller: Host, workId: string, leaseSeconds?: number, requireQueued = false, requireFree = false, transport = false) {
     check(caller!==leaderHost(),'Only workers may claim delegated work');
@@ -934,11 +951,16 @@ export class MeshEngine {
       check(w, 'Work not found');
       if(requireQueued)check(w.state==='QUEUED','Work is not claimable');
       const expired = w.state === 'RUNNING' && Date.parse(w.leaseUntil ?? '') <= Date.now();
+      check(w.state !== 'WAITING_INPUT', `Work is not claimable: it waits for ${leaderLabel()}'s answer`);
+      // A transport (the mail relay) sends only the instruction: it cannot carry the question and the answer the
+      // work came back with, and its worker would start again from the wrong assumption. Such work waits for a
+      // live session of its worker; if none comes, the leader is told it is unclaimed.
+      check(!(transport && w.ringCycle), 'Work is not claimable');
       check(w.state === 'QUEUED' || w.state === 'RUNNING', 'Work is not claimable');
       if (w.state === 'RUNNING' && !expired) {
         // A live transport claim (task in flight by e-mail) is never adopted: one live copy per task.
         check(!requireFree && !(w.transportClaim && !transport), 'Work is not claimable');
-        return w;
+        return this.withGuidance(d, w, transport);
       }
       // A lost ACK after an uncertain write cannot authorize an automatic replay.
       if (expired && w.role === 'implementer') {
@@ -967,8 +989,17 @@ export class MeshEngine {
       }
       w.leaseUntil = new Date(Date.now() + (leaseSeconds ?? defaultLeaseSeconds(w.role)) * 1000).toISOString();
       this.notify(d, leaderHost());
-      return w;
+      return this.withGuidance(d, w, transport);
     });
+  }
+  /** What a worker gets with a directed claim besides the work itself: the rule about asking, and, when the work
+   * came back to the queue with an answer, the questions and answers so far (a new session starts without them).
+   * Harness work carries its own contract and a transport cannot ask, so neither gets this. */
+  private withGuidance(d: MeshData, w: MeshWork, transport: boolean): MeshWork & { howToAsk?: string; questionsAndAnswers?: Array<{ from: Host; kind: 'QUESTION' | 'ANSWER'; text: string; at: string }> } {
+    if (transport || w.specialist) return w;
+    const thread = w.ringCycle ? d.messages.filter(m => m.workId === w.id && (m.kind === 'QUESTION' || m.kind === 'ANSWER')).slice(-8)
+      .map(m => ({ from: m.from, kind: m.kind as 'QUESTION' | 'ANSWER', text: m.text, at: m.createdAt })) : [];
+    return { ...w, howToAsk: ASK_RULE, ...(thread.length ? { questionsAndAnswers: thread } : {}) };
   }
   /** A standing worker obtains a real fenced claim, without enumerating IDs.
    * No inference takes place here; the host executes the returned instructions.
@@ -1042,10 +1073,12 @@ export class MeshEngine {
     check(caller!==leaderHost(),'Only workers may renew delegated work');
     return this.write(d => {
       const w = d.works.find(w => w.id === id && w.target === caller);
-      check(w && w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
-      check(leaseLive(w), 'Lease expired');
+      check(w && heldBy(w, attemptId, generation), 'Stale work lease');
+      // Parked work has no lease to run out: the worker that asked may carry on at any time.
+      check(w.state === 'WAITING_INPUT' || leaseLive(w), 'Lease expired');
       check(!w.transportClaim, 'Work is held by a transport');
       check(leaseSeconds === undefined || (leaseSeconds >= 30 && leaseSeconds <= 3600), 'Invalid lease');
+      unpark(w);
       // Read-only work (and, in owner mode, a writer) may renew a lease that already ran out (leaseLive), keeping its
       // attempt and generation. That keeps its result, never its server authority: a permit is usable only while the
       // claim is live, so a claim that lapsed loses its permits here, in the same mutation, and needs a new grant
@@ -1063,8 +1096,10 @@ export class MeshEngine {
     if (caller === leaderHost()) return false;
     const due = (d: MeshData) => {
       const w = d.works.find(w => w.id === id && w.target === caller);
-      if (!w || w.state !== 'RUNNING' || w.attemptId !== attemptId || w.leaseGeneration !== generation ||
-        w.transportClaim || !leaseLive(w)) return null;
+      if (!w || !heldBy(w, attemptId, generation) || w.transportClaim) return null;
+      // A worker using its grant while its work is parked did not wait for the answer: the work runs again.
+      if (w.state === 'WAITING_INPUT') return w;
+      if (!leaseLive(w)) return null;
       const left = Date.parse(w.leaseUntil ?? '') - Date.now();
       return left < defaultLeaseSeconds(w.role) * 500 ? w : null;
     };
@@ -1073,6 +1108,7 @@ export class MeshEngine {
       const w = due(d);
       if (!w) return false;
       if (!(Date.parse(w.leaseUntil ?? '') > Date.now())) revokeIssued(d, w.id);
+      unpark(w);
       w.leaseUntil = new Date(Date.now() + defaultLeaseSeconds(w.role) * 1000).toISOString();
       return true;
     });
@@ -1104,10 +1140,13 @@ export class MeshEngine {
       const w = d.works.find(w => w.id === id);
       check(w, 'Work not found');
       if (w.state === 'ABORTED_NO_EFFECTS') return { workId: w.id, state: w.state, withdrawn: false };
-      check(w.role !== 'implementer' || w.state === 'QUEUED', 'A started writer is never withdrawn automatically');
-      check(w.state === 'QUEUED' || (w.state === 'RUNNING' && w.transportClaim === true), 'Work already started by its worker');
-      w.state = 'ABORTED_NO_EFFECTS'; w.attemptId = null; w.leaseUntil = null; w.completedAt = iso();
-      w.result = `Withdrawn by ${leaderLabel()} before any worker started it: ${reason.slice(0, 300)}`; delete w.transportClaim; w.withdrawn = true; revokeIssued(d, w.id);
+      // A writer that ran, asked and went back to the queue with the answer is a started writer.
+      check(w.role !== 'implementer' || (w.state === 'QUEUED' && w.leaseGeneration === 0), 'A started writer is never withdrawn automatically');
+      // Read-only work parked on a question left nothing behind: the leader may end it instead of answering.
+      const parked = w.state === 'WAITING_INPUT';
+      check(w.state === 'QUEUED' || parked || (w.state === 'RUNNING' && w.transportClaim === true), 'Work already started by its worker');
+      w.state = 'ABORTED_NO_EFFECTS'; w.attemptId = null; w.leaseUntil = null; w.completedAt = iso(); delete w.waitingSince;
+      w.result = `Withdrawn by ${leaderLabel()} ${parked ? 'while it waited for an answer (read-only, no effects)' : 'before any worker started it'}: ${reason.slice(0, 300)}`; delete w.transportClaim; w.withdrawn = true; revokeIssued(d, w.id);
       this.notify(d, w.target); this.notify(d, leaderHost());
       return { workId: w.id, state: w.state, withdrawn: true };
     });
@@ -1145,7 +1184,7 @@ export class MeshEngine {
         if (w.state !== 'QUEUED' || w.target === lead || w.specialist || w.unclaimedReportedAt) return false;
         const p = d.profiles.find(x => x.host === w.target);
         const wait = Math.max(afterMs, p?.scheduledPickupEnabled ? 2 * (p.scheduledPollIntervalSeconds ?? 0) * 1000 : 0);
-        return now - Date.parse(w.reassignedAt ?? w.createdAt) >= wait;
+        return now - Date.parse(w.queuedAt ?? w.reassignedAt ?? w.createdAt) >= wait;
       }).map(w => ({ workId: w.id, missionId: w.missionId, target: w.target, role: w.role, queuedSince: w.createdAt,
         neverClaimed: w.leaseGeneration === 0, reassignedFrom: w.reassignedFrom ?? null,
         // Its worker is on other work with a live lease: this one is waiting its turn, not ignored.
@@ -1306,9 +1345,10 @@ export class MeshEngine {
         return {workId:w.id,state:w.state,receiptDigest:w.receiptDigest,completedAt:w.completedAt,
           resultAvailable:true,rearmPending:(d.rearmIntents??[]).some(i=>i.workId===id&&i.status==='PENDING')};
       }
-      check(w.state === 'RUNNING' && w.attemptId === attemptId && w.leaseGeneration === generation, 'Stale work lease');
-      check(leaseLive(w), 'Lease expired');
+      check(heldBy(w, attemptId, generation), 'Stale work lease');
+      check(w.state === 'WAITING_INPUT' || leaseLive(w), 'Lease expired');
       this.contentGuard?.(w.missionId,[result],'This result');
+      delete w.waitingSince;
       w.state = success ? 'COMPLETED' : 'FAILED'; w.result = result; w.receiptDigest = digest;
       w.completedAt = iso(); w.leaseUntil = null; delete w.transportClaim; revokeIssued(d, w.id); if (via) w.via = via;
       // A transport closing work it could not deliver is not a receipt from the worker.
@@ -1398,7 +1438,7 @@ export class MeshEngine {
   /** Operator-only ledger view; does not expose credentials and cannot stop a worker. */
   uncertainWriters(){
     return this.read(d=>d.works.filter(w=>w.role==='implementer'&&
-      (w.state==='OUTCOME_UNKNOWN'||(w.state==='RUNNING'&&Date.parse(w.leaseUntil??'')<=Date.now())))
+      (w.state==='OUTCOME_UNKNOWN'||(w.state==='RUNNING'&&Date.parse(w.leaseUntil??'')<=Date.now())||startedAndIdle(w)))
       .map(w=>({workId:w.id,missionId:w.missionId,target:w.target,state:w.state,
         attemptId:w.attemptId,leaseGeneration:w.leaseGeneration,leaseUntil:w.leaseUntil,
         allowedEditSurfaces:w.specialist?.allowedEditSurfaces??[],createdAt:w.createdAt})));
@@ -1429,7 +1469,8 @@ export class MeshEngine {
       check(w.attemptId===input.attemptId&&w.leaseGeneration===input.leaseGeneration,
         'Stale writer attempt: reconciliation must match original fence');
       check((w.state==='OUTCOME_UNKNOWN'||(w.state==='RUNNING'&&
-        Date.parse(w.leaseUntil??'')<=Date.now())), 'Writer is not in an expired uncertain state');
+        Date.parse(w.leaseUntil??'')<=Date.now())||startedAndIdle(w)), 'Writer is not in an expired uncertain state');
+      delete w.waitingSince;
       w.reconciliation={resolution:input.resolution,evidence:input.evidence+(input.isolationEvidence?'\nIsolation: '+input.isolationEvidence:''),at:iso()};
       w.completedAt=iso();w.leaseUntil=null;revokeIssued(d,w.id);
       if(input.resolution==='CONFIRMED_COMPLETE'){
@@ -1447,7 +1488,16 @@ export class MeshEngine {
       return {workId:w.id,state:w.state,reconciliation:w.reconciliation,leaseGeneration:w.leaseGeneration};
     });
   }
-  async message(caller: Host, input: { missionId: string; to: Host; workId?: string; text: string; kind: 'QUESTION' | 'ANSWER' | 'UPDATE' }) {
+  /** A question from a worker about its own running work parks that work (WAITING_INPUT): the leader is not always
+   * awake, and a lease that kept running while the worker waited used to expire and strand the work. Parked work has
+   * no lease; its attempt and generation are kept, so the same attempt can carry on (heartbeat, a GitHub call) or
+   * finish at any time. The leader's answer puts it back in the queue, which wakes its worker through the normal
+   * routes; the next claim is a new attempt and gets the questions and answers with it. In every mode the
+   * question must carry the attempt and generation of the claim to park: several sessions of one host share its
+   * credentials, and an old one must never park, strip the permits of, or get requeued a newer attempt that asked
+   * nothing. A question without them is a plain message, as it always was. Harness work and work held by a
+   * transport are never parked. */
+  async message(caller: Host, input: { missionId: string; to: Host; workId?: string; text: string; kind: 'QUESTION' | 'ANSWER' | 'UPDATE'; attemptId?: string; leaseGeneration?: number }) {
     check(isHost(input.to) && caller !== input.to, 'Invalid recipient');
     check(input.text.trim().length > 0 && input.text.length <= 10000, 'Invalid message');
     return this.write(d => {
@@ -1457,9 +1507,31 @@ export class MeshEngine {
       check((caller === leaderHost() && w.target === input.to) || (input.to === leaderHost() && w.target === caller), 'Not a member of this delegation');
       // A message never renews a lease: it carries no attempt or generation, so a stale session of the same host
       // could keep a newer attempt alive. Renewal stays with the fenced paths (heartbeat, renewOnActivity).
+      const lead = leaderHost();
+      const fenced = caller === w.target && (input.attemptId !== undefined || input.leaseGeneration !== undefined);
+      if (fenced) check(w.attemptId === input.attemptId && w.leaseGeneration === input.leaseGeneration, 'Stale work lease');
       const revision = this.notify(d, input.to);
       const msg: MeshMessage = { id: randomUUID(), missionId: input.missionId, from: caller, to: input.to, workId: w.id, kind: input.kind, text: input.text, createdAt: iso(), inboxRevision: revision };
       d.messages.push(msg);
+      if (input.kind === 'QUESTION' && input.to === lead && caller === w.target && w.state === 'RUNNING' && !w.transportClaim &&
+        !w.specialist && leaseLive(w) && fenced) {
+        w.state = 'WAITING_INPUT'; w.waitingSince = msg.createdAt; w.leaseUntil = null;
+        // A permit is usable only while the claim is live: parked work holds none.
+        revokeIssued(d, w.id);
+        return { ...msg, work: { state: w.state, note: `Parked until ${leaderLabel()} answers: end your turn now. Nothing is lost and no lease runs; you are woken again with the answer. If you carry on instead, any call with your attemptId and leaseGeneration resumes the work.` } };
+      }
+      if (input.kind === 'ANSWER' && caller === lead && w.state === 'WAITING_INPUT') {
+        // Back to the queue: its worker is woken like for new work and claims it again (a new attempt; the old one
+        // is fenced out). The old attempt id stays only as the fence an operator reconciles a writer against.
+        w.state = 'QUEUED'; w.leaseUntil = null; w.queuedAt = msg.createdAt; w.ringCycle = (w.ringCycle ?? 0) + 1;
+        delete w.waitingSince; delete w.claimedAt; delete w.unclaimedReportedAt;
+        d.grokWakeAttempts = (d.grokWakeAttempts ?? []).filter(a => a.workId !== w.id);
+        d.claudeWakeAttempts = (d.claudeWakeAttempts ?? []).filter(a => a.workId !== w.id);
+        // Like new work: a listener the worker left armed gets it at once.
+        const bridge = (d.taskBridges ?? []).find(t => t.host === w.target && t.status === 'ARMED' && Date.parse(t.expiresAt) > Date.now());
+        if (bridge) { bridge.status = 'DELIVERED'; bridge.workId = w.id; }
+        return { ...msg, work: { state: w.state, note: 'The work is back in the queue and its worker is woken to continue with this answer.' } };
+      }
       return msg;
     });
   }

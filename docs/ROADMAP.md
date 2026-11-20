@@ -262,6 +262,7 @@ La interfaz read-only no ejecuta código, no hace cambios en producción y no re
 - [x] Lease por rol cuando el trabajador no pide uno (escritor 3600 s, solo lectura 900 s), latido implícito al usar el permiso GitHub, y `claimedAt` por trabajo.
 - [x] Modo dueño: un escritor vencido cuyo intento sigue vigente puede renovar y completar tarde.
 - [x] Barrido automático de trabajos vencidos sin esperar al harness ni a que alguien los reclame; en modo dueño cierra solo al escritor que no dejó nada en GitHub.
-- [ ] Una pregunta al líder deja el trabajo en espera sin que su lease venza.
+- [x] Una pregunta al líder deja el trabajo en espera (`WAITING_INPUT`) sin lease que venza; la respuesta lo devuelve a la cola y despierta al trabajador. Cada reclamo lleva la regla de no detenerse a preguntar.
+- [ ] Despertar al líder cuando llega una pregunta (rutina de Claude).
 - [x] Trabajo en cola que nadie reclama tras sus avisos: en modo dueño pasa una vez a otro trabajador alcanzable; si no, o si tampoco lo toma, aviso al líder.
 - [x] `panter_mesh_delegate_auto` no cuenta como carga los trabajos vencidos y prefiere a los trabajadores que respondieron en las últimas 72 horas.
